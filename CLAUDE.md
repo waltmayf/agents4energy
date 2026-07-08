@@ -20,11 +20,17 @@ If you discover a bug:
 ### Docuemntation
 Be sure to keep the documentation in the `./docs` folder fresh. After you make a change, make sure the relevant docs are still correct, and create a new doc if it's something either a developer or user would want to know about.
 
+### Environment setup
+The sandbox has network/internet access (e.g. `pnpm install`, `npm registry`, AWS API calls all work) — don't assume otherwise. Run `pnpm install` from the repo root before running `pnpm deploy`, `pnpm test:e2e`, or any other command below — fresh checkouts and sandboxes don't have `node_modules` installed. If a command fails, verify with a direct check (e.g. `curl`, `pnpm --version`) before concluding the environment lacks a capability — don't assume a limitation without testing it first.
+
 ## Commands
 
 All commands run from the repo root unless noted.
 
 ```bash
+# Install dependencies (run this first)
+pnpm install
+
 # Full build + deploy (Amplify sandbox → AgentCore → Next.js export)
 pnpm deploy
 
