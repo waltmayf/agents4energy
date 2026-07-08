@@ -55,7 +55,7 @@ jobs:
       - uses: pnpm/action-setup@v4
         with:
           run_install: false
-          version: '24'
+          # version: '10.28.2'
       
       - uses: actions/setup-node@v5
         with:
