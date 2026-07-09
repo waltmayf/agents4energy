@@ -6,14 +6,14 @@
  * 2. Finds the first @agent-<slug> mention in the comment body
  * 3. SigV4-signs a createChatSession mutation against AppSync (IAM auth)
  * 4. Posts a comment with a live-chat link so the user can watch the agent work
- * 5. SigV4-signs a POST to the AgentCore runtime /invocations endpoint (sync mode),
- *    passing the session ID so AG-UI events flow to the chat session
+ * 5. SigV4-signs a POST to the AgentCore harness /harnesses/invoke endpoint,
+ *    passing the session ID as the harness's runtimeSessionId
  * 6. Posts the agent's final reply as a comment using GITHUB_TOKEN
  *
  * Required environment variables (set by setup-github-integration.ts):
  *   GITHUB_EVENT_PATH           — path to the event JSON file (built-in Actions env)
  *   GITHUB_TOKEN                — built-in token for posting comments
- *   INVOKE_AGENT_RUNTIME_ARN    — ARN of the AgUiHandler AgentCore runtime
+ *   AGENTCORE_HARNESS_ARN       — ARN of the AgentCore harness
  *   APPSYNC_ENDPOINT            — AppSync GraphQL endpoint URL
  *   APP_URL                     — Base URL of the deployed web app (optional)
  *   AWS_REGION                  — AWS region (default us-east-1)
@@ -44,7 +44,7 @@ interface GitHubEvent {
   repository: { full_name: string; owner: { login: string }; name: string };
 }
 
-interface RuntimeResponse {
+interface HarnessResponse {
   sessionId: string;
   response?: string;
   error?: string;
@@ -120,26 +120,67 @@ async function createChatSession(
   return id;
 }
 
-// ─── AgentCore runtime invocation via SigV4 ───────────────────────────────────
+// ─── AgentCore harness invocation via SigV4 ───────────────────────────────────
+// Decodes the AWS binary event stream response — same wire format as
+// web/amplify/functions/invoke-agent/handler.ts and scripts/invoke.ts.
 
-async function invokeRuntime(
-  runtimeArn: string,
+async function invokeHarness(
+  harnessArn: string,
   region: string,
   payload: unknown,
   credentials: { accessKeyId: string; secretAccessKey: string; sessionToken?: string },
-): Promise<RuntimeResponse> {
-  const encodedArn = encodeURIComponent(runtimeArn);
-  const url = `https://bedrock-agentcore.${region}.amazonaws.com/runtimes/${encodedArn}/invocations?qualifier=DEFAULT`;
+): Promise<HarnessResponse> {
+  const encodedArn = encodeURIComponent(harnessArn);
+  const url = `https://bedrock-agentcore.${region}.amazonaws.com/harnesses/invoke?harnessArn=${encodedArn}`;
   const body = JSON.stringify(payload);
 
   const res = await sigV4Post(url, 'bedrock-agentcore', region, credentials, body);
 
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`Runtime HTTP ${res.status}: ${text}`);
+    throw new Error(`Harness HTTP ${res.status}: ${text}`);
   }
 
-  return res.json() as Promise<RuntimeResponse>;
+  const sessionId = (payload as { sessionId: string }).sessionId;
+  const chunks: string[] = [];
+  let raw = Buffer.alloc(0);
+
+  for await (const chunk of res.body as unknown as AsyncIterable<Buffer>) {
+    raw = Buffer.concat([raw, chunk]);
+
+    while (raw.length >= 12) {
+      const totalLen = raw.readUInt32BE(0);
+      if (raw.length < totalLen) break;
+
+      const headersLen = raw.readUInt32BE(4);
+      let pos = 12;
+      const headersEnd = pos + headersLen;
+      const headers: Record<string, string> = {};
+
+      while (pos < headersEnd) {
+        const nameLen = raw[pos++];
+        const name = raw.subarray(pos, pos + nameLen).toString('utf8');
+        pos += nameLen;
+        pos++; // value type byte
+        const valLen = raw.readUInt16BE(pos); pos += 2;
+        headers[name] = raw.subarray(pos, pos + valLen).toString('utf8');
+        pos += valLen;
+      }
+
+      const payloadBytes = raw.subarray(12 + headersLen, totalLen - 4);
+      let framePayload: Record<string, unknown> | null = null;
+      try { framePayload = JSON.parse(payloadBytes.toString('utf8')); } catch { /* empty frame */ }
+
+      if (headers[':event-type'] === 'contentBlockDelta') {
+        const text = (framePayload?.delta as Record<string, unknown> | undefined)?.text as string | undefined;
+        if (text) chunks.push(text);
+      }
+
+      raw = raw.subarray(totalLen);
+    }
+  }
+
+  return { sessionId, response: chunks.join('') };
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
@@ -148,8 +189,8 @@ async function main() {
   const eventPath = process.env.GITHUB_EVENT_PATH;
   if (!eventPath) throw new Error('GITHUB_EVENT_PATH is not set');
 
-  const runtimeArn = process.env.INVOKE_AGENT_RUNTIME_ARN;
-  if (!runtimeArn) throw new Error('INVOKE_AGENT_RUNTIME_ARN is not set');
+  const harnessArn = process.env.AGENTCORE_HARNESS_ARN;
+  if (!harnessArn) throw new Error('AGENTCORE_HARNESS_ARN is not set');
 
   const appsyncEndpoint = process.env.APPSYNC_ENDPOINT ?? '';
   const appUrl = (process.env.APP_URL ?? '').replace(/\/$/, '');
@@ -238,7 +279,7 @@ If your response involves code changes, create a new branch off ${defaultBranch}
 
       // Update the status comment (or post a new one) with the live-chat link.
       const liveBody = appUrl
-        ? `🤖 Agent is working… [Watch live](${appUrl}/chat-handler?sessionId=${sessionId})`
+        ? `🤖 Agent is working… [Watch live](${appUrl}/chat?sessionId=${sessionId})`
         : `🤖 Agent is working… (session \`${sessionId}\`)`;
 
       if (statusCommentId) {
@@ -261,16 +302,17 @@ If your response involves code changes, create a new branch off ${defaultBranch}
     }
   }
 
-  const result = await invokeRuntime(
-    runtimeArn,
+  // Note: the managed AgentCore harness has no git/gh tooling (that was specific
+  // to the removed AG-UI handler container's workspace-cloning feature) — the
+  // harness only has its configured agentcore_browser/agentcore_code_interpreter
+  // tools, so githubToken/githubRepo/githubBranch are no longer forwarded.
+  const result = await invokeHarness(
+    harnessArn,
     awsRegion,
     {
       sessionId,
-      prompt,
-      sync: true,
-      githubToken,
-      githubRepo: event.repository.full_name,
-      githubBranch: defaultBranch,
+      runtimeSessionId: sessionId,
+      messages: [{ role: 'user', content: [{ text: prompt }] }],
     },
     credentials,
   );

@@ -2,15 +2,16 @@
 # (Claude's GitHub App cannot write directly to .github/workflows/.)
 #
 # Deletes the per-branch Amplify sandbox stack when its branch is deleted.
-# The hosting resources (S3 + CloudFront) are a nested stack inside the sandbox
-# root stack (see web/amplify/backend.ts's `backend.createStack('hosting')`),
-# so deleting the root stack tears down hosting too — no separate CDK destroy
-# or `ampx sandbox delete` needed. The hosting bucket has autoDeleteObjects
+# The hosting resources (S3 + CloudFront) AND the AgentCore harness/memory are
+# both nested stacks inside the sandbox root stack (see web/amplify/backend.ts's
+# `backend.createStack('hosting')` / `backend.createStack('agent')`), so
+# deleting the root stack tears down everything — no separate CDK destroy or
+# `ampx sandbox delete` needed. The hosting bucket has autoDeleteObjects
 # enabled, so CloudFormation empties it automatically before deletion.
 #
-# Does NOT touch AgentCore (harness, gateway, memory). Those are deployed once to
-# a single shared "default" target (agent/default/agentcore/aws-targets.json) —
-# not per branch — so branch deletion must never tear them down.
+# The harness/memory spec in backend.ts is unique-named per branch/sandbox, so
+# each branch owns its own harness + memory — deleting this stack deletes them
+# along with hosting. There is no shared "default" AgentCore project anymore.
 #
 # `delete` events only fire for workflow files present on the repo's default
 # branch, so this only takes effect once merged there.

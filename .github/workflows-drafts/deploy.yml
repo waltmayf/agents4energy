@@ -1,8 +1,7 @@
 # Single CDK deployment using ampx sandbox --once.
-# Everything (Cognito/AppSync/hosting/AgentCore harness+memory+gateway) is built
-# in-stack by web/amplify/backend.ts — there is no separate `agentcore deploy`,
-# `inject-agentcore-env.js`, or `extract-deployment-info.js` step anymore.
-# This mirrors scripts/build.sh exactly; see docs/architecture.md.
+# Everything (Cognito/AppSync/hosting/AgentCore harness+memory) is built
+# in-stack by web/amplify/backend.ts — there is no separate `agentcore deploy`
+# step anymore. This mirrors scripts/build.sh exactly; see docs/architecture.md.
 name: Deploy
 
 on:
@@ -92,6 +91,10 @@ jobs:
           path: web/amplify_outputs.json
           if-no-files-found: warn
           retention-days: 30
+
+      # ── 1c. Publish e2e config to SSM (lets `pnpm fetch:e2e-config` work) ────────
+      - name: Publish e2e config
+        run: node scripts/extract-deployment-info.js
 
       # ── 2. Build the Next.js frontend ─────────────────────────────────────────────
       # NEXT_BASE_PATH must match the S3 upload prefix below — see web/next.config.ts.

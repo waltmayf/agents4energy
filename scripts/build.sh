@@ -6,9 +6,9 @@ set -euo pipefail
 #   2. Build the Next.js frontend
 #   3. Upload to S3 and invalidate CloudFront cache
 #
-# The AgentCore harness/memory/gateway and the invokeHandler AppSync resolver
-# are built directly inside the agentStack CDK app (see web/amplify/backend.ts)
-# and their ARNs land in amplify_outputs.json via backend.addOutput({ custom: {...} })
+# The AgentCore harness + memory are declared as inline spec literals and built
+# directly inside the agentStack CDK app (see web/amplify/backend.ts) and their
+# ARNs land in amplify_outputs.json via backend.addOutput({ custom: {...} })
 # — no post-deploy wiring script is needed.
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -33,6 +33,9 @@ fi
 # ── 1. Deploy everything with a single ampx sandbox --once ───────────────────
 echo "Deploying Amplify sandbox (including hosting + agent stacks)…"
 (cd "$REPO_ROOT/web" && npx ampx sandbox --once --identifier "$BRANCH_SLUG")
+
+# ── 1b. Publish e2e config to SSM (lets `pnpm fetch:e2e-config` work later) ──
+node "$REPO_ROOT/scripts/extract-deployment-info.js" || true
 
 # ── 2. Build the Next.js frontend ─────────────────────────────────────────────
 # NEXT_BASE_PATH must match the S3 upload prefix below so the static export's

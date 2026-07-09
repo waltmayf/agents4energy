@@ -8,9 +8,9 @@ Each branch that runs `pnpm deploy` (`scripts/build.sh`) creates a single branch
 |---|---|---|
 | Amplify sandbox root stack | Cognito, AppSync, Lambda, DynamoDB, plus nested `hosting` stack (S3 + CloudFront) | `amplify-web-<slug>-sandbox-<hash>`, deployed with `--identifier <slug>` |
 
-Hosting (S3 + CloudFront) is a **nested stack** inside the sandbox root stack (`backend.createStack('hosting')` in `web/amplify/backend.ts`), not a separately deployed CDK app — deleting the root stack tears down hosting too. The hosting bucket has `autoDeleteObjects: true` (`web/amplify/constructs/hostingConstruct.ts`), so CloudFormation empties it automatically; no manual `aws s3 rm` is needed before deletion.
+Hosting (S3 + CloudFront) and the AgentCore harness/memory are both **nested stacks** inside the sandbox root stack (`backend.createStack('hosting')` / `backend.createStack('agent')` in `web/amplify/backend.ts`), not separately deployed CDK apps — deleting the root stack tears down everything, including the harness and memory. The hosting bucket has `autoDeleteObjects: true` (`web/amplify/constructs/hostingConstruct.ts`), so CloudFormation empties it automatically; no manual `aws s3 rm` is needed before deletion.
 
-The AgentCore harness, gateway, and memory (`agent/default/agentcore/`) are **not** branch-scoped — they deploy once to the single target named `default` in `aws-targets.json` and are shared by every branch. Deleting a branch must never tear these down.
+Since the harness/memory spec (`harnessSpecs`/`memorySpecs` in `backend.ts`) is unique-named per branch/sandbox (see `uniqueProjectName`), every branch gets its **own** harness + memory — there is no shared "default" AgentCore project anymore. Deleting a branch's stack deletes that branch's harness and memory along with it, same as hosting.
 
 ## Deleting a Branch's Stack
 

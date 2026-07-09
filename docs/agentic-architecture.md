@@ -2,27 +2,15 @@
 
 This document covers how the AI agent actually runs: the harness, memory, MCP tools, and the path from a user message to a streamed response.
 
-For cross-project deployment wiring (Amplify → AgentCore CDK) see [architecture.md](architecture.md).
+For cross-project deployment wiring see [architecture.md](architecture.md).
 
 ---
 
-## `agent/` Folder Structure
+## No file-based agent project
 
-The `agent/` directory contains two things that are easy to confuse:
+There is no `agent/` folder and no `agentcore.json`/`harness.json` project. The harness, its memory, and its execution role are declared as literal objects directly in [`web/amplify/backend.ts`](../web/amplify/backend.ts) (`harnessSpecs`, `memorySpecs`), and built into same-stack CDK resources by the `AgentCoreApplication` construct (`web/amplify/constructs/agentCoreApplication.ts`), which wraps the `AgentCoreMemory` / `AgentCoreHarnessRole` primitives from `@aws/agentcore-cdk`. There is no Docker build stage and no `agentcore deploy` step — `ampx sandbox` / `ampx pipeline-deploy` builds everything in one pass.
 
-| Path | What it is |
-|------|-----------|
-| `agent/default/` | The AgentCore CLI project root. `agentcore.json`/`harness.json` here are read at Amplify synth time — the CLI itself (`agentcore dev`, `agentcore validate`) remains usable for local iteration, but `agentcore deploy` is no longer part of the production pipeline. |
-| `agent/default/agentcore/agentcore.json` | Declarative source of truth — declares all AgentCore resources (memories, harnesses, gateways). |
-| `agent/default/app/MyHarness/` | Harness config. Referenced by the `harnesses[]` entry in `agentcore.json`. |
-| `agent/handler/` | Python source for the Strands agent container (FastAPI + uvicorn). **Not its own deploy unit** — it's referenced directly by `web/amplify/backend.ts` via `AgentCoreRuntimeWithBuild`. |
-
-`web/amplify/backend.ts` builds both resources declared in `agentcore.json`, directly inside the `agentStack` CDK stack:
-
-1. **`AgUiHandler` runtime** — `AgentCoreRuntimeWithBuild` builds `agent/handler/` into a Docker image, pushes to ECR, and creates the AgentCore runtime as a same-stack CDK resource. Used by the `/chat-handler` page via AppSync mutation → HTTP resolver.
-2. **`MyHarness` harness** (plus `MyHarnessMemory` and the MCP gateway) — built by the `AgentCoreApplication` construct (`web/amplify/constructs/agentCoreApplication.ts`) directly from `agentcore.json`/`harness.json`. Used by the original `/chat` page via the SigV4 streaming transport.
-
-Both share `MyHarnessMemory`, so both chat surfaces see the same conversation history. Because everything is same-stack, all ARNs are CDK tokens resolved at synth time — no post-deploy control-plane lookups are needed.
+There is exactly one chat surface (`/chat`) and one agent runtime (`MyHarness`, the AgentCore Harness). The AG-UI handler container that previously served `/chat-handler` has been removed.
 
 ---
 
@@ -38,7 +26,7 @@ bedrock-agentcore.{region}.amazonaws.com/harnesses/invoke
   │
   ▼
 MyHarness (AgentCore Harness)
-  ├── Model: OpenAI GPT-OSS-120B via Bedrock (chat completions format)
+  ├── Model: Claude Sonnet 4.6 via Bedrock (converse stream format)
   ├── Memory: MyHarnessMemory (semantic + episodic)
   ├── Built-in tools: Browser, Code Interpreter
   └── Remote MCP tools: injected per-request from agent config
@@ -48,14 +36,14 @@ MyHarness (AgentCore Harness)
 
 ## Harness
 
-The harness is configured in [`agent/default/app/MyHarness/harness.json`](../agent/default/app/MyHarness/harness.json).
+The harness is declared inline as the `harnessSpecs` literal in [`web/amplify/backend.ts`](../web/amplify/backend.ts).
 
 | Setting | Value |
 |---------|-------|
-| Model | `openai.gpt-oss-120b` via Bedrock, chat completions API format |
+| Model | `global.anthropic.claude-sonnet-4-6` via Bedrock, converse stream API format |
 | Memory | `MyHarnessMemory` (persistent, per-user + per-session) |
 | Built-in tools | `agentcore_browser`, `agentcore_code_interpreter` |
-| Auth | CUSTOM_JWT — requests carry a Cognito access token as a Bearer header; `discoveryUrl`/`allowedClients` are derived from this deployment's Cognito user pool at synth time (`web/amplify/backend.ts`), not hardcoded in `harness.json` |
+| Auth | CUSTOM_JWT — requests carry a Cognito access token as a Bearer header; `discoveryUrl`/`allowedClients` are derived from this deployment's Cognito user pool at synth time (`web/amplify/backend.ts`), not hardcoded anywhere |
 | Context truncation | Summarization (preserves 10 most-recent messages, summarizes the rest) |
 
 The harness runs as a hosted container on AgentCore infrastructure. Its ARN is exported via `backend.addOutput({ custom: { agentcore_harness_arn, ... } })` and read from `web/amplify_outputs.json` at build time by the frontend transport layer.
@@ -143,13 +131,7 @@ When the user selects an agent in the chat UI, the frontend reads the agent's `M
 }
 ```
 
-The harness calls the MCP server on demand using these exact credentials. This is the primary path for per-agent tool configuration.
-
-### Gateway registration (optional)
-
-MCP servers can also be registered as targets on the AgentCore Gateway. Registered targets benefit from gateway-level auth handling (workload identity, token exchange) rather than relying on raw header forwarding.
-
-Registration happens via the `registerMcpTarget` GraphQL mutation → Amplify Lambda → `CreateGatewayTarget` API. The returned `gatewayTargetId` is saved on the `McpServer` record.
+The harness calls the MCP server on demand using these exact credentials. This is the only path for MCP tool configuration — there is no AgentCore Gateway in this deployment; MCP servers connect directly.
 
 ### Validating connectivity
 
@@ -182,7 +164,6 @@ Exported via `backend.addOutput({ custom: {...} })` in `web/amplify/backend.ts` 
 |----------|-----|
 | Harness | `agentcore_harness_arn` |
 | Memory | `agentcore_memory_arn` / `agentcore_memory_id` |
-| MCP Gateway | `agentcore_gateway_arn` / `agentcore_gateway_id` / `agentcore_gateway_endpoint` |
 
 > **Note**: The harness ARN uses the `harness/` resource type, not `runtime/`. These are different resources — the harness ARN is required by the `/harnesses/invoke` endpoint.
 
@@ -215,7 +196,7 @@ AgentCore Harness (MyHarness)
   3. Build model request (history + system prompt + tools)
        │
        ▼
-Bedrock: openai.gpt-oss-120b
+Bedrock: global.anthropic.claude-sonnet-4-6
   Streaming inference
        │  tool_use blocks
        ▼

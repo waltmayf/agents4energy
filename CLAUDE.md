@@ -50,12 +50,6 @@ pnpm test:e2e:ui                     # interactive UI mode
 
 # Invoke the deployed agent from the CLI
 npx tsx scripts/invoke.ts "Your prompt here"
-
-# AgentCore CLI (from agent/default/)
-agentcore deploy     # deploy harness + memory + gateway
-agentcore status     # show deployment status
-agentcore validate   # validate agentcore.json before deploying
-agentcore dev        # run agent locally with hot-reload
 ```
 
 Trust the cert once on macOS (from `web/`):
@@ -70,34 +64,30 @@ sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keyc
 | `web/` | Next.js 16 frontend (Amplify Gen 2 backend) |
 | `web/amplify/` | Amplify backend — auth, data schema, Lambda functions |
 | `web/amplify/data/schemas/` | Modular AppSync schemas: `chat`, `agentConfig`, `agentcoreMemory` |
-| `web/amplify/functions/` | Lambda handlers: `invoke-agent`, `list-mcp-tools`, `list-session-messages`, `register-mcp-target` |
+| `web/amplify/functions/` | Lambda handlers: `invoke-agent`, `list-mcp-tools`, `list-session-messages` |
 | `web/app/(with-auth)/` | Authenticated route group — `chat/` and `agents/` pages |
 | `web/lib/` | Transport layer: `agentcore-transport.ts`, `aws-event-stream.ts`, `mcp-auth.ts` |
 | `web/e2e/` | Playwright tests |
-| `agent/default/` | AgentCore project — harness, memory, gateway config |
-| `agent/default/agentcore/agentcore.json` | Declarative AgentCore resource definitions (source of truth) |
 | `packages/shared-types/` | Types shared between `web` and other workspaces |
 | `scripts/` | Dev utilities: `invoke.ts`, `extract-deployment-info.js`, `create-mcp-server.ts` |
 
 ## Architecture
 
-The system has two independently deployed halves that share Cognito auth:
+There is no separate `agent/` project or `agentcore` CLI project. The AgentCore Harness, its Memory, and its execution role are declared as inline object literals (`harnessSpecs`, `memorySpecs`) directly in `web/amplify/backend.ts` and built into same-stack CDK resources by the `AgentCoreApplication` construct (`web/amplify/constructs/agentCoreApplication.ts`), which wraps `@aws/agentcore-cdk`'s `AgentCoreMemory`/`AgentCoreHarnessRole` primitives. There is no Docker build stage.
 
-**AgentCore half** (`agent/default/agentcore/agentcore.json`): A Bedrock AgentCore Harness (`MyHarness`) backed by `openai.gpt-oss-120b`. Includes persistent memory (`MyHarnessMemory` with SEMANTIC, USER_PREFERENCE, SUMMARIZATION, and EPISODIC strategies), a MCP Gateway (`default-gateway`) that validates Cognito JWTs, and built-in `agentcore_browser` + `agentcore_code_interpreter` tools.
+**AgentCore Harness** (`MyHarness`, in `web/amplify/backend.ts`): backed by `global.anthropic.claude-sonnet-4-6`. Includes persistent memory (`MyHarnessMemory` with SEMANTIC, USER_PREFERENCE, SUMMARIZATION, and EPISODIC strategies) and built-in `agentcore_browser` + `agentcore_code_interpreter` tools. No MCP Gateway — MCP servers connect directly via per-request `remote_mcp` tool injection.
 
-**Amplify half** (`web/amplify/backend.ts`): DynamoDB-backed AppSync API (Amplify Gen 2) managing `Agent`, `McpServer`, `ChatSession`, and `ChatMessage` records. Four Lambda functions handle: agent invocation via SigV4, MCP tool discovery, session message restoration from memory, and gateway target registration.
+**Amplify half** (`web/amplify/backend.ts`): DynamoDB-backed AppSync API (Amplify Gen 2) managing `Agent`, `McpServer`, `ChatSession`, and `ChatMessage` records. Lambda functions handle: agent invocation via SigV4 (`invoke-agent`), MCP tool discovery (`list-mcp-tools`), and session message restoration from memory (`list-session-messages`).
 
 **Request path**: Browser → `HarnessChatTransport` (`web/lib/agentcore-transport.ts`) → `POST /harnesses/invoke` (Cognito JWT auth) → Harness → Bedrock model → binary AWS event stream → `aws-event-stream.ts` decoder → React streaming UI via AI SDK `useChat`.
 
 **Agent config is runtime-injectable**: The selected `Agent` record's `systemPromptText`, `modelId`, and linked `McpServer` URLs are injected into every harness invoke. Changing an agent's config takes effect immediately — no redeployment.
 
-**Deployment wiring**: After `agentcore deploy`, `scripts/extract-deployment-info.js` reads `agent/default/agentcore/.cli/deployed-state.json` and CloudFormation outputs, then writes `web/deployment-info.json` which the frontend imports at build time for ARNs.
+**Deployment wiring**: `ampx sandbox`/`ampx pipeline-deploy` builds the harness/memory in-stack; their ARNs land directly in `amplify_outputs.json` via `backend.addOutput({ custom: {...} })` — no post-deploy control-plane resolution or wiring script needed. `scripts/extract-deployment-info.js` only publishes the e2e test config to SSM.
 
 See [docs/agentic-architecture.md](docs/agentic-architecture.md) for the full data flow diagram.
 
 ## Key Constraints
 
-- `agentcore.json` is the source of truth for AgentCore resources — do not edit CDK output files directly. Renaming a resource destroys and recreates it.
-- `web/deployment-info.json` is populated by the deploy script; do not hand-edit ARNs there.
-- Amplify hardcodes the Memory ARN and Gateway ID in `web/amplify/backend.ts` — update those constants after any AgentCore redeploy that changes those resources.
+- `web/amplify/backend.ts`'s `harnessSpecs`/`memorySpecs` literals are the source of truth for the AgentCore Harness/Memory — there are no `agentcore.json`/`harness.json` files. Renaming `name` on either destroys and recreates the physical resource.
 - E2E tests run serially (workers=1) because tests share session state stored in `localStorage`.

@@ -14,7 +14,7 @@ npx tsx scripts/invoke.ts "Your prompt here"
 
 - Reads test credentials from `scripts/.env.local` (`TEST_USER_EMAIL` / `TEST_USER_PASSWORD`)
 - Authenticates against the Cognito user pool via `USER_PASSWORD_AUTH`
-- Reads the runtime ARN from `web/deployment-info.json`
+- Reads the harness ARN from `web/amplify_outputs.json` (`custom.agentcore_harness_arn`)
 - Streams the response to stdout, printing text deltas as they arrive
 
 `scripts/.env.local` is covered by the root `.gitignore` and must never be committed.

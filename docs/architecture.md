@@ -6,9 +6,9 @@ This monorepo deploys everything from a single `npx ampx sandbox --once` command
 
 - **`web/`** — Next.js frontend backed by Amplify Gen 2 (Cognito auth, AppSync data)
 - **`hostingStack`** — S3 + CloudFront static website hosting (defined in `backend.ts`)
-- **`agentStack`** — Bedrock AgentCore Runtime (builds + deploys the Python handler from `agent/handler/`), plus the AgentCore Harness, Memory, and Gateway (built directly from `agent/default/agentcore/agentcore.json` via the `AgentCoreApplication` construct)
+- **`agentStack`** — the AgentCore Harness + Memory, declared as an inline spec literal in `backend.ts` and built by the `AgentCoreApplication` construct
 
-All of this is deployed together with a single `npx ampx sandbox --once --identifier <branch>` command — there is no separate `agentcore deploy` step in the production pipeline. `amplify_outputs.json` is written by Amplify and includes all ARNs and endpoints needed for the frontend. The `agentcore` CLI (`agentcore dev`, `agentcore validate`, etc.) remains usable for local iteration against the same `agentcore.json`/`harness.json` files — it just isn't part of the deploy path anymore.
+All of this is deployed together with a single `npx ampx sandbox --once --identifier <branch>` command. There is no `agentcore` CLI project, no `agentcore.json`/`harness.json` files, and no Docker build stage — the harness's model, tools, memory, and execution role are all declared as plain object literals in `backend.ts` and turned into CDK resources by `@aws/agentcore-cdk`'s `AgentCoreMemory`/`AgentCoreHarnessRole` primitives. `amplify_outputs.json` is written by Amplify and includes all ARNs and endpoints needed for the frontend.
 
 ### Per-Branch Routing (`basePath`)
 
@@ -20,24 +20,19 @@ Every branch/sandbox deploys to its own S3 prefix and is served at `https://<dom
 /
 ├── web/                        # Next.js + Amplify Gen 2
 │   ├── amplify/
-│   │   ├── backend.ts          # Amplify backend — auth, data, hostingStack, agentStack
+│   │   ├── backend.ts          # Amplify backend — auth, data, hostingStack, agentStack,
+│   │   │                       #   inline harness/memory spec literals
 │   │   ├── auth/resource.ts    # Cognito User Pool + Identity Pool
 │   │   ├── data/resource.ts    # AppSync GraphQL API
 │   │   └── constructs/
-│   │       ├── hostingConstruct.ts          # S3 + CloudFront hosting
-│   │       ├── agentCoreRuntimeWithBuild.ts # Builds Docker image + deploys CfnRuntime
-│   │       └── agentCoreApplication.ts      # Harness + Memory + Gateway from agentcore.json
+│   │       ├── hostingConstruct.ts     # S3 + CloudFront hosting
+│   │       └── agentCoreApplication.ts # Harness + Memory from the inline spec in backend.ts
 │   └── amplify_outputs.json    # Written by Amplify after each deploy (DO NOT EDIT)
-│
-├── agent/
-│   ├── default/                # AgentCore CLI project root (agentcore.json, harness.json)
-│   └── handler/                # Python handler (Dockerfile + agent.py)
-│       └── Dockerfile
 │
 ├── scripts/
 │   ├── build.sh                # Single deploy: ampx sandbox → build → S3 upload
 │   ├── deploy-web.sh           # Re-deploy just the frontend (reads amplify_outputs.json)
-│   └── set-aws-targets.sh      # Populates aws-targets.json from current AWS identity
+│   └── extract-deployment-info.js  # Publishes e2e config to SSM after each deploy
 └── package.json                # Root deploy script
 ```
 
@@ -48,17 +43,13 @@ Every branch/sandbox deploys to its own S3 prefix and is served at `https://<dom
 ```
 pnpm run deploy
   │
-  ├─ predeploy: scripts/set-aws-targets.sh
-  │
   └─ scripts/build.sh
        │
        ├─ npx ampx sandbox --once --identifier <branch>  (from web/)
        │    ├─ Deploys Cognito, AppSync, Lambda functions
        │    ├─ hostingStack: S3 bucket + CloudFront distribution
        │    ├─ agentStack:
-       │    │    ├─ builds agent/handler/ Docker image → ECR, creates Bedrock AgentCore CfnRuntime
-       │    │    ├─ AgentCoreApplication: Harness + Memory + Gateway from agentcore.json
-       │    │    └─ escape-hatches Mutation.invokeHandler to an HTTP resolver targeting the runtime
+       │    │    └─ AgentCoreApplication: Harness + Memory from the inline spec in backend.ts
        │    └─ writes web/amplify_outputs.json (all ARNs + endpoints)
        │
        ├─ pnpm --filter web build  (Next.js static export)
@@ -83,12 +74,9 @@ Currently exported under `custom`:
 | `hosting_bucket_name` | S3 bucket for static website files |
 | `hosting_distribution_id` | CloudFront distribution ID (for cache invalidation) |
 | `hosting_domain` | CloudFront domain name (e.g. `abc123.cloudfront.net`) |
-| `agui_runtime_arn` | Bedrock AgentCore Runtime ARN for the AG-UI handler |
-| `agui_runtime_role_arn` | Execution role ARN for the AgentCore runtime |
 | `agentcore_region` | Region the AgentCore resources are deployed in |
 | `agentcore_memory_id` / `agentcore_memory_arn` | AgentCore Memory identifiers (`MyHarnessMemory`) |
 | `agentcore_harness_arn` / `agentcore_harness_role_arn` | AgentCore Harness (`MyHarness`) identifiers |
-| `agentcore_gateway_id` / `agentcore_gateway_arn` / `agentcore_gateway_endpoint` | AgentCore Gateway identifiers |
 | `appsync_api_id` | AppSync GraphQL API ID |
 
 ### Sub-Stacks in `backend.ts`
@@ -98,15 +86,14 @@ const hostingStack = backend.createStack('hosting');
 const hosting = new HostingConstruct(hostingStack, 'Hosting');
 
 const agentStack = backend.createStack('agent');
-const agUiHandlerRuntime = new AgentCoreRuntimeWithBuild(agentStack, 'AgUiHandler', {
-  protocolConfiguration: 'AGUI',
-  imageAssetDirectory: path.resolve(__dirname, '../../../agent/handler'),
-  cognitoDiscoveryUrl: '...',   // Cognito OIDC discovery URL
-  allowedClients: [...],         // Cognito User Pool Client IDs
+const agentCoreApp = new AgentCoreApplication(agentStack, 'AgentCoreApplication', {
+  projectName: uniqueProjectName,
+  memories: memorySpecs,        // inline literal, declared at the top of backend.ts
+  harnesses: harnessSpecsWithAuth, // inline literal + Cognito auth re-derived at synth time
 });
 ```
 
-The `AgentCoreRuntimeWithBuild` construct builds the Docker image from `agent/handler/` (ARM64 cross-compile), pushes it to ECR, and creates a `CfnRuntime` with Cognito JWT authorization. The `HostingConstruct` creates an S3 bucket + CloudFront distribution with SPA routing.
+`AgentCoreApplication` (`web/amplify/constructs/agentCoreApplication.ts`) wraps `@aws/agentcore-cdk`'s `AgentCoreMemory` and `AgentCoreHarnessRole` primitives — no Docker build, no ECR, no `agentcore` CLI project. The `HostingConstruct` creates an S3 bucket + CloudFront distribution with SPA routing.
 
 ## Adding New Cross-Project Exports
 

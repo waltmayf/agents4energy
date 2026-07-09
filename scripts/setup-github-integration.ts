@@ -9,7 +9,7 @@
  *
  * What it does:
  *   1. Lists your GitHub repos and lets you pick one (or use --repo flag)
- *   2. Reads AppSync + runtime info from web/amplify_outputs.json
+ *   2. Reads AppSync + harness info from web/amplify_outputs.json
  *   3. Creates (or reuses) a GitHub OIDC IAM role with permission to call
  *      AppSync createChatSession + invokeAgent, and sets AWS_AGENT_ROLE_ARN
  *      as a GitHub Actions secret on the target repo
@@ -97,6 +97,7 @@ const awsRegion: string = amplifyOutputs.custom?.agentcore_region ?? 'us-east-1'
 const appsyncEndpoint: string = amplifyOutputs.data?.url ?? '';
 const appsyncApiId: string = amplifyOutputs.custom?.appsync_api_id ?? '';
 const appsyncRegion: string = amplifyOutputs.data?.aws_region ?? awsRegion;
+const harnessArn: string = amplifyOutputs.custom?.agentcore_harness_arn ?? '';
 
 console.log(`AWS region: ${awsRegion}`);
 if (appsyncEndpoint) console.log(`AppSync endpoint: ${appsyncEndpoint}`);
@@ -222,7 +223,9 @@ if (roleExists) {
   console.log(`  ARN: ${roleArn}`);
 }
 
-// Inline policy: AppSync field-level permissions for createChatSession + invokeAgent
+// Inline policy: AppSync field-level permissions for createChatSession + invokeAgent,
+// plus direct InvokeHarness (scripts/github-agent-invoke.ts SigV4-signs the harness
+// invocation directly rather than going through the invokeAgent Lambda).
 const appsyncStatements = appsyncApiId ? [{
   Sid: 'AppSyncMutations',
   Effect: 'Allow',
@@ -233,9 +236,16 @@ const appsyncStatements = appsyncApiId ? [{
   ],
 }] : [];
 
+const harnessStatements = harnessArn ? [{
+  Sid: 'HarnessInvoke',
+  Effect: 'Allow',
+  Action: 'bedrock-agentcore:InvokeHarness',
+  Resource: [harnessArn],
+}] : [];
+
 const agentInvokePolicy = JSON.stringify({
   Version: '2012-10-17',
-  Statement: [...appsyncStatements],
+  Statement: [...appsyncStatements, ...harnessStatements],
 });
 
 aws(`iam put-role-policy --role-name ${roleName} --policy-name AgentInvoke --policy-document '${agentInvokePolicy}'`);
@@ -255,6 +265,10 @@ console.log(`  ✓ AWS_AGENT_ROLE_ARN (secret) = ${roleArn}`);
 if (appsyncEndpoint) {
   gh('variable', 'set', 'APPSYNC_ENDPOINT', '--repo', selectedRepo, '--body', appsyncEndpoint);
   console.log(`  ✓ APPSYNC_ENDPOINT (variable) = ${appsyncEndpoint}`);
+}
+if (harnessArn) {
+  gh('variable', 'set', 'AGENTCORE_HARNESS_ARN', '--repo', selectedRepo, '--body', harnessArn);
+  console.log(`  ✓ AGENTCORE_HARNESS_ARN (variable) = ${harnessArn}`);
 }
 if (appUrl) {
   gh('variable', 'set', 'APP_URL', '--repo', selectedRepo, '--body', appUrl);

@@ -1,5 +1,4 @@
 import { a } from '@aws-amplify/backend';
-import { registerMcpTarget } from '../../functions/register-mcp-target/resource';
 import { listMcpTools } from '../../functions/list-mcp-tools/resource';
 import { invokeAgent } from '../../functions/invoke-agent/resource';
 
@@ -57,9 +56,6 @@ export const agentConfigSchema = a.schema({
     registryId: a.string(),
     registryRecordId: a.string(),
     signRequestsWithAwsCreds: a.boolean().default(false),
-    // ID of the registered gateway target for this MCP server (set after CreateGatewayTarget).
-    // Null until the user registers the server with the gateway.
-    gatewayTargetId: a.string(),
     // OAuth2 client ID for servers that require PKCE auth.
     // When set, the UI shows an "Authenticate" button that runs the PKCE flow and
     // saves the resulting token in McpServerCredential (owner-scoped, per-user).
@@ -129,24 +125,6 @@ export const agentConfigSchema = a.schema({
     })
     .returns(a.ref('ListMcpToolsResult'))
     .handler(a.handler.function(listMcpTools))
-    .authorization((allow) => [allow.authenticated()]),
-
-  // Return type for the registerMcpTarget mutation
-  RegisterMcpTargetResult: a.customType({
-    gatewayTargetId: a.string().required(),
-  }),
-
-  // Mutation: registers an MCP server URL as a gateway target and returns its target ID.
-  // The caller is responsible for saving the returned gatewayTargetId to the McpServer record.
-  registerMcpTarget: a
-    .mutation()
-    .arguments({
-      name: a.string().required(),
-      url: a.string().required(),
-      description: a.string(),
-    })
-    .returns(a.ref('RegisterMcpTargetResult'))
-    .handler(a.handler.function(registerMcpTarget))
     .authorization((allow) => [allow.authenticated()]),
 
   // Result type for invokeAgent mutation

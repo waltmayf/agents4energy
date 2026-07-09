@@ -1,35 +1,25 @@
 import { Construct } from 'constructs';
 import { aws_bedrockagentcore as bedrock_agent_core, aws_iam as iam } from 'aws-cdk-lib';
 import { createRequire } from 'module';
-import { fileURLToPath } from 'url';
-import { resolve, dirname } from 'path';
 import type {
   AgentCoreMemory as AgentCoreMemoryType,
   AgentCoreHarnessRole as AgentCoreHarnessRoleType,
-  AgentCoreMcp as AgentCoreMcpType,
   HarnessRoleConfig,
   Memory,
-  AgentCoreMcpSpec,
 } from '@aws/agentcore-cdk';
 
 // @aws/agentcore-cdk (alpha) only declares a "require" condition in its
 // package.json exports map, so a static ESM `import` of its value bindings
 // fails to resolve under Amplify's ESM bundling. Load it via createRequire,
 // keeping the type imports above (which the compiler elides) for typing.
+// Only the Memory/HarnessRole primitives are used here — neither touches the
+// `agentcore` CLI's file-based project lookup (findConfigRoot), unlike the
+// AgentCoreMcp/Gateway construct this file used to also wire up.
 const require = createRequire(import.meta.url);
 const {
   AgentCoreMemory,
   AgentCoreHarnessRole,
-  AgentCoreMcp,
-  setSessionProjectRoot,
 }: typeof import('@aws/agentcore-cdk') = require('@aws/agentcore-cdk');
-
-// AgentCoreMcp's constructor calls the CLI's findConfigRoot(), which walks up
-// from process.cwd() looking for an agentcore/ directory. Under `ampx sandbox`
-// cwd is web/, not the repo root, so it never finds agent/default/agentcore —
-// point it there explicitly (mirrors what `agentcore` CLI commands do after `init`).
-const __dirname = dirname(fileURLToPath(import.meta.url));
-setSessionProjectRoot(resolve(__dirname, '../../../agent/default'));
 
 export interface HarnessSpecInput {
   name: string;
@@ -62,27 +52,22 @@ export interface HarnessSpecInput {
 }
 
 export interface AgentCoreApplicationProps {
-  /** Project name prefix used for physical resource names (matches agentcore.json `name`). */
+  /** Project name prefix used for physical resource names. */
   projectName: string;
-  /** Memory resources to create (from agentcore.json `memories`). */
+  /** Memory resources to create. */
   memories: Memory[];
-  /** Harness specs read from agent/default/app/<Harness>/harness.json. */
+  /** Inline harness specs — see `backend.ts`'s `harnessSpecs` literal. */
   harnesses: HarnessSpecInput[];
-  /** Gateway/MCP spec (from agentcore.json `agentCoreGateways`), if any gateways are configured. */
-  mcpSpec?: AgentCoreMcpSpec;
 }
 
 /**
- * Builds the AgentCore harness/memory/gateway resources directly inside the Amplify
- * CDK app so their ARNs are same-stack tokens instead of values discovered post-deploy
- * via the `agentcore` CLI's control-plane API. Mirrors what `agentcore deploy` builds
- * from `agentcore.json`/`harness.json`, minus the `AgUiHandler` runtime (owned by
- * `AgentCoreRuntimeWithBuild` to avoid a duplicate CfnRuntime).
+ * Builds the AgentCore harness + memory resources directly inside the Amplify
+ * CDK app so their ARNs are same-stack tokens instead of values discovered
+ * post-deploy via the `agentcore` CLI's control-plane API.
  */
 export class AgentCoreApplication extends Construct {
   public readonly memories: Map<string, AgentCoreMemoryType> = new Map();
   public readonly harnesses: Map<string, { harness: bedrock_agent_core.CfnHarness; role: AgentCoreHarnessRoleType }> = new Map();
-  public readonly mcp?: AgentCoreMcpType;
 
   constructor(scope: Construct, id: string, props: AgentCoreApplicationProps) {
     super(scope, id);
@@ -212,16 +197,9 @@ export class AgentCoreApplication extends Construct {
 
       this.harnesses.set(harnessSpec.name, { harness, role });
     }
-
-    if (props.mcpSpec?.agentCoreGateways?.length) {
-      this.mcp = new AgentCoreMcp(this, 'Mcp', {
-        projectName,
-        mcpSpec: props.mcpSpec,
-      });
-    }
   }
 
-  /** ARN of a harness by its logical name (from harness.json's directory name), e.g. "MyHarness". */
+  /** ARN of a harness by its logical name, e.g. "MyHarness". */
   public harnessArn(name: string): string {
     const entry = this.harnesses.get(name);
     if (!entry) throw new Error(`Harness "${name}" not found in AgentCoreApplication`);
@@ -245,23 +223,5 @@ export class AgentCoreApplication extends Construct {
     const memory = this.memories.get(name);
     if (!memory) throw new Error(`Memory "${name}" not found in AgentCoreApplication`);
     return memory.memoryId;
-  }
-
-  public gatewayArn(name: string): string {
-    const gateway = this.mcp?.gateways.get(name);
-    if (!gateway) throw new Error(`Gateway "${name}" not found in AgentCoreApplication`);
-    return gateway.attrGatewayArn;
-  }
-
-  public gatewayId(name: string): string {
-    const gateway = this.mcp?.gateways.get(name);
-    if (!gateway) throw new Error(`Gateway "${name}" not found in AgentCoreApplication`);
-    return gateway.attrGatewayIdentifier;
-  }
-
-  public gatewayEndpoint(name: string): string {
-    const gateway = this.mcp?.gateways.get(name);
-    if (!gateway) throw new Error(`Gateway "${name}" not found in AgentCoreApplication`);
-    return gateway.attrGatewayUrl;
   }
 }
