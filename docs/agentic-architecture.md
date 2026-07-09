@@ -12,15 +12,15 @@ The `agent/` directory contains two things that are easy to confuse:
 
 | Path | What it is |
 |------|-----------|
-| `agent/default/` | The AgentCore CLI project root. `agentcore.json`/`harness.json` here are read at Amplify synth time — the CLI itself (`agentcore dev`, `agentcore validate`) remains usable for local iteration, but `agentcore deploy` is no longer part of the production pipeline. |
-| `agent/default/agentcore/agentcore.json` | Declarative source of truth — declares all AgentCore resources (memories, harnesses, gateways). |
-| `agent/default/app/MyHarness/` | Harness config. Referenced by the `harnesses[]` entry in `agentcore.json`. |
+| `agent/default/` | The AgentCore CLI project root. `agentcore.json` here is read at Amplify synth time for memories/gateways — the CLI itself (`agentcore dev`, `agentcore validate`) remains usable for local iteration, but `agentcore deploy` is no longer part of the production pipeline. |
+| `agent/default/agentcore/agentcore.json` | Declarative source of truth for memories and gateways. Harness config is **not** read from here for the Amplify deploy path — see below. |
+| `agent/default/app/MyHarness/system-prompt.md` | The harness's system prompt text, read from disk by `backend.ts`. Everything else about the harness (model, tools, memory link, truncation) is inlined as literal `CfnHarness`-shaped objects directly in `web/amplify/backend.ts` — there is no `harness.json`. |
 | `agent/handler/` | Python source for the Strands agent container (FastAPI + uvicorn). **Not its own deploy unit** — it's referenced directly by `web/amplify/backend.ts` via `AgentCoreRuntimeWithBuild`. |
 
-`web/amplify/backend.ts` builds both resources declared in `agentcore.json`, directly inside the `agentStack` CDK stack:
+`web/amplify/backend.ts` builds both resources directly inside the `agentStack` CDK stack:
 
 1. **`AgUiHandler` runtime** — `AgentCoreRuntimeWithBuild` builds `agent/handler/` into a Docker image, pushes to ECR, and creates the AgentCore runtime as a same-stack CDK resource. Used by the `/chat-handler` page via AppSync mutation → HTTP resolver.
-2. **`MyHarness` harness** (plus `MyHarnessMemory` and the MCP gateway) — built by the `AgentCoreApplication` construct (`web/amplify/constructs/agentCoreApplication.ts`) directly from `agentcore.json`/`harness.json`. Used by the original `/chat` page via the SigV4 streaming transport.
+2. **`MyHarness` harness** (plus `MyHarnessMemory` and the MCP gateway) — built by the `AgentCoreApplication` construct (`web/amplify/constructs/agentCoreApplication.ts`) from a `HarnessSpec` inlined literally in `backend.ts` (memory/gateway config still comes from `agentcore.json`). Used by the original `/chat` page via the SigV4 streaming transport.
 
 Both share `MyHarnessMemory`, so both chat surfaces see the same conversation history. Because everything is same-stack, all ARNs are CDK tokens resolved at synth time — no post-deploy control-plane lookups are needed.
 
@@ -48,14 +48,14 @@ MyHarness (AgentCore Harness)
 
 ## Harness
 
-The harness is configured in [`agent/default/app/MyHarness/harness.json`](../agent/default/app/MyHarness/harness.json).
+The harness is configured directly in [`web/amplify/backend.ts`](../web/amplify/backend.ts) as a literal `HarnessSpec` (see `web/amplify/constructs/agentCoreApplication.ts`) — its system prompt text is read from [`agent/default/app/MyHarness/system-prompt.md`](../agent/default/app/MyHarness/system-prompt.md), everything else is inlined.
 
 | Setting | Value |
 |---------|-------|
 | Model | `openai.gpt-oss-120b` via Bedrock, chat completions API format |
 | Memory | `MyHarnessMemory` (persistent, per-user + per-session) |
 | Built-in tools | `agentcore_browser`, `agentcore_code_interpreter` |
-| Auth | CUSTOM_JWT — requests carry a Cognito access token as a Bearer header; `discoveryUrl`/`allowedClients` are derived from this deployment's Cognito user pool at synth time (`web/amplify/backend.ts`), not hardcoded in `harness.json` |
+| Auth | CUSTOM_JWT — requests carry a Cognito access token as a Bearer header; `discoveryUrl`/`allowedClients` are derived from this deployment's Cognito user pool at synth time (`web/amplify/backend.ts`) |
 | Context truncation | Summarization (preserves 10 most-recent messages, summarizes the rest) |
 
 The harness runs as a hosted container on AgentCore infrastructure. Its ARN is exported via `backend.addOutput({ custom: { agentcore_harness_arn, ... } })` and read from `web/amplify_outputs.json` at build time by the frontend transport layer.
@@ -68,7 +68,7 @@ The harness runs as a hosted container on AgentCore infrastructure. Its ARN is e
 
 The frontend calls `fetchAuthSession()` from `aws-amplify/auth` and sends the Cognito access token as an `Authorization: Bearer <token>` header on every harness invoke request (see `bearerFetch()` in `web/lib/agentcore-transport.ts`). The access token is required rather than the ID token because the CUSTOM_JWT authorizer's `allowedClients` check matches against the token's `client_id` claim, which only access tokens carry — ID tokens carry `aud` instead.
 
-The harness uses CUSTOM_JWT auth — it validates the token against the Cognito user pool's discovery URL and checks the client ID against `allowedClients`. `web/amplify/backend.ts` derives both values from `backend.auth.resources.userPool`/`userPoolClient` at synth time (the same pattern `AgentCoreRuntimeWithBuild` uses for the AG-UI runtime), so the harness always authorizes against the Cognito user pool it's actually deployed alongside rather than a value frozen in `harness.json` from a prior deployment.
+The harness uses CUSTOM_JWT auth — it validates the token against the Cognito user pool's discovery URL and checks the client ID against `allowedClients`. `web/amplify/backend.ts` derives both values from `backend.auth.resources.userPool`/`userPoolClient` at synth time (the same pattern `AgentCoreRuntimeWithBuild` uses for the AG-UI runtime), so the harness always authorizes against the Cognito user pool it's actually deployed alongside.
 
 ### 2. Request construction
 

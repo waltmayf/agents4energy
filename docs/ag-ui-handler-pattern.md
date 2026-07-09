@@ -115,7 +115,7 @@ pnpm run deploy
   2. pnpm build (web)      → Next.js export
 ```
 
-Everything AG-UI-related is created in one `ampx sandbox --once` pass — there is no separate `agentcore deploy` step or post-deploy wiring script for this runtime (unlike the harness/memory/gateway resources, which are also synthesized in the same pass from `agentcore.json`/`harness.json`, see `AgentCoreApplication` in `backend.ts`).
+Everything AG-UI-related is created in one `ampx sandbox --once` pass — there is no separate `agentcore deploy` step or post-deploy wiring script for this runtime (unlike the memory/gateway resources from `agentcore.json` and the harness spec inlined directly in `backend.ts`, which are also synthesized in the same pass — see `AgentCoreApplication` in `backend.ts`).
 
 ### Required IAM Permissions
 

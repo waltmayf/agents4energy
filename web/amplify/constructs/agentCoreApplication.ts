@@ -31,34 +31,40 @@ const {
 const __dirname = dirname(fileURLToPath(import.meta.url));
 setSessionProjectRoot(resolve(__dirname, '../../../agent/default'));
 
-export interface HarnessSpecInput {
+/**
+ * Harness spec whose `model`/`tools`/`memory`/`truncation`/`authorizerConfiguration`
+ * fields are passed straight through to `CfnHarnessProps` with no translation —
+ * callers construct these using the same nested property shapes CloudFormation
+ * expects (`bedrock_agent_core.CfnHarness.*Property`). The handful of fields below
+ * that aren't literal `CfnHarnessProps` sub-shapes exist only because they can't
+ * be: `memoryName` refers to a memory created elsewhere in this construct (its
+ * ARN is a CDK token that doesn't exist until that construct is created), and
+ * `apiFormat` is IAM-role-only metadata with no CfnHarness counterpart.
+ */
+export interface HarnessSpec {
+  /** Logical name — the physical CfnHarness name becomes `${projectName}_${name}`. */
   name: string;
-  model: {
-    provider: 'bedrock' | 'open_ai' | 'gemini';
-    modelId: string;
-    apiKeyArn?: string;
-    apiFormat?: 'converse_stream' | 'responses' | 'chat_completions';
-    temperature?: number;
-    topP?: number;
-    topK?: number;
-    maxTokens?: number;
-  };
+  /** Passed directly as `CfnHarnessProps.model`. */
+  model: bedrock_agent_core.CfnHarness.HarnessModelConfigurationProperty;
+  /** Bedrock Mantle API format `model` uses — needed only for IAM role scoping, not a CfnHarness field. */
+  apiFormat?: 'converse_stream' | 'responses' | 'chat_completions';
+  /** API key ARN used by `model.openAiModelConfig`/`geminiModelConfig` — duplicated here (rather than read off `model`) only for IAM role scoping. */
+  apiKeyArn?: string;
+  /** Wrapped as `CfnHarnessProps.systemPrompt: [{ text: systemPrompt }]`. */
   systemPrompt?: string;
-  tools?: Array<{ type: string; name: string }>;
-  memory?: { name?: string; arn?: string; actorId?: string };
-  truncation?: {
-    strategy: 'sliding_window' | 'summarization';
-    config?: Record<string, unknown>;
-  };
-  authorizerType?: 'CUSTOM_JWT';
-  authorizerConfiguration?: {
-    customJwtAuthorizer?: {
-      discoveryUrl: string;
-      allowedClients?: string[];
-      allowedAudience?: string[];
-      allowedScopes?: string[];
-    };
-  };
+  /**
+   * Passed directly as `CfnHarnessProps.tools`. `name` is required here (unlike
+   * the underlying `HarnessToolProperty`, which marks it optional per the raw
+   * CFN schema) since `AgentCoreHarnessRole` needs it for IAM policy scoping.
+   */
+  tools?: Array<bedrock_agent_core.CfnHarness.HarnessToolProperty & { name: string }>;
+  /** Logical name of a memory in `AgentCoreApplicationProps.memories`, resolved to its ARN for `CfnHarnessProps.memory`. */
+  memoryName?: string;
+  memoryActorId?: string;
+  /** Passed directly as `CfnHarnessProps.truncation`. */
+  truncation?: bedrock_agent_core.CfnHarness.HarnessTruncationConfigurationProperty;
+  /** Passed directly as `CfnHarnessProps.authorizerConfiguration`. */
+  authorizerConfiguration?: bedrock_agent_core.CfnHarness.AuthorizerConfigurationProperty;
 }
 
 export interface AgentCoreApplicationProps {
@@ -66,8 +72,8 @@ export interface AgentCoreApplicationProps {
   projectName: string;
   /** Memory resources to create (from agentcore.json `memories`). */
   memories: Memory[];
-  /** Harness specs read from agent/default/app/<Harness>/harness.json. */
-  harnesses: HarnessSpecInput[];
+  /** Harness specs, inlined by the caller — see `HarnessSpec`. */
+  harnesses: HarnessSpec[];
   /** Gateway/MCP spec (from agentcore.json `agentCoreGateways`), if any gateways are configured. */
   mcpSpec?: AgentCoreMcpSpec;
 }
@@ -75,9 +81,11 @@ export interface AgentCoreApplicationProps {
 /**
  * Builds the AgentCore harness/memory/gateway resources directly inside the Amplify
  * CDK app so their ARNs are same-stack tokens instead of values discovered post-deploy
- * via the `agentcore` CLI's control-plane API. Mirrors what `agentcore deploy` builds
- * from `agentcore.json`/`harness.json`, minus the `AgUiHandler` runtime (owned by
- * `AgentCoreRuntimeWithBuild` to avoid a duplicate CfnRuntime).
+ * via the `agentcore` CLI's control-plane API. Harness specs are inlined literally by
+ * the caller (`backend.ts`) as `CfnHarness`-shaped objects — no `harness.json`/
+ * translation layer. Memories/gateways still come from `agentcore.json`. Excludes
+ * the `AgUiHandler` runtime (owned by `AgentCoreRuntimeWithBuild` to avoid a
+ * duplicate CfnRuntime).
  */
 export class AgentCoreApplication extends Construct {
   public readonly memories: Map<string, AgentCoreMemoryType> = new Map();
@@ -98,12 +106,14 @@ export class AgentCoreApplication extends Construct {
     }
 
     for (const harnessSpec of props.harnesses) {
+      const memory = harnessSpec.memoryName ? this.memories.get(harnessSpec.memoryName) : undefined;
+
       const roleConfig: HarnessRoleConfig = {
         name: harnessSpec.name,
-        memoryName: harnessSpec.memory?.name,
+        memoryName: harnessSpec.memoryName,
         tools: harnessSpec.tools,
-        apiKeyArn: harnessSpec.model.apiKeyArn,
-        apiFormat: harnessSpec.model.apiFormat,
+        apiKeyArn: harnessSpec.apiKeyArn,
+        apiFormat: harnessSpec.apiFormat,
       };
 
       const role = new AgentCoreHarnessRole(this, `HarnessRole${harnessSpec.name}`, {
@@ -111,7 +121,6 @@ export class AgentCoreApplication extends Construct {
         harness: roleConfig,
       });
 
-      const memory = harnessSpec.memory?.name ? this.memories.get(harnessSpec.memory.name) : undefined;
       if (memory) {
         role.addToPolicy(
           new iam.PolicyStatement({
@@ -136,76 +145,19 @@ export class AgentCoreApplication extends Construct {
       const harness = new bedrock_agent_core.CfnHarness(this, `Harness${harnessSpec.name}`, {
         harnessName: `${projectName}_${harnessSpec.name}`,
         executionRoleArn: role.roleArn,
-        model: {
-          bedrockModelConfig:
-            harnessSpec.model.provider === 'bedrock'
-              ? {
-                  modelId: harnessSpec.model.modelId,
-                  maxTokens: harnessSpec.model.maxTokens,
-                  temperature: harnessSpec.model.temperature,
-                  topP: harnessSpec.model.topP,
-                }
-              : undefined,
-          openAiModelConfig:
-            harnessSpec.model.provider === 'open_ai'
-              ? {
-                  modelId: harnessSpec.model.modelId,
-                  apiKeyArn: harnessSpec.model.apiKeyArn!,
-                  maxTokens: harnessSpec.model.maxTokens,
-                  temperature: harnessSpec.model.temperature,
-                  topP: harnessSpec.model.topP,
-                }
-              : undefined,
-          geminiModelConfig:
-            harnessSpec.model.provider === 'gemini'
-              ? {
-                  modelId: harnessSpec.model.modelId,
-                  apiKeyArn: harnessSpec.model.apiKeyArn!,
-                  maxTokens: harnessSpec.model.maxTokens,
-                  temperature: harnessSpec.model.temperature,
-                  topP: harnessSpec.model.topP,
-                  topK: harnessSpec.model.topK,
-                }
-              : undefined,
-        },
+        model: harnessSpec.model,
         systemPrompt: harnessSpec.systemPrompt ? [{ text: harnessSpec.systemPrompt }] : undefined,
-        tools: harnessSpec.tools?.map((tool) => ({
-          type: tool.type,
-          name: tool.name,
-          config:
-            tool.type === 'agentcore_browser'
-              ? { agentCoreBrowser: {} }
-              : tool.type === 'agentcore_code_interpreter'
-                ? { agentCoreCodeInterpreter: {} }
-                : undefined,
-        })),
+        tools: harnessSpec.tools,
         memory: memory
           ? {
               agentCoreMemoryConfiguration: {
                 arn: memory.memoryArn,
-                actorId: harnessSpec.memory?.actorId,
+                actorId: harnessSpec.memoryActorId,
               },
             }
           : undefined,
-        truncation: harnessSpec.truncation
-          ? {
-              strategy: harnessSpec.truncation.strategy,
-              config:
-                harnessSpec.truncation.strategy === 'summarization'
-                  ? { summarization: harnessSpec.truncation.config ?? {} }
-                  : { slidingWindow: harnessSpec.truncation.config ?? {} },
-            }
-          : undefined,
-        authorizerConfiguration: harnessSpec.authorizerConfiguration?.customJwtAuthorizer
-          ? {
-              customJwtAuthorizer: {
-                discoveryUrl: harnessSpec.authorizerConfiguration.customJwtAuthorizer.discoveryUrl,
-                allowedClients: harnessSpec.authorizerConfiguration.customJwtAuthorizer.allowedClients,
-                allowedAudience: harnessSpec.authorizerConfiguration.customJwtAuthorizer.allowedAudience,
-                allowedScopes: harnessSpec.authorizerConfiguration.customJwtAuthorizer.allowedScopes,
-              },
-            }
-          : undefined,
+        truncation: harnessSpec.truncation,
+        authorizerConfiguration: harnessSpec.authorizerConfiguration,
       });
 
       harness.node.addDependency(role);
@@ -221,7 +173,7 @@ export class AgentCoreApplication extends Construct {
     }
   }
 
-  /** ARN of a harness by its logical name (from harness.json's directory name), e.g. "MyHarness". */
+  /** ARN of a harness by its logical name (the `HarnessSpec.name` passed in), e.g. "MyHarness". */
   public harnessArn(name: string): string {
     const entry = this.harnesses.get(name);
     if (!entry) throw new Error(`Harness "${name}" not found in AgentCoreApplication`);
