@@ -6,9 +6,9 @@ This monorepo deploys everything from a single `npx ampx sandbox --once` command
 
 - **`web/`** — Next.js frontend backed by Amplify Gen 2 (Cognito auth, AppSync data)
 - **`hostingStack`** — S3 + CloudFront static website hosting (defined in `backend.ts`)
-- **`agentStack`** — Bedrock AgentCore Runtime (builds + deploys the Python handler from `agent/handler/`), plus the AgentCore Harness, Memory, and Gateway (built directly from `agent/default/agentcore/agentcore.json` via the `AgentCoreApplication` construct)
+- **`agentStack`** — Bedrock AgentCore Runtime (builds + deploys the Python handler from `agent/handler/`), plus the AgentCore Harness, Memory, and Gateway (built via the `AgentCoreApplication` construct — Memory/Gateway from `agent/default/agentcore/agentcore.json`, the Harness inlined literally in `backend.ts`)
 
-All of this is deployed together with a single `npx ampx sandbox --once --identifier <branch>` command — there is no separate `agentcore deploy` step in the production pipeline. `amplify_outputs.json` is written by Amplify and includes all ARNs and endpoints needed for the frontend. The `agentcore` CLI (`agentcore dev`, `agentcore validate`, etc.) remains usable for local iteration against the same `agentcore.json`/`harness.json` files — it just isn't part of the deploy path anymore.
+All of this is deployed together with a single `npx ampx sandbox --once --identifier <branch>` command — there is no separate `agentcore deploy` step in the production pipeline. `amplify_outputs.json` is written by Amplify and includes all ARNs and endpoints needed for the frontend. The `agentcore` CLI (`agentcore dev`, `agentcore validate`, etc.) remains usable for local iteration against the same `agentcore.json` file for memories/gateways — it just isn't part of the deploy path anymore.
 
 ### Per-Branch Routing (`basePath`)
 
@@ -26,11 +26,11 @@ Every branch/sandbox deploys to its own S3 prefix and is served at `https://<dom
 │   │   └── constructs/
 │   │       ├── hostingConstruct.ts          # S3 + CloudFront hosting
 │   │       ├── agentCoreRuntimeWithBuild.ts # Builds Docker image + deploys CfnRuntime
-│   │       └── agentCoreApplication.ts      # Harness + Memory + Gateway from agentcore.json
+│   │       └── agentCoreApplication.ts      # Harness (inlined in backend.ts) + Memory/Gateway (from agentcore.json)
 │   └── amplify_outputs.json    # Written by Amplify after each deploy (DO NOT EDIT)
 │
 ├── agent/
-│   ├── default/                # AgentCore CLI project root (agentcore.json, harness.json)
+│   ├── default/                # AgentCore CLI project root (agentcore.json)
 │   └── handler/                # Python handler (Dockerfile + agent.py)
 │       └── Dockerfile
 │

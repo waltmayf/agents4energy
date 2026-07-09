@@ -16,28 +16,58 @@ import { resolve, dirname } from 'path';
 import { readFileSync } from 'fs';
 import { HostingConstruct } from './constructs/hostingConstruct';
 import { AgentCoreRuntimeWithBuild } from './constructs/agentCoreRuntimeWithBuild';
-import { AgentCoreApplication, type HarnessSpecInput } from './constructs/agentCoreApplication';
+import { AgentCoreApplication, type HarnessSpec } from './constructs/agentCoreApplication';
 import { E2eTestUser } from './constructs/e2eTestUser/resource';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 // ============================================================================
-// AGENTCORE CONFIG — read agentcore.json + harness.json at synth time.
-// These are the same files the `agentcore` CLI reads/writes; the CLI remains
-// usable for local iteration (agentcore dev/validate), but production deploys
-// no longer run `agentcore deploy` — this stack owns the resources directly.
+// AGENTCORE CONFIG — memories/gateways read from agentcore.json at synth time
+// (same file the `agentcore` CLI reads/writes; the CLI remains usable for local
+// iteration via `agentcore dev`/`agentcore validate`, but production deploys no
+// longer run `agentcore deploy` — this stack owns the resources directly).
+//
+// Harnesses are inlined below as literal CfnHarness-shaped objects instead —
+// there is no harness.json/HarnessSpecInput translation layer for them.
 // ============================================================================
 
 const agentcoreRoot = resolve(__dirname, '../../agent/default/agentcore');
 const projectSpec = JSON.parse(readFileSync(resolve(agentcoreRoot, 'agentcore.json'), 'utf8'));
 
-const harnessSpecs: HarnessSpecInput[] = (projectSpec.harnesses ?? []).map(
-  (entry: { name: string; path: string }) => {
-    const harnessPath = resolve(agentcoreRoot, '..', entry.path, 'harness.json');
-    return JSON.parse(readFileSync(harnessPath, 'utf8')) as HarnessSpecInput;
-  },
+// MyHarness — see agent/default/app/MyHarness/ (system-prompt.md is still read
+// from disk since it's prose, not config; everything else is inlined here as
+// literal CfnHarness sub-properties, passed straight through by
+// AgentCoreApplication with no field-mapping).
+const myHarnessSystemPrompt = readFileSync(
+  resolve(__dirname, '../../agent/default/app/MyHarness/system-prompt.md'),
+  'utf8',
 );
+
+const harnessSpecs: HarnessSpec[] = [
+  {
+    name: 'MyHarness',
+    model: {
+      bedrockModelConfig: {
+        modelId: 'openai.gpt-oss-120b',
+      },
+    },
+    apiFormat: 'chat_completions',
+    systemPrompt: myHarnessSystemPrompt,
+    tools: [
+      { type: 'agentcore_browser', name: 'browser', config: { agentCoreBrowser: {} } },
+      { type: 'agentcore_code_interpreter', name: 'code-interpreter', config: { agentCoreCodeInterpreter: {} } },
+    ],
+    memoryName: 'MyHarnessMemory',
+    truncation: {
+      strategy: 'summarization',
+      config: { summarization: {} },
+    },
+    // authorizerConfiguration is re-derived from this stack's own Cognito user
+    // pool below (see harnessSpecsWithAuth) rather than hardcoded here — a
+    // fixed discoveryUrl/allowedClients would go stale across deployments.
+  },
+];
 
 // Physical gateway names are account+region unique in Bedrock AgentCore, so a
 // fixed name in agentcore.json collides across sandboxes/branches deployed to
@@ -128,26 +158,20 @@ const agUiHandlerRuntime = new AgentCoreRuntimeWithBuild(agentStack, 'AgUiHandle
   description: 'AG-UI handler runtime for the agentcore-amplify-fullstack app',
 });
 
-// harness.json's authorizerConfiguration is frozen at whatever it was when
-// last written by scripts/configure-agentcore-auth.js (a pre-in-stack-CDK
-// pipeline step) — it can reference a stale Cognito user pool/client from a
-// prior deployment. Re-derive discoveryUrl/allowedClients from *this* stack's
-// user pool here, the same way AgentCoreRuntimeWithBuild does above, so a
-// harness declared as CUSTOM_JWT always authorizes against the Cognito user
-// pool it's actually deployed alongside (see issue #56).
-const harnessSpecsWithAuth: HarnessSpecInput[] = harnessSpecs.map((h) =>
-  h.authorizerType === 'CUSTOM_JWT'
-    ? {
-        ...h,
-        authorizerConfiguration: {
-          customJwtAuthorizer: {
-            discoveryUrl: cognitoDiscoveryUrl,
-            allowedClients: [backend.auth.resources.userPoolClient.userPoolClientId],
-          },
-        },
-      }
-    : h,
-);
+// Every harness above authorizes with CUSTOM_JWT against this stack's own
+// Cognito user pool — derived here (rather than hardcoded alongside the rest
+// of the inlined harness spec above) so a redeploy against a recreated user
+// pool/client never leaves a harness authorizing against a stale ID (see
+// issue #56), the same way AgentCoreRuntimeWithBuild derives it above.
+const harnessSpecsWithAuth: HarnessSpec[] = harnessSpecs.map((h) => ({
+  ...h,
+  authorizerConfiguration: {
+    customJwtAuthorizer: {
+      discoveryUrl: cognitoDiscoveryUrl,
+      allowedClients: [backend.auth.resources.userPoolClient.userPoolClientId],
+    },
+  },
+}));
 
 // Memory/Harness/Gateway from agentcore.json — same-stack CDK tokens, no
 // post-deploy control-plane resolution needed. `AgUiHandler` is excluded
@@ -193,7 +217,7 @@ const agentCoreApp = new AgentCoreApplication(agentStack, 'AgentCoreApplication'
     : undefined,
 });
 
-const memoryName = harnessSpecs[0]?.memory?.name;
+const memoryName = harnessSpecs[0]?.memoryName;
 const harnessName = harnessSpecs[0]?.name;
 const gatewayName = projectSpec.agentCoreGateways?.[0]?.name;
 
