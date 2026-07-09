@@ -6,6 +6,7 @@ import { updateSessionSummary } from './functions/update-session-summary/resourc
 import { registerMcpTarget } from './functions/register-mcp-target/resource';
 import { listMcpTools } from './functions/list-mcp-tools/resource';
 import { invokeAgent } from './functions/invoke-agent/resource';
+import { mintGithubToken } from './functions/mint-github-token/resource';
 import { Policy, PolicyStatement, ServicePrincipal, Effect, Role } from 'aws-cdk-lib/aws-iam';
 import { Function as LambdaFunction } from 'aws-cdk-lib/aws-lambda';
 import { Fn, Stack } from 'aws-cdk-lib';
@@ -81,6 +82,7 @@ const backend = defineBackend({
   registerMcpTarget,
   listMcpTools,
   invokeAgent,
+  mintGithubToken,
 });
 
 backend.stack.tags.setTag('Project', 'workshop');
@@ -280,6 +282,30 @@ invokeAgentLambda.addToRolePolicy(new PolicyStatement({
     `arn:aws:ssm:${AGENTCORE_REGION}:${backend.stack.account}:parameter${SVC_SSM_PATH}`,
   ],
 }));
+
+// ============================================================================
+// MINT-GITHUB-TOKEN Lambda — short-lived GitHub App installation tokens.
+//
+// Replaces long-lived PAT usage for browser-initiated (/chat-handler) sessions
+// (see issue #34). GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY_SECRET_ARN are
+// deploy-time inputs, not resources this stack creates — the GitHub App and
+// its private key (stored in Secrets Manager as a plaintext PEM secret) are
+// provisioned manually per docs/github-integration.md. Both env vars are
+// intentionally allowed to be empty at synth time so branch deploys that
+// don't set them still succeed; the mutation just fails at invoke time with
+// a clear error instead of failing the whole deploy.
+// ============================================================================
+
+const GITHUB_APP_PRIVATE_KEY_SECRET_ARN = process.env.GITHUB_APP_PRIVATE_KEY_SECRET_ARN ?? '';
+
+const mintGithubTokenLambda = backend.mintGithubToken.resources.lambda as LambdaFunction;
+
+if (GITHUB_APP_PRIVATE_KEY_SECRET_ARN) {
+  mintGithubTokenLambda.addToRolePolicy(new PolicyStatement({
+    actions: ['secretsmanager:GetSecretValue'],
+    resources: [GITHUB_APP_PRIVATE_KEY_SECRET_ARN],
+  }));
+}
 
 // ============================================================================
 // E2E TEST USER — Cognito user + SSM-stored credentials for Playwright auth.
