@@ -178,6 +178,82 @@ When the invocation payload includes `githubToken`, `githubRepo`, and `githubBra
 
 The `GITHUB_TOKEN` from Actions has `contents: write` and `pull-requests: write` permissions (declared in the workflow). Its default expiry is the job timeout (up to 6 hours).
 
+## Browser-initiated sessions: minting scoped tokens with a GitHub App
+
+The Actions integration above gets its token for free — `GITHUB_TOKEN` is already scoped to the triggering repo and expires with the job. Browser-initiated sessions (`/chat-handler`, via `invokeHandler`) have no equivalent: there's no Actions runner providing a token, so a long-lived PAT is the only easy alternative. This project avoids that by minting a **short-lived, repo-scoped GitHub App installation access token per invocation** instead.
+
+### Why a GitHub App instead of a PAT
+
+| | Long-lived PAT | GitHub App installation token |
+|---|---|---|
+| Lifetime | Until manually revoked (often never) | ~1 hour, minted per request |
+| Scope | Usually all repos the user can access | Exactly the repos the App is installed on, exactly the permissions granted (`contents:write`, `pull_requests:write`) |
+| Storage | A secret that must be stored *somewhere* long-term (Secrets Manager, GitHub secret, `.env`) and rotated manually | The App's private key is the only long-lived secret; it never leaves Secrets Manager and never signs anything a user can act as — it only mints installation tokens |
+| Revocation blast radius | Revoking breaks every consumer of that PAT | Uninstalling the App or narrowing its repo selection revokes access immediately, per-repo |
+
+The tradeoff is setup complexity: a GitHub App must be created once (manual step, see below), and its private key must be seeded into Secrets Manager. The Actions path (`.github/workflows/agent-mention.yml`) is intentionally left as-is — it already has a correctly-scoped, auto-expiring token via `GITHUB_TOKEN`, so there's nothing to improve there.
+
+### Architecture
+
+```
+Browser (/chat-handler)
+    │
+    ├─ mintGithubToken(repo) mutation → AppSync → mint-github-token Lambda
+    │     1. Reads the App's PKCS8 private key from Secrets Manager (by ARN)
+    │     2. Signs a short-lived (≤10 min) App JWT (RS256, via `jose`)
+    │     3. GET /repos/<repo>/installation  → installation ID
+    │     4. POST /app/installations/<id>/access_tokens
+    │          { repositories: [<name>], permissions: { contents: write, pull_requests: write } }
+    │     returns { token, expiresAt }              (token never persisted server-side)
+    │
+    ├─ invokeHandler(sessionId, prompt, githubToken, githubRepo, githubBranch) mutation
+    │
+    ▼
+AgentCore runtime (agent/handler/agent.py) — same _prepare_workspace() path as the
+Actions integration: gh auth login --with-token, gh auth setup-git, clone. The agent
+itself never sees the token (see "Workspace cloning" above).
+```
+
+`mintGithubToken` and `invokeHandler` are separate mutations — the frontend calls the former immediately before the latter, so the token is minted fresh for (essentially) every run rather than cached and reused across sessions.
+
+### Lambda: `mint-github-token`
+
+Source: [`web/amplify/functions/mint-github-token/`](../web/amplify/functions/mint-github-token/). Reads two env vars, wired in `backend.ts`:
+
+| Env var | Value |
+|---|---|
+| `GITHUB_APP_ID` | The App's numeric ID (from the App's settings page) |
+| `GITHUB_APP_PRIVATE_KEY_SECRET_ARN` | ARN of a Secrets Manager secret whose `SecretString` is the App's PKCS8 PEM private key |
+
+Both are deploy-time inputs read from `process.env` in `backend.ts` — they are **not** created by this stack, and neither is ever hardcoded or committed. If `GITHUB_APP_PRIVATE_KEY_SECRET_ARN` is unset, the Lambda's IAM policy grants no Secrets Manager access and `mintGithubToken` fails at invoke time with a clear error (the rest of the stack still deploys — this mirrors how `AGENTCORE_GATEWAY_ARN` is treated elsewhere in `backend.ts`).
+
+The GraphQL schema for this mutation lives in [`web/amplify/data/schemas/github.schema.ts`](../web/amplify/data/schemas/github.schema.ts); it requires `allow.authenticated()`, same as `invokeHandler`.
+
+### One-time setup: creating the GitHub App
+
+1. **Create the App** — GitHub → Settings → Developer settings → GitHub Apps → New GitHub App.
+   - Repository permissions: **Contents: Read & write**, **Pull requests: Read & write**. No other permissions needed.
+   - Webhook: disable (this integration doesn't use webhooks — see the sibling issue for a future webhook/Step Function invoker).
+   - "Where can this GitHub App be installed?": Only on this account, unless you need it across an org.
+2. **Generate a private key** on the App's settings page — downloads a `.pem` file. This is the only long-lived secret in this flow.
+3. **Store the private key in Secrets Manager**, e.g.:
+   ```bash
+   aws secretsmanager create-secret \
+     --name github-app/agents4energy/private-key \
+     --secret-string file://path/to/downloaded-key.pem
+   ```
+   Note the resulting secret ARN.
+4. **Install the App** on the target repo(s) — from the App's settings page, "Install App".
+5. **Set the two env vars** before running `pnpm deploy` (or your CI deploy step):
+   ```bash
+   export GITHUB_APP_ID=123456
+   export GITHUB_APP_PRIVATE_KEY_SECRET_ARN=arn:aws:secretsmanager:us-east-1:111122223333:secret:github-app/agents4energy/private-key-AbCdEf
+   ```
+
+### Frontend wiring
+
+`/chat-handler`'s `sendMessage` (in [`web/app/(with-auth)/chat-handler/page.tsx`](../web/app/(with-auth)/chat-handler/page.tsx)) does not yet call `mintGithubToken` — today it only sends `sessionId`, `prompt`, `systemPrompt`, `modelId`. Wiring a repo-picker UI and calling `mintGithubToken` before `invokeHandler` is left for a follow-up; this issue's scope was the token-minting Lambda and its AppSync surface, per the "Scope" section in issue #34.
+
 ## Sync mode in the runtime
 
 `agent/handler/agent.py` checks for `sync: true` in the invocation payload:
