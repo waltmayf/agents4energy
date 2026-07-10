@@ -233,7 +233,7 @@ The GraphQL schema for this mutation lives in [`web/amplify/data/schemas/github.
 
 1. **Create the App** — GitHub → Settings → Developer settings → GitHub Apps → New GitHub App.
    - Repository permissions: **Contents: Read & write**, **Pull requests: Read & write**. No other permissions needed.
-   - Webhook: disable (this integration doesn't use webhooks — see the sibling issue for a future webhook/Step Function invoker).
+   - Webhook: disable (this integration doesn't use webhooks — see [`docs/webhook-stepfunction-integration.md`](./webhook-stepfunction-integration.md) for the webhook/Step Function pipeline, which reuses this same App for its GitHub path).
    - "Where can this GitHub App be installed?": Only on this account, unless you need it across an org.
 2. **Generate a private key** on the App's settings page — downloads a `.pem` file. This is the only long-lived secret in this flow.
 3. **Store the private key in Secrets Manager**, e.g.:
