@@ -69,18 +69,25 @@ jobs:
 
       # ── Phase 1: Amplify backend (Cognito, AppSync, Lambda, DynamoDB) ─────────
 
-      - name: Write AWS credentials file (act only — ampx CLI needs ~/.aws)
-        if: ${{ env.ACT }}
-        run: |
-          mkdir -p ~/.aws
-          printf '[default]\naws_access_key_id=%s\naws_secret_access_key=%s\n' \
-            "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY" > ~/.aws/credentials
-          [ -n "${AWS_SESSION_TOKEN:-}" ] && \
-            printf 'aws_session_token=%s\n' "$AWS_SESSION_TOKEN" >> ~/.aws/credentials
-          printf '[default]\nregion=%s\n' "${AWS_REGION:-us-east-1}" > ~/.aws/config
-
       - name: Deploy Amplify backend
         working-directory: web
+        # The GITHUB_* / JIRA_* vars below are deploy-time inputs read by
+        # web/amplify/backend.ts (see docs/webhook-stepfunction-integration.md
+        # and docs/github-integration.md). Without them the webhook receiver /
+        # post-comment Lambdas deploy with empty secret ARNs and the
+        # @webhook-agent pipeline fails at invoke time (receiver can't verify
+        # the HMAC signature; post-comment can't mint a GitHub App token).
+        # Set these as repo/environment Actions variables (non-secret ARNs/IDs);
+        # all are optional — unset ones just leave that path disabled, they
+        # never fail synth/deploy.
+        env:
+          GITHUB_APP_ID: ${{ vars.AGENT_GITHUB_APP_ID }}
+          GITHUB_APP_PRIVATE_KEY_SECRET_ARN: ${{ vars.AGENT_GITHUB_APP_PRIVATE_KEY_SECRET_ARN }}
+          GITHUB_WEBHOOK_SECRET_ARN: ${{ vars.AGENT_GITHUB_WEBHOOK_SECRET_ARN }}
+          JIRA_WEBHOOK_SECRET_ARN: ${{ vars.AGENT_JIRA_WEBHOOK_SECRET_ARN }}
+          JIRA_API_TOKEN_SECRET_ARN: ${{ vars.AGENT_JIRA_API_TOKEN_SECRET_ARN }}
+          JIRA_BASE_URL: ${{ vars.AGENT_JIRA_BASE_URL }}
+          JIRA_API_EMAIL: ${{ vars.AGENT_JIRA_API_EMAIL }}
         run: |
           echo "::group::ampx sandbox --once"
           pnpm exec ampx sandbox --once --identifier "$BRANCH_SLUG"
