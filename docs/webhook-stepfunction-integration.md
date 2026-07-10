@@ -29,6 +29,9 @@ GitHub issue_comment webhook          Jira comment_created webhook
              • posts a comment with a Live Tail deep-link
              • GitHub only: mints a GitHub App installation token
         2. agent-webhook-invoke-agent
+             • GitHub only: execs `gh auth login` + `gh auth setup-git` in the
+               harness's underlying AgentCore Runtime session (InvokeAgentRuntimeCommand,
+               SigV4/IAM) before the agent runs — see "Git access" below
              • invokes the AgentCore Harness (/harnesses/invoke, authenticated
                as the invoke-agent Cognito service account) with the comment's
                prompt, and decodes the binary event stream into the full text
@@ -85,7 +88,21 @@ Defined in [`web/amplify/constructs/agentWebhookStack.ts`](../web/amplify/constr
 
 `agent-webhook-post-comment` reuses [`web/amplify/functions/_shared/githubAppToken.ts`](../web/amplify/functions/_shared/githubAppToken.ts) — the GitHub App JWT/installation-token logic factored out of `mint-github-token` (see `docs/github-integration.md`) so both the browser-initiated flow and this webhook flow mint tokens identically.
 
-`agent-webhook-invoke-agent` invokes the **AgentCore Harness** (`MyHarness`), not the `AgUiHandler` runtime — the same target the browser-initiated `invoke-agent` Lambda uses. The harness authorizes with **CUSTOM_JWT** (Cognito), so a raw SigV4 `InvokeAgentRuntimeCommand` against the runtime fails with an `Authorization method mismatch` error. Instead this Lambda authenticates as the `invoke-agent-service` Cognito user (password read from the shared SSM parameter `/agentcore/invoke-agent-service/password`), then `POST`s to `https://bedrock-agentcore.<region>.amazonaws.com/harnesses/invoke?harnessArn=<arn>` with a `Bearer` token and decodes the returned AWS binary event stream's `contentBlockDelta` frames into the full response text — identical framing logic to `web/amplify/functions/invoke-agent/handler.ts` and `scripts/invoke.ts`.
+`agent-webhook-invoke-agent` invokes the **AgentCore Harness** (`MyHarness`), not the `AgUiHandler` runtime — the same target the browser-initiated `invoke-agent` Lambda uses. The harness authorizes with **CUSTOM_JWT** (Cognito), so a raw SigV4 `InvokeAgentRuntimeCommand` against the *harness* ARN fails with an `Authorization method mismatch` error. Instead this Lambda authenticates as the `invoke-agent-service` Cognito user (password read from the shared SSM parameter `/agentcore/invoke-agent-service/password`), then `POST`s to `https://bedrock-agentcore.<region>.amazonaws.com/harnesses/invoke?harnessArn=<arn>` with a `Bearer` token and decodes the returned AWS binary event stream's `contentBlockDelta` frames into the full response text — identical framing logic to `web/amplify/functions/invoke-agent/handler.ts` and `scripts/invoke.ts`.
+
+### Git access: harness exec, not the code interpreter
+
+Every `CfnHarness` is backed by its own AgentCore Runtime (visible via `aws bedrock-agentcore-control get-harness` as `environment.agentCoreRuntimeEnvironment.agentRuntimeArn`; exposed in CDK as `CfnHarness.attrEnvironmentAgentCoreRuntimeEnvironmentAgentRuntimeArn`, and in this stack as `AgentCoreApplication.harnessRuntimeArn(name)`). That runtime ARN — distinct from the CUSTOM_JWT-authorized harness ARN above — accepts `InvokeAgentRuntimeCommand` ("exec"), which is SigV4/IAM-authorized and runs a raw shell command in the runtime session named by `runtimeSessionId`.
+
+`agent-webhook-invoke-agent` uses this to authenticate `git`/`gh` in a GitHub run's session **before** the `InvokeHarness` call that runs the agent, reusing the same `runtimeSessionId` (the Step Function's `runId`) for both calls so they land in the same container:
+
+1. Exec `gh auth login --hostname github.com --with-token` (token piped over stdin) + `gh auth setup-git`, using the GitHub App installation token minted by `agent-webhook-post-comment` (see `docs/github-integration.md`) — the same token, the same minting path as the AgUiHandler's `_prepare_workspace()`.
+2. Exec `git config --global user.name/user.email` so commits the agent makes are attributed to `webhook-agent[bot]`.
+3. The prompt sent to `InvokeHarness` is annotated with an `<github_access>` block telling the agent its code interpreter's `git`/`gh` are already authenticated for the target repo, so it clones/pushes/opens PRs directly instead of assuming (as it did in early testing on #48) that it lacks write access.
+
+This intentionally does **not** configure the harness's `agentcore_code_interpreter` tool with a custom network mode or image — the exec API runs directly in the harness's own runtime session, which already has the tools (`git`, `gh`) preinstalled and public internet access by default (`networkMode: PUBLIC` in `agentcore.json`).
+
+IAM: `agent-webhook-invoke-agent`'s execution role is granted `bedrock-agentcore:InvokeAgentRuntimeCommand` scoped to the harness runtime ARN (`AGENTCORE_HARNESS_RUNTIME_ARN` in `backend.ts`), alongside its existing `bedrock-agentcore:InvokeHarness` grant on the harness ARN.
 
 ## Setup
 

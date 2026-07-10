@@ -3,16 +3,19 @@ import {
   InitiateAuthCommand,
 } from '@aws-sdk/client-cognito-identity-provider';
 import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
+import { BedrockAgentCoreClient, InvokeAgentRuntimeCommandCommand } from '@aws-sdk/client-bedrock-agentcore';
 import { appendLog } from '../_shared/liveTail';
 
 const REGION = process.env.AWS_REGION ?? 'us-east-1';
 const HARNESS_ARN = process.env.HARNESS_ARN ?? '';
+const HARNESS_RUNTIME_ARN = process.env.HARNESS_RUNTIME_ARN ?? '';
 const COGNITO_CLIENT_ID = process.env.COGNITO_CLIENT_ID ?? '';
 const SERVICE_ACCOUNT_USERNAME = process.env.SERVICE_ACCOUNT_USERNAME ?? '';
 const SERVICE_ACCOUNT_SSM_PATH = process.env.SERVICE_ACCOUNT_SSM_PATH ?? '';
 
 const cognito = new CognitoIdentityProviderClient({ region: REGION });
 const ssm = new SSMClient({ region: REGION });
+const bedrockAgentCore = new BedrockAgentCoreClient({ region: REGION });
 
 // Cache the access token across warm invocations (~1 hour lifetime).
 let cachedAccessToken: string | null = null;
@@ -65,6 +68,51 @@ async function log(groupName: string | undefined, streamName: string | undefined
     await appendLog(groupName, streamName, message);
   } catch {
     // Logging is best-effort — never fail the agent invocation because a log write failed.
+  }
+}
+
+// Runs a setup command in the harness's underlying AgentCore Runtime session
+// (`InvokeAgentRuntimeCommand` — the exec API), keyed by the same
+// runtimeSessionId the subsequent InvokeHarness call uses, so the harness's
+// shell environment for this session comes up with `git`/`gh` already
+// authenticated before the agent's turn starts. This is SigV4/IAM-authorized
+// (unlike the CUSTOM_JWT /harnesses/invoke call below), so it uses the
+// Lambda's own execution role credentials rather than the Cognito
+// service-account token. The token travels once in this exec request body
+// (TLS-encrypted, not visible to the model) and is then stored by `gh` in
+// the runtime session's ~/.config/gh/hosts.yml — the agent's subsequent
+// tool calls never see it, matching the AgUiHandler's _prepare_workspace().
+async function authenticateGitInHarnessSession(opts: {
+  sessionId: string;
+  githubToken: string;
+}): Promise<void> {
+  const { sessionId, githubToken } = opts;
+
+  if (!HARNESS_RUNTIME_ARN) throw new Error('HARNESS_RUNTIME_ARN not configured');
+
+  const command = [
+    `printf '%s' ${JSON.stringify(githubToken)} | gh auth login --hostname github.com --with-token`,
+    'gh auth setup-git',
+    'git config --global user.name "webhook-agent[bot]"',
+    'git config --global user.email "webhook-agent[bot]@users.noreply.github.com"',
+  ].join(' && ');
+
+  const res = await bedrockAgentCore.send(new InvokeAgentRuntimeCommandCommand({
+    agentRuntimeArn: HARNESS_RUNTIME_ARN,
+    runtimeSessionId: sessionId,
+    contentType: 'application/json',
+    body: { command, timeout: 60 },
+  }));
+
+  let exitCode: number | undefined;
+  for await (const event of res.stream ?? []) {
+    if (event.chunk?.contentStop) exitCode = event.chunk.contentStop.exitCode;
+    if (event.validationException || event.internalServerException || event.resourceNotFoundException || event.runtimeClientError || event.accessDeniedException) {
+      throw new Error(`Harness exec failed: ${JSON.stringify(event)}`);
+    }
+  }
+  if (exitCode !== 0) {
+    throw new Error(`Harness exec for git/gh auth exited with code ${exitCode}`);
   }
 }
 
@@ -162,7 +210,22 @@ async function invokeHarness(opts: {
 }
 
 export const handler = async (input: InvokeAgentInput): Promise<InvokeAgentOutput> => {
-  const { runId, source, prompt, logGroupName, logStreamName } = input;
+  const { runId, source, prompt, repo, githubToken, logGroupName, logStreamName } = input;
+
+  let effectivePrompt = prompt;
+
+  if (source === 'github' && githubToken) {
+    await log(logGroupName, logStreamName, `[${runId}] authenticating git/gh in harness session`);
+    await authenticateGitInHarnessSession({ sessionId: runId, githubToken });
+
+    // The exec call above authenticates `git`/`gh` in this session's shell —
+    // tell the agent that so it clones/pushes with the sandbox's code
+    // interpreter tool instead of assuming (as it has before, see #48) that
+    // it lacks write access.
+    if (repo) {
+      effectivePrompt = `${prompt}\n\n<github_access>\nYour code interpreter's git and gh CLI are already authenticated for the repository ${repo} (git push and gh pr create both work — no token setup needed). Clone with: git clone https://github.com/${repo}.git\n</github_access>`;
+    }
+  }
 
   await log(logGroupName, logStreamName, `[${runId}] invoking harness (source=${source})`);
 
@@ -175,7 +238,7 @@ export const handler = async (input: InvokeAgentInput): Promise<InvokeAgentOutpu
   }, 20_000);
 
   try {
-    const response = await invokeHarness({ sessionId: runId, prompt });
+    const response = await invokeHarness({ sessionId: runId, prompt: effectivePrompt });
     const finalText = response || '(no response)';
 
     await log(logGroupName, logStreamName, `[${runId}] harness responded (${finalText.length} chars)`);

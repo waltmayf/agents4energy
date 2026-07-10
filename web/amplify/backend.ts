@@ -240,6 +240,7 @@ const AGENTCORE_GATEWAY_ARN = gatewayName ? agentCoreApp.gatewayArn(gatewayName)
 const AGENTCORE_GATEWAY_ENDPOINT = gatewayName ? agentCoreApp.gatewayEndpoint(gatewayName) : '';
 const AGENTCORE_HARNESS_ARN = harnessName ? agentCoreApp.harnessArn(harnessName) : '';
 const AGENTCORE_HARNESS_ROLE_ARN = harnessName ? agentCoreApp.harnessRoleArn(harnessName) : '';
+const AGENTCORE_HARNESS_RUNTIME_ARN = harnessName ? agentCoreApp.harnessRuntimeArn(harnessName) : '';
 const AGENTCORE_REGION = Stack.of(agentStack).region;
 
 // ============================================================================
@@ -373,6 +374,7 @@ backend.agentWebhookInvokeAgent.addEnvironment('HARNESS_ARN', AGENTCORE_HARNESS_
 backend.agentWebhookInvokeAgent.addEnvironment('COGNITO_CLIENT_ID', backend.auth.resources.userPoolClient.userPoolClientId);
 backend.agentWebhookInvokeAgent.addEnvironment('SERVICE_ACCOUNT_USERNAME', 'invoke-agent-service@internal.local');
 backend.agentWebhookInvokeAgent.addEnvironment('SERVICE_ACCOUNT_SSM_PATH', SVC_SSM_PATH);
+backend.agentWebhookInvokeAgent.addEnvironment('HARNESS_RUNTIME_ARN', AGENTCORE_HARNESS_RUNTIME_ARN);
 backend.agentWebhookPostComment.addEnvironment('ACCOUNT_ID', backend.stack.account);
 
 const secretArns = [GITHUB_WEBHOOK_SECRET_ARN, JIRA_WEBHOOK_SECRET_ARN].filter(Boolean);
@@ -406,6 +408,13 @@ webhookInvokeAgentLambda.addToRolePolicy(new PolicyStatement({
 webhookInvokeAgentLambda.addToRolePolicy(new PolicyStatement({
   actions: ['bedrock-agentcore:InvokeHarness'],
   resources: [AGENTCORE_HARNESS_ARN],
+}));
+// Exec a setup command (gh auth login/setup-git) in the harness's runtime
+// session before the InvokeHarness call above — see docs/github-integration.md
+// "Git access: harness exec, not the code interpreter".
+webhookInvokeAgentLambda.addToRolePolicy(new PolicyStatement({
+  actions: ['bedrock-agentcore:InvokeAgentRuntimeCommand'],
+  resources: [AGENTCORE_HARNESS_RUNTIME_ARN],
 }));
 // Read the service-account Cognito password from SSM to mint the harness JWT.
 webhookInvokeAgentLambda.addToRolePolicy(new PolicyStatement({

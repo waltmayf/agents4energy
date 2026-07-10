@@ -164,6 +164,8 @@ The workflow's `if` condition excludes `Bot` sender types. The script additional
 
 ## Workspace cloning
 
+This section describes `@agent-<slug>` mentions, which route to the **`AgUiHandler`** AgentCore runtime (a container with its own shell). The `@webhook-agent` path documented in [`docs/webhook-stepfunction-integration.md`](./webhook-stepfunction-integration.md) instead invokes the **`MyHarness`** Harness — a different runtime with no `_prepare_workspace()` of its own — and authenticates `git`/`gh` there via a harness-exec call (`InvokeAgentRuntimeCommand` against the harness's underlying runtime ARN) instead of the mechanism below. See that doc's "Git access: harness exec, not the code interpreter" section.
+
 When the invocation payload includes `githubToken`, `githubRepo`, and `githubBranch`, the runtime prepares a workspace **before** the agent runs:
 
 1. **`gh` CLI is authenticated** via `gh auth login --with-token` (token piped to stdin, stored in `~/.config/gh/hosts.yml`). The agent never sees the token.
