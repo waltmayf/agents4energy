@@ -59,7 +59,7 @@ const harnessSpecs: HarnessSpec[] = [
     name: 'MyHarness',
     model: {
       bedrockModelConfig: {
-        modelId: 'openai.gpt-oss-120b',
+        modelId: 'openai.gpt-oss-120b-1:0',
       },
     },
     apiFormat: 'chat_completions',
@@ -152,21 +152,6 @@ const hosting = new HostingConstruct(hostingStack, 'Hosting');
 // ============================================================================
 
 const agentStack = backend.createStack('agent');
-
-const harnessRole = new iam.Role(agentStack, 'HarnessRole', {
-  assumedBy: new iam.ServicePrincipal('agentcore')
-})
-
-const harness = new agentcore.CfnHarness(agentStack, 'DefaultHarness', {
-  harnessName: 'non-blocking-name-with-branch',
-  executionRoleArn: harnessRole.roleArn,
-  model: {
-    bedrockModelConfig: {
-      modelId: bedrock.FoundationModelIdentifier.ANTHROPIC_CLAUDE_SONNET_4_6.modelId
-    }
-  }
-})
-
 
 // Cognito discovery URL: https://cognito-idp.{region}.amazonaws.com/{userPoolId}
 const userPoolId = backend.auth.resources.userPool.userPoolId;
@@ -381,7 +366,14 @@ const webhookReceiverLambda = backend.agentWebhookReceiver.resources.lambda as L
 const webhookPostCommentLambda = backend.agentWebhookPostComment.resources.lambda as LambdaFunction;
 const webhookInvokeAgentLambda = backend.agentWebhookInvokeAgent.resources.lambda as LambdaFunction;
 
-backend.agentWebhookInvokeAgent.addEnvironment('AGUI_RUNTIME_ARN', agUiHandlerRuntime.runtime.attrAgentRuntimeArn);
+// Invoke the AgentCore Harness (not the SigV4 AgUiHandler runtime) — the
+// harness authorizes with CUSTOM_JWT, so this Lambda authenticates as the
+// invoke-agent service account (same Cognito user + SSM password as the
+// invoke-agent Lambda above) and calls the /harnesses/invoke endpoint.
+backend.agentWebhookInvokeAgent.addEnvironment('HARNESS_ARN', AGENTCORE_HARNESS_ARN);
+backend.agentWebhookInvokeAgent.addEnvironment('COGNITO_CLIENT_ID', backend.auth.resources.userPoolClient.userPoolClientId);
+backend.agentWebhookInvokeAgent.addEnvironment('SERVICE_ACCOUNT_USERNAME', 'invoke-agent-service@internal.local');
+backend.agentWebhookInvokeAgent.addEnvironment('SERVICE_ACCOUNT_SSM_PATH', SVC_SSM_PATH);
 backend.agentWebhookPostComment.addEnvironment('ACCOUNT_ID', backend.stack.account);
 
 const secretArns = [GITHUB_WEBHOOK_SECRET_ARN, JIRA_WEBHOOK_SECRET_ARN].filter(Boolean);
@@ -413,15 +405,17 @@ webhookInvokeAgentLambda.addToRolePolicy(new PolicyStatement({
   resources: [`arn:aws:logs:${AGENTCORE_REGION}:${backend.stack.account}:log-group:/agent-webhook/*:log-stream:*`],
 }));
 webhookInvokeAgentLambda.addToRolePolicy(new PolicyStatement({
-  actions: ['bedrock-agentcore:InvokeAgentRuntime'],
-  resources: [
-    agUiHandlerRuntime.runtime.attrAgentRuntimeArn,
-    `${agUiHandlerRuntime.runtime.attrAgentRuntimeArn}/runtime-endpoint/*`,
-  ],
+  actions: ['bedrock-agentcore:InvokeHarness'],
+  resources: [AGENTCORE_HARNESS_ARN],
+}));
+// Read the service-account Cognito password from SSM to mint the harness JWT.
+webhookInvokeAgentLambda.addToRolePolicy(new PolicyStatement({
+  actions: ['ssm:GetParameter'],
+  resources: [`arn:aws:ssm:${AGENTCORE_REGION}:${backend.stack.account}:parameter${SVC_SSM_PATH}`],
 }));
 
 // Own stack (not agentStack) — AgentWebhookStack references the function-stack
-// Lambdas above, which already depend on agentStack (via the AGUI_RUNTIME_ARN
+// Lambdas above, which already depend on agentStack (via the HARNESS_ARN
 // env var). Building it inside agentStack would make agentStack depend back
 // on the function stack, forming the same nested-stack cycle CloudFormation
 // rejects for the invokeHandler resolver wiring above.

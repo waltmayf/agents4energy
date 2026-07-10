@@ -29,8 +29,9 @@ GitHub issue_comment webhook          Jira comment_created webhook
              • posts a comment with a Live Tail deep-link
              • GitHub only: mints a GitHub App installation token
         2. agent-webhook-invoke-agent
-             • sync-invokes the AgentCore runtime (InvokeAgentRuntimeCommand,
-               sync: true) with the comment's prompt
+             • invokes the AgentCore Harness (/harnesses/invoke, authenticated
+               as the invoke-agent Cognito service account) with the comment's
+               prompt, and decodes the binary event stream into the full text
              • appends heartbeat lines to the run's log stream
              • on failure: Catch → agent-webhook-post-comment (stage=final)
                posts the error instead
@@ -66,7 +67,7 @@ Ported directly from `.github/workflows/claude.yml`'s "Post CloudWatch log links
 - One log stream per run, named by the run's UUID, created by `agent-webhook-post-comment` *before* the first comment is posted (so the very first Live Tail link is already valid)
 - The console URL uses the same "rison" string codec as the Actions workflow (`enc()`: unreserved chars pass through, everything else becomes `*` + 2 lowercase hex digits), so both call sites produce byte-identical URL fragments for the same inputs
 
-Unlike the Actions flow — which streams Claude Code's own OTel-exported tool calls and responses — this pipeline's log stream only carries coarse progress markers (`invoking agent`, a 20s heartbeat, `agent responded (N chars)`, or the failure message) written by `agent-webhook-invoke-agent`. The AgentCore runtime's sync-mode `/invocations` call is a single blocking HTTP request with no intermediate events to relay (see "Sync mode" in `docs/github-integration.md`) — richer step-by-step tailing would require either switching this path to async + AG-UI-event polling, or having `agent.py` stream progress lines into this run's log stream directly. Left as a follow-up.
+Unlike the Actions flow — which streams Claude Code's own OTel-exported tool calls and responses — this pipeline's log stream only carries coarse progress markers (`invoking agent`, a 20s heartbeat, `agent responded (N chars)`, or the failure message) written by `agent-webhook-invoke-agent`. The harness `/harnesses/invoke` call is a single blocking event-stream read fully consumed before the Lambda returns — the coarse markers are all this path surfaces without having the harness stream step-by-step progress lines into this run's log stream directly. Left as a follow-up.
 
 ## Step Function
 
@@ -80,11 +81,11 @@ Defined in [`web/amplify/constructs/agentWebhookStack.ts`](../web/amplify/constr
 |---|---|
 | [`agent-webhook-receiver`](../web/amplify/functions/agent-webhook-receiver/) | API Gateway target. Verifies signature, detects mention, `StartExecution` |
 | [`agent-webhook-post-comment`](../web/amplify/functions/agent-webhook-post-comment/) | Posts initial (Live Tail link) and final comments, mints GitHub tokens |
-| [`agent-webhook-invoke-agent`](../web/amplify/functions/agent-webhook-invoke-agent/) | Sync-invokes the AgentCore runtime via `InvokeAgentRuntimeCommand` |
+| [`agent-webhook-invoke-agent`](../web/amplify/functions/agent-webhook-invoke-agent/) | Invokes the AgentCore Harness via `/harnesses/invoke` (Cognito service-account JWT) |
 
 `agent-webhook-post-comment` reuses [`web/amplify/functions/_shared/githubAppToken.ts`](../web/amplify/functions/_shared/githubAppToken.ts) — the GitHub App JWT/installation-token logic factored out of `mint-github-token` (see `docs/github-integration.md`) so both the browser-initiated flow and this webhook flow mint tokens identically.
 
-`agent-webhook-invoke-agent` calls the AgentCore runtime via the `@aws-sdk/client-bedrock-agentcore` SDK client's `InvokeAgentRuntimeCommand` (IAM-signed by the Lambda's execution role) rather than the raw SigV4 `fetch()` pattern in `scripts/github-agent-invoke.ts` — a Lambda already has ambient AWS credentials, so the SDK client is simpler than hand-rolling `@smithy/signature-v4`.
+`agent-webhook-invoke-agent` invokes the **AgentCore Harness** (`MyHarness`), not the `AgUiHandler` runtime — the same target the browser-initiated `invoke-agent` Lambda uses. The harness authorizes with **CUSTOM_JWT** (Cognito), so a raw SigV4 `InvokeAgentRuntimeCommand` against the runtime fails with an `Authorization method mismatch` error. Instead this Lambda authenticates as the `invoke-agent-service` Cognito user (password read from the shared SSM parameter `/agentcore/invoke-agent-service/password`), then `POST`s to `https://bedrock-agentcore.<region>.amazonaws.com/harnesses/invoke?harnessArn=<arn>` with a `Bearer` token and decodes the returned AWS binary event stream's `contentBlockDelta` frames into the full response text — identical framing logic to `web/amplify/functions/invoke-agent/handler.ts` and `scripts/invoke.ts`.
 
 ## Setup
 
