@@ -69,6 +69,16 @@ jobs:
 
       # ── Phase 1: Amplify backend (Cognito, AppSync, Lambda, DynamoDB) ─────────
 
+      - name: Write AWS credentials file (act only — ampx CLI needs ~/.aws)
+        if: ${{ env.ACT }}
+        run: |
+          mkdir -p ~/.aws
+          printf '[default]\naws_access_key_id=%s\naws_secret_access_key=%s\n' \
+            "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY" > ~/.aws/credentials
+          [ -n "${AWS_SESSION_TOKEN:-}" ] && \
+            printf 'aws_session_token=%s\n' "$AWS_SESSION_TOKEN" >> ~/.aws/credentials
+          printf '[default]\nregion=%s\n' "${AWS_REGION:-us-east-1}" > ~/.aws/config
+
       - name: Deploy Amplify backend
         working-directory: web
         # The GITHUB_* / JIRA_* vars below are deploy-time inputs read by

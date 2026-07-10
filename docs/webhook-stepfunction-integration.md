@@ -101,9 +101,14 @@ All inputs below are deploy-time environment variables read in `backend.ts`, mir
 | `JIRA_API_EMAIL` | Jira comments | Email of the Jira account whose API token is below |
 | `JIRA_API_TOKEN_SECRET_ARN` | Jira comments | Secrets Manager ARN of a [Jira API token](https://id.atlassian.com/manage-profile/security/api-tokens) |
 
-After `pnpm deploy`, read the webhook URL from `amplify_outputs.json`'s `custom.agent_webhook_url` and register it:
+After `pnpm deploy`, register the webhook on the repo. For **GitHub**, use the scripted setup — it reads `custom.agent_webhook_url` from `amplify_outputs.json`, pulls the HMAC secret straight from the deployed receiver Lambda's `GITHUB_WEBHOOK_SECRET_ARN` (so the registered secret can't drift from what the backend verifies), and creates-or-updates the hook idempotently:
 
-- **GitHub**: repo → Settings → Webhooks → Add webhook. Payload URL = `agent_webhook_url`, content type `application/json`, secret = the value stored at `GITHUB_WEBHOOK_SECRET_ARN`, events = "Issue comments" only.
+```bash
+npx tsx scripts/setup-github-webhook.ts --repo owner/name
+```
+
+Re-running it just updates the existing hook in place (matched by payload URL) — no duplicates. To register manually instead: repo → Settings → Webhooks → Add webhook, Payload URL = `agent_webhook_url`, content type `application/json`, secret = the value stored at `GITHUB_WEBHOOK_SECRET_ARN`, events = "Issue comments" only.
+
 - **Jira**: Settings → System → WebHooks → Create a WebHook. URL = `<agent_webhook_url>?source=jira&secret=<value stored at JIRA_WEBHOOK_SECRET_ARN>`, event = "Comment created".
 
 Mention the agent with `@webhook-agent <your request>` in a GitHub issue/PR comment or a Jira issue comment.
