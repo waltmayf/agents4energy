@@ -12,5 +12,10 @@ export const agentWebhookInvokeAgent = defineFunction({
     COGNITO_CLIENT_ID: '',
     SERVICE_ACCOUNT_USERNAME: '',
     SERVICE_ACCOUNT_SSM_PATH: '',
+    // ARN of the AgentCore Runtime backing MyHarness — SigV4/IAM-authorized,
+    // used only for the pre-invoke InvokeAgentRuntimeCommand (exec) call that
+    // authenticates git/gh in the harness's runtime session before the
+    // Cognito-JWT InvokeHarness call above runs the agent.
+    HARNESS_RUNTIME_ARN: '',
   },
 });
