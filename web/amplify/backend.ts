@@ -23,6 +23,12 @@ import { AgentCoreApplication, type HarnessSpec } from './constructs/agentCoreAp
 import { E2eTestUser } from './constructs/e2eTestUser/resource';
 import { AgentWebhookStack } from './constructs/agentWebhookStack';
 
+import { 
+  aws_bedrock as bedrock,
+  aws_bedrockagentcore as agentcore,
+  aws_iam as iam
+} from 'aws-cdk-lib'
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
@@ -146,6 +152,21 @@ const hosting = new HostingConstruct(hostingStack, 'Hosting');
 // ============================================================================
 
 const agentStack = backend.createStack('agent');
+
+const harnessRole = new iam.Role(agentStack, 'HarnessRole', {
+  assumedBy: new iam.ServicePrincipal('agentcore')
+})
+
+const harness = new agentcore.CfnHarness(agentStack, 'DefaultHarness', {
+  harnessName: 'non-blocking-name-with-branch',
+  executionRoleArn: harnessRole.roleArn,
+  model: {
+    bedrockModelConfig: {
+      modelId: bedrock.FoundationModelIdentifier.ANTHROPIC_CLAUDE_SONNET_4_6.modelId
+    }
+  }
+})
+
 
 // Cognito discovery URL: https://cognito-idp.{region}.amazonaws.com/{userPoolId}
 const userPoolId = backend.auth.resources.userPool.userPoolId;

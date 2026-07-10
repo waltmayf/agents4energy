@@ -65,7 +65,10 @@ async function createInstallationToken(
       },
       body: JSON.stringify({
         repositories: [repoName],
-        permissions: { contents: 'write', pull_requests: 'write' },
+        // issues:write is required to post issue comments (the webhook
+        // pipeline's initial "working on it" + final response comments);
+        // contents/pull_requests:write cover the agent's push/PR flow.
+        permissions: { contents: 'write', pull_requests: 'write', issues: 'write' },
       }),
     },
   );
