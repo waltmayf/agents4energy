@@ -7,6 +7,9 @@ import { registerMcpTarget } from './functions/register-mcp-target/resource';
 import { listMcpTools } from './functions/list-mcp-tools/resource';
 import { invokeAgent } from './functions/invoke-agent/resource';
 import { mintGithubToken } from './functions/mint-github-token/resource';
+import { agentWebhookReceiver } from './functions/agent-webhook-receiver/resource';
+import { agentWebhookPostComment } from './functions/agent-webhook-post-comment/resource';
+import { agentWebhookInvokeAgent } from './functions/agent-webhook-invoke-agent/resource';
 import { Policy, PolicyStatement, ServicePrincipal, Effect, Role } from 'aws-cdk-lib/aws-iam';
 import { Function as LambdaFunction } from 'aws-cdk-lib/aws-lambda';
 import { Fn, Stack } from 'aws-cdk-lib';
@@ -18,6 +21,13 @@ import { HostingConstruct } from './constructs/hostingConstruct';
 import { AgentCoreRuntimeWithBuild } from './constructs/agentCoreRuntimeWithBuild';
 import { AgentCoreApplication, type HarnessSpec } from './constructs/agentCoreApplication';
 import { E2eTestUser } from './constructs/e2eTestUser/resource';
+import { AgentWebhookStack } from './constructs/agentWebhookStack';
+
+import { 
+  aws_bedrock as bedrock,
+  aws_bedrockagentcore as agentcore,
+  aws_iam as iam
+} from 'aws-cdk-lib'
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -49,7 +59,7 @@ const harnessSpecs: HarnessSpec[] = [
     name: 'MyHarness',
     model: {
       bedrockModelConfig: {
-        modelId: 'openai.gpt-oss-120b',
+        modelId: 'openai.gpt-oss-120b-1:0',
       },
     },
     apiFormat: 'chat_completions',
@@ -113,6 +123,9 @@ const backend = defineBackend({
   listMcpTools,
   invokeAgent,
   mintGithubToken,
+  agentWebhookReceiver,
+  agentWebhookPostComment,
+  agentWebhookInvokeAgent,
 });
 
 backend.stack.tags.setTag('Project', 'workshop');
@@ -332,6 +345,95 @@ if (GITHUB_APP_PRIVATE_KEY_SECRET_ARN) {
 }
 
 // ============================================================================
+// AGENT WEBHOOK — API Gateway → Step Function pipeline for GitHub/Jira
+// mention comments (see issue #35, docs/webhook-stepfunction-integration.md).
+// Runs alongside .github/workflows/agent-mention.yml, not replacing it — see
+// the docs page for the trigger-phrase separation that keeps them from
+// double-firing on GitHub events.
+//
+// All *_SECRET_ARN / *_ARN inputs below are deploy-time inputs (Secrets
+// Manager secrets provisioned manually, same pattern as
+// GITHUB_APP_PRIVATE_KEY_SECRET_ARN above) — intentionally allowed to be
+// empty at synth so branch deploys without them still succeed; the receiver
+// Lambda fails cleanly at invoke time instead of failing the whole deploy.
+// ============================================================================
+
+const GITHUB_WEBHOOK_SECRET_ARN = process.env.GITHUB_WEBHOOK_SECRET_ARN ?? '';
+const JIRA_WEBHOOK_SECRET_ARN = process.env.JIRA_WEBHOOK_SECRET_ARN ?? '';
+const JIRA_API_TOKEN_SECRET_ARN = process.env.JIRA_API_TOKEN_SECRET_ARN ?? '';
+
+const webhookReceiverLambda = backend.agentWebhookReceiver.resources.lambda as LambdaFunction;
+const webhookPostCommentLambda = backend.agentWebhookPostComment.resources.lambda as LambdaFunction;
+const webhookInvokeAgentLambda = backend.agentWebhookInvokeAgent.resources.lambda as LambdaFunction;
+
+// Invoke the AgentCore Harness (not the SigV4 AgUiHandler runtime) — the
+// harness authorizes with CUSTOM_JWT, so this Lambda authenticates as the
+// invoke-agent service account (same Cognito user + SSM password as the
+// invoke-agent Lambda above) and calls the /harnesses/invoke endpoint.
+backend.agentWebhookInvokeAgent.addEnvironment('HARNESS_ARN', AGENTCORE_HARNESS_ARN);
+backend.agentWebhookInvokeAgent.addEnvironment('COGNITO_CLIENT_ID', backend.auth.resources.userPoolClient.userPoolClientId);
+backend.agentWebhookInvokeAgent.addEnvironment('SERVICE_ACCOUNT_USERNAME', 'invoke-agent-service@internal.local');
+backend.agentWebhookInvokeAgent.addEnvironment('SERVICE_ACCOUNT_SSM_PATH', SVC_SSM_PATH);
+backend.agentWebhookPostComment.addEnvironment('ACCOUNT_ID', backend.stack.account);
+
+const secretArns = [GITHUB_WEBHOOK_SECRET_ARN, JIRA_WEBHOOK_SECRET_ARN].filter(Boolean);
+if (secretArns.length) {
+  webhookReceiverLambda.addToRolePolicy(new PolicyStatement({
+    actions: ['secretsmanager:GetSecretValue'],
+    resources: secretArns,
+  }));
+}
+if (GITHUB_APP_PRIVATE_KEY_SECRET_ARN) {
+  webhookPostCommentLambda.addToRolePolicy(new PolicyStatement({
+    actions: ['secretsmanager:GetSecretValue'],
+    resources: [GITHUB_APP_PRIVATE_KEY_SECRET_ARN],
+  }));
+}
+if (JIRA_API_TOKEN_SECRET_ARN) {
+  webhookPostCommentLambda.addToRolePolicy(new PolicyStatement({
+    actions: ['secretsmanager:GetSecretValue'],
+    resources: [JIRA_API_TOKEN_SECRET_ARN],
+  }));
+}
+
+webhookPostCommentLambda.addToRolePolicy(new PolicyStatement({
+  actions: ['logs:CreateLogGroup', 'logs:CreateLogStream'],
+  resources: [`arn:aws:logs:${AGENTCORE_REGION}:${backend.stack.account}:log-group:/agent-webhook/*`],
+}));
+webhookInvokeAgentLambda.addToRolePolicy(new PolicyStatement({
+  actions: ['logs:PutLogEvents'],
+  resources: [`arn:aws:logs:${AGENTCORE_REGION}:${backend.stack.account}:log-group:/agent-webhook/*:log-stream:*`],
+}));
+webhookInvokeAgentLambda.addToRolePolicy(new PolicyStatement({
+  actions: ['bedrock-agentcore:InvokeHarness'],
+  resources: [AGENTCORE_HARNESS_ARN],
+}));
+// Read the service-account Cognito password from SSM to mint the harness JWT.
+webhookInvokeAgentLambda.addToRolePolicy(new PolicyStatement({
+  actions: ['ssm:GetParameter'],
+  resources: [`arn:aws:ssm:${AGENTCORE_REGION}:${backend.stack.account}:parameter${SVC_SSM_PATH}`],
+}));
+
+// Own stack (not agentStack) — AgentWebhookStack references the function-stack
+// Lambdas above, which already depend on agentStack (via the HARNESS_ARN
+// env var). Building it inside agentStack would make agentStack depend back
+// on the function stack, forming the same nested-stack cycle CloudFormation
+// rejects for the invokeHandler resolver wiring above.
+const agentWebhookCdkStack = backend.createStack('agent-webhook');
+const agentWebhookStack = new AgentWebhookStack(agentWebhookCdkStack, 'AgentWebhook', {
+  receiverLambda: webhookReceiverLambda,
+  postCommentLambda: webhookPostCommentLambda,
+  invokeAgentLambda: webhookInvokeAgentLambda,
+  // Physical name unique per sandbox/branch (same scheme as the AgentCore
+  // gateway name above) so concurrent deployments in the same account never
+  // collide on state machine names. State machine names are capped at 80
+  // chars — tighter than toGatewayResourceName's generic 100.
+  stateMachineName: toGatewayResourceName('agent-webhook', backendNamespace ?? '', backendName ?? '').slice(0, 80),
+});
+
+backend.agentWebhookReceiver.addEnvironment('STATE_MACHINE_ARN', agentWebhookStack.stateMachineArn);
+
+// ============================================================================
 // E2E TEST USER — Cognito user + SSM-stored credentials for Playwright auth.
 //
 // Created via a CDK custom resource instead of the e2e suite bootstrapping
@@ -524,5 +626,8 @@ backend.addOutput({
     // e2e test user credentials — see web/e2e/auth.setup.ts
     e2e_test_user_email_ssm_path: E2E_TEST_USER_EMAIL_SSM_PATH,
     e2e_test_user_password_ssm_path: E2E_TEST_USER_PASSWORD_SSM_PATH,
+    // Agent webhook — see docs/webhook-stepfunction-integration.md
+    agent_webhook_url: agentWebhookStack.webhookUrl,
+    agent_webhook_state_machine_arn: agentWebhookStack.stateMachineArn,
   },
 });
