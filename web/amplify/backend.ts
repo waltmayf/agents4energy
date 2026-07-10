@@ -49,10 +49,9 @@ const projectSpec = JSON.parse(readFileSync(resolve(agentcoreRoot, 'agentcore.js
 // from disk since it's prose, not config; everything else is inlined here as
 // literal CfnHarness sub-properties, passed straight through by
 // AgentCoreApplication with no field-mapping).
-const myHarnessSystemPrompt = readFileSync(
-  resolve(__dirname, '../../agent/default/app/MyHarness/system-prompt.md'),
-  'utf8',
-);
+const myHarnessSystemPrompt = `
+You are a coding agent. Users will assign coding tasks to you
+`
 
 const harnessSpecs: HarnessSpec[] = [
   {
