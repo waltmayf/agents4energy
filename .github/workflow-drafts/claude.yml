@@ -1,0 +1,479 @@
+name: Claude Code Action
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  id-token: write   # required for OIDC → AWS credentials
+  actions: write    # required for Claude to trigger and monitor the deploy workflow
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  issues:
+    types: [opened, labeled]
+  pull_request:
+    types: [labeled]
+
+env:
+  AWS_REGION: us-east-1
+
+jobs:
+  # `labeled` webhook payloads don't include an author_association for whoever applied the
+  # label (only for the issue/PR's original author, which is the wrong person to check — see
+  # issue #76: a human labeling a bot-opened issue was silently skipped because the gate was
+  # checking the issue author's association, not the labeler's). Collaborator status isn't
+  # derivable from the event payload at all, so this resolves it with a real API call instead.
+  check-labeler-permission:
+    if: |
+      github.event.action == 'labeled' && github.event.label.name == 'claude'
+    runs-on: ubuntu-latest
+    outputs:
+      is-collaborator: ${{ steps.check.outputs.is-collaborator }}
+    steps:
+      - name: Check whether the labeler is a repo collaborator (write/maintain/admin access)
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Pass event context through env vars, not shell interpolation, so an
+          # attacker-controlled value can't inject commands (ACAT ScriptInjection).
+          LABELER: ${{ github.actor }}
+        run: |
+          PERMISSION=$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${LABELER}/permission" --jq '.permission' 2>/dev/null || echo "none")
+          echo "labeler=${LABELER} permission=$PERMISSION"
+          if [ "$PERMISSION" = "admin" ] || [ "$PERMISSION" = "write" ] || [ "$PERMISSION" = "maintain" ]; then
+            echo "is-collaborator=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is-collaborator=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  claude:
+    needs: check-labeler-permission
+    concurrency:
+      group: claude-${{ github.event.issue.number || github.event.pull_request.number }}
+      cancel-in-progress: true
+    # `always()` so this job still runs for comment/opened-issue triggers even though
+    # check-labeler-permission's own `if:` skips it for those event types.
+    if: |
+      always() &&
+      (
+        (
+          github.event_name == 'issue_comment' &&
+          github.event.comment.user.type != 'Bot' &&
+          (
+            github.event.comment.author_association == 'OWNER' ||
+            github.event.comment.author_association == 'MEMBER' ||
+            github.event.comment.author_association == 'COLLABORATOR'
+          ) &&
+          (
+            contains(github.event.comment.body, '@claude') ||
+            contains(github.event.issue.labels.*.name, 'claude')
+          )
+        ) ||
+        (
+          github.event_name == 'pull_request_review_comment' &&
+          github.event.comment.user.type != 'Bot' &&
+          (
+            github.event.comment.author_association == 'OWNER' ||
+            github.event.comment.author_association == 'MEMBER' ||
+            github.event.comment.author_association == 'COLLABORATOR'
+          ) &&
+          (
+            contains(github.event.comment.body, '@claude') ||
+            contains(github.event.pull_request.labels.*.name, 'claude')
+          )
+        ) ||
+        (
+          github.event_name == 'issues' &&
+          github.event.action == 'opened' &&
+          contains(github.event.issue.body, '@claude') &&
+          (
+            github.event.issue.author_association == 'OWNER' ||
+            github.event.issue.author_association == 'MEMBER' ||
+            github.event.issue.author_association == 'COLLABORATOR'
+          )
+        ) ||
+        (
+          github.event_name == 'issues' &&
+          github.event.action == 'labeled' &&
+          github.event.label.name == 'claude' &&
+          (
+            needs.check-labeler-permission.outputs.is-collaborator == 'true' ||
+            github.actor == 'claude[bot]'
+          )
+        ) ||
+        (
+          github.event_name == 'pull_request' &&
+          github.event.action == 'labeled' &&
+          github.event.label.name == 'claude' &&
+          (
+            needs.check-labeler-permission.outputs.is-collaborator == 'true' ||
+            github.actor == 'claude[bot]'
+          )
+        )
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Mark in-progress
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Pass event context through env vars, not shell interpolation, so an
+          # attacker-controlled value can't inject commands (ACAT ScriptInjection).
+          ISSUE: ${{ github.event.issue.number || github.event.pull_request.number }}
+        run: |
+          gh label create "agent-working" --repo "$GITHUB_REPOSITORY" --color "e4e669" --description "Claude is actively working on this" 2>/dev/null || true
+          gh issue edit "$ISSUE" --repo "$GITHUB_REPOSITORY" --add-label "agent-working" 2>/dev/null || true
+
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+          # version: '10.28.2'
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: pnpm
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 21600
+
+      - name: Create OTLP log stream for this run
+        # The CloudWatch Logs OTLP endpoint writes to a specific log group/stream
+        # named via the x-aws-log-* headers below. The stream must exist first,
+        # so create a per-run stream using the OIDC role (which has
+        # logs:CreateLogStream on this repo's group). The group (per-repo) +
+        # bearer-token auth are provisioned by the CloudFormation stack. The
+        # group name mirrors deploy-to-repo.sh: /github-actions/claude-code-otlp/<repo-slug>
+        # where <repo-slug> is the bare repo name with non-[A-Za-z0-9_-] → '-'.
+        env:
+          REPO_NAME: ${{ github.event.repository.name }}
+          OTLP_LOG_STREAM: ${{ github.repository }}/${{ github.run_id }}
+        run: |
+          REPO_SLUG="${REPO_NAME//[^a-zA-Z0-9_-]/-}"
+          OTLP_LOG_GROUP="/github-actions/claude-code-otlp/${REPO_SLUG}"
+          echo "OTLP_LOG_GROUP=$OTLP_LOG_GROUP" >> "$GITHUB_ENV"
+          aws logs create-log-stream \
+            --region "$AWS_REGION" \
+            --log-group-name "$OTLP_LOG_GROUP" \
+            --log-stream-name "$OTLP_LOG_STREAM" 2>/dev/null || true
+
+      - name: Post CloudWatch log links
+        # Comment on the issue/PR with TWO CloudWatch deep-links, both scoped to
+        # THIS run's log stream (so only the invoked session shows, not other
+        # concurrent agent sessions):
+        #   1. Live Tail — auto-streaming raw events as they arrive (logStreamNames
+        #      filter pins it to this run's stream).
+        #   2. Logs Insights — a readable transcript: @timestamp first, a unified
+        #      "message" column (prompt / response / tool name / event body), a
+        #      "tool_call" JSON column on tool events, then context columns.
+        # Both encode their fragment in the console's rison codec: unreserved
+        # chars pass through, everything else becomes '*' + 2 lowercase hex digits.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE: ${{ github.event.issue.number || github.event.pull_request.number }}
+          # OTLP_LOG_GROUP is inherited from $GITHUB_ENV (set by the stream step).
+          OTLP_LOG_STREAM: ${{ github.repository }}/${{ github.run_id }}
+        run: |
+          ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+          ACCOUNT_ID="$ACCOUNT_ID" python3 <<'PY' > /tmp/cw-comment.md
+          import os
+          region  = os.environ["AWS_REGION"]
+          group   = os.environ["OTLP_LOG_GROUP"]
+          stream  = os.environ["OTLP_LOG_STREAM"]
+          account = os.environ["ACCOUNT_ID"]
+
+          # Console rison string codec: keep [A-Za-z0-9-._], else *<2-hex-lower>.
+          def enc(s):
+              return "".join(c if (c.isalnum() or c in "-._") else "*%02x" % ord(c) for c in s)
+
+          base = "https://%s.console.aws.amazon.com/cloudwatch/home?region=%s#" % (region, region)
+
+          # ── 1. Live Tail, filtered to this run's stream ──────────────────────
+          arn = "arn:aws:logs:%s:%s:log-group:%s:*" % (region, account, group)
+          live_url = (base + "logsV2:live-tail?logGroupArns=~(~'%s)~logStreamNames~(~'%s)"
+                      % (enc(arn), enc(stream)))
+
+          # ── 2. Logs Insights transcript, filtered to this run's stream ───────
+          # tool_call is built only for tool_ events (blank otherwise) and carries
+          # call metadata. Keep field count modest — Insights caps total function
+          # arguments per query.
+          query = (
+              "fields @timestamp, "
+              "coalesce(attributes.prompt, attributes.response, attributes.tool_name, body) as message, "
+              'if(body like /tool_/, concat('
+              '"{tool:", coalesce(attributes.tool_name,""), '
+              '", decision:", coalesce(attributes.decision,""), '
+              '", success:", coalesce(attributes.success,""), '
+              '", id:", coalesce(attributes.tool_use_id,""), "}"), "") as tool_call, '
+              "body as event, attributes.model, attributes.cost_usd, attributes.duration_ms\n"
+              '| filter @logStream = "%s"\n'
+              "| sort @timestamp asc\n"
+              "| limit 1000"
+          ) % stream
+          detail = ("~(end~0~start~-604800~timeType~'RELATIVE~unit~'seconds"
+                    "~editorString~'%s~source~(~'%s))") % (enc(query), enc(group))
+          insights_url = base + "logsV2:logs-insights?queryDetail=" + detail
+
+          # ── 3. Terminal live-tail: follow this run as a readable YAML transcript ──
+          # Uses `aws logs start-live-tail` (the StartLiveTail streaming API), NOT
+          # `aws logs tail --follow`. The latter block-buffers stdout when piped
+          # (aws-cli v2 is a frozen binary), so a low-volume stream shows nothing
+          # until the buffer fills. start-live-tail is a true HTTP/2 event stream:
+          # `--mode print-only` emits one raw event JSON per line, unbuffered, made
+          # for piping. No --follow, no poll loop, no dedup, no timestamp prefix.
+          # Caveat: it only streams events ingested AFTER you connect (no history),
+          # so start it before/while the agent runs.
+          #
+          # The jq (written to a temp file so the defs stay readable) is a STREAMING
+          # state machine: `foreach inputs` renders each event to a YAML block as it
+          # arrives. Tool OUTPUT isn't on the tool_result event (only a byte count) —
+          # it arrives later inside an api_request_body event, keyed by tool_use_id —
+          # so a tool_result with no output yet is HELD until the body that carries
+          # its output streams in, then released with the output attached. Emits
+          # time, event, message (block scalar when multi-line), tool + decoded input
+          # args + output; SHOW_BODIES=1 also dumps the full api_request/response JSON.
+          JQ_PROG = (
+              "def pad0(n): \" \" * n;\n"
+              "def toyaml(ind):\n"
+              "  if type == \"object\" then\n"
+              "    if (.|length)==0 then \" {}\"\n"
+              "    else \"\\n\" + ( to_entries | map( pad0(ind) + (.key|tostring) + \":\" + (.value | toyaml(ind+2)) ) | join(\"\\n\") ) end\n"
+              "  elif type == \"array\" then\n"
+              "    if (.|length)==0 then \" []\"\n"
+              "    else \"\\n\" + ( map( ( toyaml(ind+2) | ltrimstr(\"\\n\") ) as $r | if (type==\"object\" or type==\"array\") then pad0(ind) + \"- \" + ($r[ind+2:]) else pad0(ind) + \"-\" + $r end ) | join(\"\\n\") ) end\n"
+              "  elif type == \"string\" then\n"
+              "    if (. | contains(\"\\n\")) then \" |\\n\" + ( split(\"\\n\") | map(pad0(ind+2) + .) | join(\"\\n\") ) else \" \" + (@json) end\n"
+              "  else \" \" + (tostring) end;\n"
+              "def emit_scalar(key; val; ind): pad0(ind) + key + \":\" + (val | toyaml(ind));\n"
+              "def emit_json(key; raw; ind):\n"
+              "  (raw | try (fromjson|true) catch false) as $ok\n"
+              "  | if $ok then pad0(ind) + key + \":\" + ((raw|fromjson) | toyaml(ind+2)) else emit_scalar(key; raw; ind) end;\n"
+              "# Render one event to a YAML block. $out is the tool output (or null).\n"
+              "def render($e; $out):\n"
+              "  ($e.body // \"\") as $b\n"
+              "  | ($e.attributes.tool_name // \"\") as $tn\n"
+              "  | \"- time:  \\\"\\($e.attributes[\"event.timestamp\"] // \"\" | .[11:23])\\\"\"\n"
+              "    + \"\\n  event: \\($b | ltrimstr(\"claude_code.\"))\"\n"
+              "    + ( ($e.attributes.prompt // $e.attributes.response) | if . then \"\\n\" + emit_scalar(\"message\"; .; 2) else \"\" end )\n"
+              "    + ( if $b==\"claude_code.tool_result\" then\n"
+              "          \"\\n  tool:   \\($tn)\"\n"
+              "          + (if $e.attributes.tool_use_id then \"\\n  id:     \\($e.attributes.tool_use_id)\" else \"\" end)\n"
+              "          + (if $e.attributes.tool_input then \"\\n\" + emit_json(\"input\"; $e.attributes.tool_input; 2) else \"\" end)\n"
+              "          + ( $out | if . then \"\\n\" + emit_scalar(\"output\"; .; 2) else \"\" end )\n"
+              "        else \"\" end )\n"
+              "    + ( if ($b|test(\"api_(request|response)_body\")) then\n"
+              "          \"\\n  model:  \\($e.attributes.model // \"\")\\n\" + emit_json(\"api_body\"; ($e.attributes.body // \"\\\"\\\"\"); 2)\n"
+              "        else \"\" end );\n"
+              "# Scan an api_request_body string for tool_use_id -> tool_result content pairs.\n"
+              "def scan_outputs($body):\n"
+              "  [ $body | scan(\"\\\"tool_use_id\\\":\\\"(toolu_[A-Za-z0-9_]+)\\\",\\\"type\\\":\\\"tool_result\\\",\\\"content\\\":\\\"((?:[^\\\"\\\\\\\\]|\\\\\\\\.)*)\\\"\")\n"
+              "    | { (.[0]): (.[1] | gsub(\"\\\\\\\\n\";\"\\n\") | gsub(\"\\\\\\\\t\";\"\\t\") | gsub(\"\\\\\\\\\\\"\";\"\\\"\")) } ] | add // {};\n"
+              "# Streaming state machine: om = accumulated id->output; held = tool_results awaiting output.\n"
+              "foreach inputs as $line (\n"
+              "  {om:{}, held:[], out:[]};\n"
+              "  ( $line | sub(\"^[^{]*\";\"\") | try fromjson catch null ) as $e\n"
+              "  | if $e == null then .out=[]\n"
+              "    else ($e.body // \"\") as $b | ($e.attributes.tool_name // \"\") as $tn | ($e.attributes.tool_use_id // \"\") as $tid\n"
+              "    | if $b==\"claude_code.api_request_body\"\n"
+              "      then\n"
+              "        (.om + scan_outputs($e.attributes.body // \"\")) as $om2\n"
+              "        | ( [ .held[] | select(.attributes.tool_use_id as $h | $om2[$h] != null) ] ) as $ready\n"
+              "        | .om = $om2\n"
+              "        | .held = [ .held[] | select(.attributes.tool_use_id as $h | $om2[$h] == null) ]\n"
+              "        | .out = ( [ $ready[] | render(.; $om2[.attributes.tool_use_id]) ]\n"
+              "                   + (if $show_bodies==\"1\" then [ render($e; null) ] else [] end) )\n"
+              "      elif ($b==\"claude_code.user_prompt\" or $b==\"claude_code.assistant_response\")\n"
+              "      then .out = [ render($e; null) ]\n"
+              "      elif ($b==\"claude_code.tool_result\" and $tn!=\"ToolSearch\")\n"
+              "      then\n"
+              "        if .om[$tid] != null then .out = [ render($e; .om[$tid]) ]\n"
+              "        else .held += [$e] | .out=[] end\n"
+              "      else .out=[]\n"
+              "      end\n"
+              "    end\n"
+              "  ;\n"
+              "  .out[]\n"
+              ")"
+          )
+          arn = "arn:aws:logs:%s:%s:log-group:%s" % (region, account, group)
+          # First replay the last hour with `aws logs tail --since 1h` (it exits
+          # cleanly, so no piped-stdout buffering problem — that only bites the
+          # never-exiting --follow), then hand off to start-live-tail for the live
+          # stream. Both go into ONE jq so the streaming state machine sees history
+          # then live as a single continuous stream. History lines have a "<ts> "
+          # prefix, live lines are raw JSON — the jq's sub("^[^{]*";"") tolerates both.
+          tail_cmd = (
+              "jqf=$(mktemp); cat > \"$jqf\" <<'JQ'\n"
+              "%s\n"
+              "JQ\n"
+              "{ aws logs tail %s --region %s --log-stream-names \"%s\" \\\n"
+              "    --since 1h --format short 2>/dev/null;\n"
+              "  aws logs start-live-tail --region %s \\\n"
+              "    --log-group-identifiers \"%s\" \\\n"
+              "    --log-stream-names \"%s\" --mode print-only; } \\\n"
+              "  | jq -Rr --unbuffered --arg show_bodies \"${SHOW_BODIES:-}\" -f \"$jqf\""
+          ) % (JQ_PROG, group, region, stream, region, arn, stream)
+
+          print("## 📊 CloudWatch logs for this run\n")
+          print("- **[Live Tail](%s)** — auto-streaming raw log events as Claude works "
+                "(filtered to this session)." % live_url)
+          print("- **[Logs Insights transcript](%s)** — timestamp-first, readable view with "
+                "`message` and `tool_call` columns; press **Run query** to refresh." % insights_url)
+          # Terminal command is long, so tuck it in a collapsible <details> block.
+          # GitHub keeps the fenced code block's copy button inside <details>, so
+          # the reader clicks to expand, then copies with one click. A blank line
+          # after </summary> and around the fence is required for GitHub to render
+          # the code block (and its copy button) inside the disclosure.
+          print("\n<details>\n<summary>▶ Or follow the conversation in your terminal as YAML "
+                "(replays the last hour, then streams live — prompts, responses, and tool calls "
+                "with their args + output). Prefix <code>SHOW_BODIES=1</code> to also dump the full "
+                "API request/response JSON. Needs AWS creds + <code>jq</code>.</summary>\n")
+          print("```bash\n%s\n```\n" % tail_cmd)
+          print("</details>")
+          print("\n_All three are scoped to this run's log stream. The console links require "
+                "sign-in to the AWS account._")
+          PY
+          gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body-file /tmp/cw-comment.md
+
+      - id: claude
+        uses: anthropics/claude-code-action@v1
+        timeout-minutes: 300
+        env:
+          # Needed for ampx pipeline-deploy and gh CLI commands Claude runs in bash
+          GH_TOKEN: ${{ github.token }}
+          # ── Live telemetry → CloudWatch (metrics) ──────────────────────────
+          # Claude Code's built-in OTel exporter ships token/cost/session
+          # metrics straight to the CloudWatch OTLP metrics endpoint. Auth is a
+          # long-lived API key (bearer token) — the endpoint is HTTP-only and
+          # bearer auth needs no SigV4/collector, so a static header is all it
+          # takes. The key is scoped to metrics ingestion only.
+          # Docs: https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch-OTLP-MetricsBearerTokenAuth.html
+          CLAUDE_CODE_ENABLE_TELEMETRY: "1"
+          OTEL_METRICS_EXPORTER: otlp
+          OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+          OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: https://monitoring.${{ env.AWS_REGION }}.amazonaws.com/v1/metrics
+          OTEL_EXPORTER_OTLP_METRICS_HEADERS: "Authorization=Bearer ${{ secrets.CW_METRICS_API_KEY }}"
+          # Flush metrics quickly so a short session still reports before exit.
+          OTEL_METRIC_EXPORT_INTERVAL: "10000"
+          # ── Live telemetry → CloudWatch (log events) ───────────────────────
+          # Ships user_prompt / tool_decision / api_error events to the Logs
+          # OTLP endpoint. Needs its own bearer token (logs scope) plus the
+          # x-aws-log-group / x-aws-log-stream headers that route the events to
+          # the bearer-auth-enabled group and the per-run stream created above.
+          # Docs: https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/CWL_HTTP_Endpoints_BearerTokenAuth.html
+          OTEL_LOGS_EXPORTER: otlp
+          OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: https://logs.${{ env.AWS_REGION }}.amazonaws.com/v1/logs
+          # env.OTLP_LOG_GROUP was set into $GITHUB_ENV by the stream-creation step.
+          OTEL_EXPORTER_OTLP_LOGS_HEADERS: "Authorization=Bearer ${{ secrets.CW_LOGS_API_KEY }},x-aws-log-group=${{ env.OTLP_LOG_GROUP }},x-aws-log-stream=${{ github.repository }}/${{ github.run_id }}"
+          OTEL_LOGS_EXPORT_INTERVAL: "5000"
+          # ── Content verbosity flags (what goes INTO the log events) ─────────
+          # OTEL_LOG_USER_PROMPTS       — prompt text on user_prompt events.
+          # OTEL_LOG_ASSISTANT_RESPONSES— assistant reply text (≤60KB).
+          # OTEL_LOG_TOOL_DETAILS       — tool INPUT arguments (bash cmd, paths,
+          #                               params) on tool_decision/tool_result,
+          #                               as tool_input / tool_parameters.
+          # OTEL_LOG_RAW_API_BODIES     — full Anthropic Messages API request +
+          #                               response JSON as claude_code.api_request_body
+          #                               / api_response_body log events (≤60KB).
+          #   ⚠ This logs the ENTIRE conversation (prompts, tool I/O, responses)
+          #   in plaintext to CloudWatch on every request — high volume + sensitive.
+          #   OTEL_LOG_TOOL_CONTENT is intentionally NOT set: tested empirically
+          #   (run 28887588635) — it + CLAUDE_CODE_ENHANCED_TELEMETRY_BETA add
+          #   nothing to the LOGS pipeline (tool output goes to trace spans / X-Ray,
+          #   which the OTLP logs endpoint doesn't receive). The tool OUTPUT is only
+          #   recoverable from the api_request_body events (as tool_result content,
+          #   keyed by tool_use_id) — which is what the terminal transcript joins on.
+          # Docs: https://code.claude.com/docs/en/monitoring-usage
+          OTEL_LOG_USER_PROMPTS: "1"
+          OTEL_LOG_ASSISTANT_RESPONSES: "1"
+          OTEL_LOG_TOOL_DETAILS: "1"
+          OTEL_LOG_RAW_API_BODIES: "1"
+        with:
+          github_token: ${{ github.token }}
+          use_bedrock: "true"
+          claude_args: >-
+            --model us.anthropic.claude-sonnet-5
+            --allowedTools "Bash(act *),
+            Bash(cd *),
+            Bash(ls *),
+            Bash(cat *),
+            Bash(curl *),
+            Bash(npx ampx *),
+            Bash(node scripts/*),
+            Bash(bash scripts/*),
+            Bash(pnpm *),
+            Bash(docker *),
+            Bash(aws * get-*),
+            Bash(aws * list-*),
+            Bash(aws * describe-*),
+            Bash(openssl *),
+            Bash(gh *),
+            Bash(npx *),
+            Bash(tsc *),
+            Bash(mkdocs *),
+            Bash(python*),
+            Bash(pip*)
+            "
+
+      # anthropics/claude-code-action is a composite action whose action.yml only exposes
+      # execution_file/branch_name/github_token/structured_output/session_id as outputs — it
+      # computes a "conclusion" (success only when the last SDK message is a `result` message
+      # with subtype "success") internally but never surfaces it, and does NOT fail the step
+      # for a non-success conclusion (only a thrown SDK error or prepare-phase failure does
+      # that). So a run that silently stops early — usage limit exceeded, hit max turns, SDK
+      # error swallowed after partial output — reports the same "success" step outcome as a
+      # normal completed run. Re-derive the conclusion here by reading execution_file directly.
+      - name: Check Claude completion status
+        id: check_completion
+        if: always()
+        env:
+          STEP_OUTCOME: ${{ steps.claude.outcome }}
+          EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
+        run: |
+          if [ "$STEP_OUTCOME" == "cancelled" ] || [ "$STEP_OUTCOME" == "skipped" ]; then
+            # Superseded by a newer run via the concurrency group above, not an error.
+            echo "incomplete=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$STEP_OUTCOME" != "success" ] || [ -z "$EXECUTION_FILE" ] || [ ! -f "$EXECUTION_FILE" ]; then
+            echo "incomplete=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          LAST_OK=$(node -e '
+            const fs = require("fs");
+            let messages = [];
+            try { messages = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); } catch (e) {}
+            const last = messages[messages.length - 1];
+            console.log(last && last.type === "result" && last.subtype === "success" ? "true" : "false");
+          ' "$EXECUTION_FILE")
+          if [ "$LAST_OK" == "true" ]; then
+            echo "incomplete=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "incomplete=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Add agent-error label if Claude didn't complete
+        if: always() && steps.check_completion.outputs.incomplete == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE: ${{ github.event.issue.number || github.event.pull_request.number }}
+        run: |
+          gh label create "agent-error" --repo "$GITHUB_REPOSITORY" --color "d73a4a" --description "Claude did not finish successfully (crash, usage limit, timeout, etc.)" 2>/dev/null || true
+          gh issue edit "$ISSUE" --repo "$GITHUB_REPOSITORY" --add-label "agent-error" 2>/dev/null || true
+
+      - name: Remove agent-working label
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE: ${{ github.event.issue.number || github.event.pull_request.number }}
+        run: |
+          gh issue edit "$ISSUE" --repo "$GITHUB_REPOSITORY" --remove-label "agent-working" 2>/dev/null || true
