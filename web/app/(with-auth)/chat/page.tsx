@@ -1,5 +1,6 @@
 'use client';
 import { useChat } from '@ai-sdk/react';
+import { useSessionMessagePolling } from './use-session-message-polling';
 import { HarnessChatTransport } from '@/lib/agentcore-transport';
 import { useChatSession } from './use-chat-session';
 import { useInitialMessages } from './use-initial-messages';
@@ -218,19 +219,35 @@ function ChatView({
     onError: (err) => console.error('[useChat] error:', err),
   });
 
+  // Poll AgentCore memory for new messages (read‑only webhook sessions)
+  const polledMessages = useSessionMessagePolling(sessionIdRef.current, messages);
+  const mergedMessages = useMemo(() => {
+    const map = new Map<string, UIMessage>();
+    // Polled messages first, then live messages – live messages (streaming) take precedence if IDs clash
+    [...polledMessages, ...messages].forEach((m) => {
+      map.set(m.id, m);
+    });
+    // Sort chronologically
+    return Array.from(map.values()).sort((a, b) => {
+      const aTime = a.createdAt?.valueOf() ?? 0;
+      const bTime = b.createdAt?.valueOf() ?? 0;
+      return aTime - bTime;
+    });
+  }, [polledMessages, messages]);
+
   const isStreaming = status === 'submitted' || status === 'streaming';
 
   return (
     <>
       <Conversation className="flex-1">
         <ConversationContent>
-          {messages.length === 0 && (
+          {mergedMessages.length === 0 && (
             <ConversationEmptyState
               title="No messages yet"
               description={selectedAgent ? `Chatting with ${selectedAgent.name}` : 'Start a conversation to get started'}
             />
           )}
-          {messages.map((message) => {
+          {mergedMessages.map((message) => {
             const text = message.parts
               .filter((p): p is { type: 'text'; text: string } => p.type === 'text')
               .map((p) => p.text)
