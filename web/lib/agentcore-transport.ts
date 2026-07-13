@@ -1,31 +1,37 @@
 import { fetchAuthSession } from 'aws-amplify/auth';
+import {
+  BedrockAgentCoreClient,
+  InvokeHarnessCommand,
+  type HarnessMessage,
+  type HarnessTool,
+} from '@aws-sdk/client-bedrock-agentcore';
 import type { ChatTransport, UIMessage, UIMessageChunk } from 'ai';
-import { decodeEventStream } from './aws-event-stream';
 import outputs from '../amplify_outputs.json';
 
-export const HARNESS_ARN = (outputs as any).custom?.agentcore_harness_arn as string;
-export const DEPLOYMENT_REGION = ((outputs as any).custom?.agentcore_region as string) ?? 'us-east-1';
+const custom = (outputs as { custom?: { agentcore_harness_arn?: string; agentcore_region?: string } }).custom;
+export const HARNESS_ARN = custom?.agentcore_harness_arn as string;
+export const DEPLOYMENT_REGION = custom?.agentcore_region ?? 'us-east-1';
 
-// MyHarness is configured with a CUSTOM_JWT authorizer (see agent/default/app/MyHarness/harness.json)
-// pointed at this deployment's Cognito user pool, so invoke requests carry a
-// Cognito access token as a Bearer header rather than a SigV4 signature. The
-// authorizer's allowedClients check matches against the `client_id` claim,
-// which only ID tokens lack — access tokens carry it, ID tokens carry `aud` instead.
-async function bearerFetch(url: string, init: RequestInit & { body: string }): Promise<Response> {
-  const session = await fetchAuthSession();
-  const token = session.tokens?.accessToken?.toString();
-  if (!token) {
-    throw new Error('No Cognito access token — sign in first.');
-  }
-
-  return fetch(url, {
-    method: init.method,
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'Content-Type': 'application/json',
+// MyHarness authorizes with AWS_IAM (SigV4), so the browser signs InvokeHarness
+// requests with the Cognito Identity Pool's authenticated-role credentials
+// (granted bedrock-agentcore:InvokeHarness in web/amplify/backend.ts) rather
+// than sending a Cognito Bearer JWT. `fetchAuthSession()` returns temporary
+// SigV4 credentials for the signed-in user; the SDK client signs + decodes the
+// event stream for us, so there's no hand-rolled binary decoder here anymore.
+function makeClient(): BedrockAgentCoreClient {
+  return new BedrockAgentCoreClient({
+    region: DEPLOYMENT_REGION,
+    credentials: async () => {
+      const session = await fetchAuthSession();
+      const creds = session.credentials;
+      if (!creds) throw new Error('No AWS credentials — sign in first.');
+      return {
+        accessKeyId: creds.accessKeyId,
+        secretAccessKey: creds.secretAccessKey,
+        sessionToken: creds.sessionToken,
+        expiration: creds.expiration,
+      };
     },
-    body: init.body,
-    signal: (init as any).signal,
   });
 }
 
@@ -48,6 +54,7 @@ export interface AgentConfig {
 export class HarnessChatTransport implements ChatTransport<UIMessage> {
   private getSessionId: () => string | null;
   private getAgentConfig: () => AgentConfig;
+  private client: BedrockAgentCoreClient;
 
   constructor(opts: {
     getSessionId: () => string | null;
@@ -55,6 +62,7 @@ export class HarnessChatTransport implements ChatTransport<UIMessage> {
   }) {
     this.getSessionId = opts.getSessionId;
     this.getAgentConfig = opts.getAgentConfig ?? (() => ({}));
+    this.client = makeClient();
   }
 
   sendMessages({
@@ -69,6 +77,7 @@ export class HarnessChatTransport implements ChatTransport<UIMessage> {
   }): Promise<ReadableStream<UIMessageChunk>> {
     const getSessionId = this.getSessionId;
     const getAgentConfig = this.getAgentConfig;
+    const client = this.client;
 
     return Promise.resolve(
       new ReadableStream<UIMessageChunk>({
@@ -76,7 +85,7 @@ export class HarnessChatTransport implements ChatTransport<UIMessage> {
           try {
             const agentConfig = getAgentConfig();
 
-            const harnessMessages = messages.flatMap((m) => {
+            const harnessMessages: HarnessMessage[] = messages.flatMap((m) => {
               if (m.role !== 'user' && m.role !== 'assistant') return [];
               const text = m.parts
                 .filter((p): p is { type: 'text'; text: string } => p.type === 'text')
@@ -87,65 +96,60 @@ export class HarnessChatTransport implements ChatTransport<UIMessage> {
             });
 
             const sessionId = getSessionId() ?? crypto.randomUUID();
-            const encodedArn = encodeURIComponent(HARNESS_ARN);
-            const url = `https://bedrock-agentcore.${DEPLOYMENT_REGION}.amazonaws.com/harnesses/invoke?harnessArn=${encodedArn}`;
 
-            const invokeBody: Record<string, unknown> = {
-              runtimeSessionId: sessionId,
-              messages: harnessMessages,
-            };
+            const tools: HarnessTool[] | undefined = agentConfig.mcpServers?.length
+              ? agentConfig.mcpServers.map((s) => ({
+                  type: 'remote_mcp',
+                  name: s.name,
+                  config: {
+                    remoteMcp: {
+                      url: s.url,
+                      ...(s.headers && Object.keys(s.headers).length ? { headers: s.headers } : {}),
+                    },
+                  },
+                }))
+              : undefined;
 
             // Use the InvokeHarness API's first-class override fields so the harness
             // handles system prompt and model selection properly (no message injection).
-            if (agentConfig.systemPromptText) {
-              invokeBody.systemPrompt = [{ text: agentConfig.systemPromptText }];
-            }
-            if (agentConfig.modelId) {
-              invokeBody.model = { bedrock: { modelId: agentConfig.modelId } };
-            }
-            if (agentConfig.mcpServers?.length) {
-              invokeBody.tools = agentConfig.mcpServers.map((s) => ({
-                type: 'remote_mcp',
-                name: s.name,
-                config: {
-                  remoteMcp: {
-                    url: s.url,
-                    ...(s.headers && Object.keys(s.headers).length ? { headers: s.headers } : {}),
-                  },
-                },
-              }));
-            }
-
-            const response = await bearerFetch(url, {
-              method: 'POST',
-              body: JSON.stringify(invokeBody),
-              signal: abortSignal,
-            });
-
-            if (!response.ok) {
-              const errText = await response.text();
-              throw new Error(`AgentCore error ${response.status}: ${errText}`);
-            }
+            const response = await client.send(
+              new InvokeHarnessCommand({
+                harnessArn: HARNESS_ARN,
+                runtimeSessionId: sessionId,
+                messages: harnessMessages,
+                systemPrompt: agentConfig.systemPromptText
+                  ? [{ text: agentConfig.systemPromptText }]
+                  : undefined,
+                model: agentConfig.modelId
+                  ? { bedrockModelConfig: { modelId: agentConfig.modelId } }
+                  : undefined,
+                tools,
+              }),
+              { abortSignal },
+            );
 
             const textId = crypto.randomUUID();
             controller.enqueue({ type: 'text-start', id: textId });
 
-            for await (const event of decodeEventStream(response.body!)) {
+            for await (const event of response.stream ?? []) {
               if (abortSignal?.aborted) break;
-              const eventType = event.headers[':event-type'];
-              if (eventType === 'contentBlockDelta') {
-                const delta = (event.payload as any)?.delta?.text as string | undefined;
-                if (delta) controller.enqueue({ type: 'text-delta', id: textId, delta });
+              if (event.validationException || event.internalServerException || event.runtimeClientError) {
+                const ex = event.validationException ?? event.internalServerException ?? event.runtimeClientError;
+                throw new Error(ex?.message ?? 'Harness stream exception');
               }
+              const delta = event.contentBlockDelta?.delta?.text;
+              if (delta) controller.enqueue({ type: 'text-delta', id: textId, delta });
             }
 
             controller.enqueue({ type: 'text-end', id: textId });
             controller.close();
-          } catch (err: any) {
-            if (err?.name === 'AbortError' || abortSignal?.aborted) {
+          } catch (err) {
+            const name = err instanceof Error ? err.name : undefined;
+            if (name === 'AbortError' || abortSignal?.aborted) {
               controller.close();
             } else {
-              controller.enqueue({ type: 'error', errorText: err?.message ?? String(err) });
+              const message = err instanceof Error ? err.message : String(err);
+              controller.enqueue({ type: 'error', errorText: message });
               controller.close();
             }
           }

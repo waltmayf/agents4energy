@@ -170,20 +170,18 @@ const agUiHandlerRuntime = new AgentCoreRuntimeWithBuild(agentStack, 'AgUiHandle
   description: 'AG-UI handler runtime for the agentcore-amplify-fullstack app',
 });
 
-// Every harness above authorizes with CUSTOM_JWT against this stack's own
-// Cognito user pool — derived here (rather than hardcoded alongside the rest
-// of the inlined harness spec above) so a redeploy against a recreated user
-// pool/client never leaves a harness authorizing against a stale ID (see
-// issue #56), the same way AgentCoreRuntimeWithBuild derives it above.
-const harnessSpecsWithAuth: HarnessSpec[] = harnessSpecs.map((h) => ({
-  ...h,
-  authorizerConfiguration: {
-    customJwtAuthorizer: {
-      discoveryUrl: cognitoDiscoveryUrl,
-      allowedClients: [backend.auth.resources.userPoolClient.userPoolClientId],
-    },
-  },
-}));
+// MyHarness authorizes with AWS_IAM (SigV4), not CUSTOM_JWT: omitting
+// `authorizerConfiguration` makes a CfnHarness default to IAM auth. Every
+// caller (the browser transport, the invoke-agent + webhook Lambdas, and
+// scripts/invoke.ts) now invokes it via the SDK's InvokeHarnessCommand with
+// SigV4-signed credentials rather than a Cognito Bearer JWT. This lets the
+// webhook path use the native InvokeHarness / InvokeAgentRuntimeCommand SDK
+// operations (which are SigV4-only) — deleting the hand-rolled event-stream
+// decoder and resolving the long-stream `TypeError: terminated` (#57), since
+// the SDK owns connection timeouts and retries. Browser callers sign with
+// Cognito Identity Pool credentials (the pool's authenticated role is granted
+// bedrock-agentcore:InvokeHarness in the wiring below).
+const harnessSpecsWithAuth: HarnessSpec[] = harnessSpecs;
 
 // Memory/Harness/Gateway from agentcore.json — same-stack CDK tokens, no
 // post-deploy control-plane resolution needed. `AgUiHandler` is excluded
@@ -263,6 +261,16 @@ const AGENTCORE_HARNESS_ARN = harnessName ? agentCoreApp.harnessArn(harnessName)
 const AGENTCORE_HARNESS_ROLE_ARN = harnessName ? agentCoreApp.harnessRoleArn(harnessName) : '';
 const AGENTCORE_REGION = Stack.of(agentStack).region;
 
+// MyHarness now authorizes with AWS_IAM, so the browser signs InvokeHarness
+// requests with Cognito Identity Pool credentials (see web/lib/agentcore-transport.ts).
+// Grant the pool's authenticated role permission to invoke the harness.
+if (AGENTCORE_HARNESS_ARN) {
+  backend.auth.resources.authenticatedUserIamRole.addToPrincipalPolicy(new PolicyStatement({
+    actions: ['bedrock-agentcore:InvokeHarness'],
+    resources: [AGENTCORE_HARNESS_ARN],
+  }));
+}
+
 // ============================================================================
 // BASIC AUTH CONFIGURATION
 // ============================================================================
@@ -319,25 +327,12 @@ backend.invokeAgent.addEnvironment('HARNESS_ARN', AGENTCORE_HARNESS_ARN);
 
 const invokeAgentLambda = backend.invokeAgent.resources.lambda as LambdaFunction;
 
+// MyHarness authorizes with AWS_IAM: this Lambda invokes it via the SDK's
+// InvokeHarnessCommand, signed with its own execution-role credentials — no
+// Cognito service account / SSM password needed anymore.
 invokeAgentLambda.addToRolePolicy(new PolicyStatement({
-  actions: [
-    'bedrock-agentcore:InvokeAgentRuntime',
-    'bedrock-agentcore:InvokeHarness',
-  ],
+  actions: ['bedrock-agentcore:InvokeHarness'],
   resources: [AGENTCORE_HARNESS_ARN],
-}));
-
-const SVC_SSM_PATH = '/agentcore/invoke-agent-service/password';
-backend.invokeAgent.addEnvironment('COGNITO_USER_POOL_ID', backend.auth.resources.userPool.userPoolId);
-backend.invokeAgent.addEnvironment('COGNITO_CLIENT_ID', backend.auth.resources.userPoolClient.userPoolClientId);
-backend.invokeAgent.addEnvironment('SERVICE_ACCOUNT_USERNAME', 'invoke-agent-service@internal.local');
-backend.invokeAgent.addEnvironment('SERVICE_ACCOUNT_SSM_PATH', SVC_SSM_PATH);
-
-invokeAgentLambda.addToRolePolicy(new PolicyStatement({
-  actions: ['ssm:GetParameter'],
-  resources: [
-    `arn:aws:ssm:${AGENTCORE_REGION}:${backend.stack.account}:parameter${SVC_SSM_PATH}`,
-  ],
 }));
 
 // ============================================================================
@@ -386,14 +381,12 @@ const webhookReceiverLambda = backend.agentWebhookReceiver.resources.lambda as L
 const webhookPostCommentLambda = backend.agentWebhookPostComment.resources.lambda as LambdaFunction;
 const webhookInvokeAgentLambda = backend.agentWebhookInvokeAgent.resources.lambda as LambdaFunction;
 
-// Invoke the AgentCore Harness (not the SigV4 AgUiHandler runtime) — the
-// harness authorizes with CUSTOM_JWT, so this Lambda authenticates as the
-// invoke-agent service account (same Cognito user + SSM password as the
-// invoke-agent Lambda above) and calls the /harnesses/invoke endpoint.
+// Invoke the AgentCore Harness (not the SigV4 AgUiHandler runtime). The
+// harness authorizes with AWS_IAM, so this Lambda invokes it via the SDK's
+// InvokeHarnessCommand — and the pre-invoke git-auth exec via
+// InvokeAgentRuntimeCommand — both signed with its own execution-role
+// credentials. No Cognito service account / SSM password anymore.
 backend.agentWebhookInvokeAgent.addEnvironment('HARNESS_ARN', AGENTCORE_HARNESS_ARN);
-backend.agentWebhookInvokeAgent.addEnvironment('COGNITO_CLIENT_ID', backend.auth.resources.userPoolClient.userPoolClientId);
-backend.agentWebhookInvokeAgent.addEnvironment('SERVICE_ACCOUNT_USERNAME', 'invoke-agent-service@internal.local');
-backend.agentWebhookInvokeAgent.addEnvironment('SERVICE_ACCOUNT_SSM_PATH', SVC_SSM_PATH);
 backend.agentWebhookPostComment.addEnvironment('ACCOUNT_ID', backend.stack.account);
 
 const secretArns = [GITHUB_WEBHOOK_SECRET_ARN, JIRA_WEBHOOK_SECRET_ARN].filter(Boolean);
@@ -424,18 +417,16 @@ webhookInvokeAgentLambda.addToRolePolicy(new PolicyStatement({
   actions: ['logs:PutLogEvents'],
   resources: [`arn:aws:logs:${AGENTCORE_REGION}:${backend.stack.account}:log-group:/agent-webhook/*:log-stream:*`],
 }));
+// Both harness operations this Lambda performs are SigV4-signed against the
+// same harness ARN: InvokeHarness (the agent turn) and InvokeAgentRuntimeCommand
+// (the pre-invoke git-auth exec, POST /runtimes/{harnessArn}/commands — see
+// docs/webhook-stepfunction-integration.md "Git access").
 webhookInvokeAgentLambda.addToRolePolicy(new PolicyStatement({
-  actions: ['bedrock-agentcore:InvokeHarness'],
+  actions: [
+    'bedrock-agentcore:InvokeHarness',
+    'bedrock-agentcore:InvokeAgentRuntimeCommand',
+  ],
   resources: [AGENTCORE_HARNESS_ARN],
-}));
-// The pre-invoke harness-exec that authenticates git (POST
-// /runtimes/{harnessArn}/commands) is authorized purely by the Cognito
-// service-account Bearer JWT (same as /harnesses/invoke) — no extra SigV4/IAM
-// grant is needed. See docs/webhook-stepfunction-integration.md "Git access".
-// Read the service-account Cognito password from SSM to mint the harness JWT.
-webhookInvokeAgentLambda.addToRolePolicy(new PolicyStatement({
-  actions: ['ssm:GetParameter'],
-  resources: [`arn:aws:ssm:${AGENTCORE_REGION}:${backend.stack.account}:parameter${SVC_SSM_PATH}`],
 }));
 
 // Own stack (not agentStack) — AgentWebhookStack references the function-stack

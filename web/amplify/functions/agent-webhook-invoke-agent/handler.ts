@@ -1,54 +1,19 @@
 import {
-  CognitoIdentityProviderClient,
-  InitiateAuthCommand,
-} from '@aws-sdk/client-cognito-identity-provider';
-import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
+  BedrockAgentCoreClient,
+  InvokeHarnessCommand,
+  InvokeAgentRuntimeCommandCommand,
+} from '@aws-sdk/client-bedrock-agentcore';
 import { appendLog } from '../_shared/liveTail';
 
 const REGION = process.env.AWS_REGION ?? 'us-east-1';
 const HARNESS_ARN = process.env.HARNESS_ARN ?? '';
-const COGNITO_CLIENT_ID = process.env.COGNITO_CLIENT_ID ?? '';
-const SERVICE_ACCOUNT_USERNAME = process.env.SERVICE_ACCOUNT_USERNAME ?? '';
-const SERVICE_ACCOUNT_SSM_PATH = process.env.SERVICE_ACCOUNT_SSM_PATH ?? '';
 
-const cognito = new CognitoIdentityProviderClient({ region: REGION });
-const ssm = new SSMClient({ region: REGION });
-
-// The AgentCore control-plane host both the harness-invoke and harness-exec
-// APIs live on, derived from the harness ARN's region field.
-function agentCoreHost(): string {
-  const region = HARNESS_ARN.split(':')[3] || REGION;
-  return `https://bedrock-agentcore.${region}.amazonaws.com`;
-}
-
-// Cache the access token across warm invocations (~1 hour lifetime).
-let cachedAccessToken: string | null = null;
-
-async function getAccessToken(): Promise<string> {
-  if (cachedAccessToken) return cachedAccessToken;
-
-  const passwordParam = await ssm.send(new GetParameterCommand({
-    Name: SERVICE_ACCOUNT_SSM_PATH,
-    WithDecryption: true,
-  }));
-  const password = passwordParam.Parameter?.Value;
-  if (!password) throw new Error('Service account password not found in SSM');
-
-  const authRes = await cognito.send(new InitiateAuthCommand({
-    AuthFlow: 'USER_PASSWORD_AUTH',
-    ClientId: COGNITO_CLIENT_ID,
-    AuthParameters: {
-      USERNAME: SERVICE_ACCOUNT_USERNAME,
-      PASSWORD: password,
-    },
-  }));
-
-  const token = authRes.AuthenticationResult?.AccessToken;
-  if (!token) throw new Error('Failed to obtain Cognito access token for service account');
-
-  cachedAccessToken = token;
-  return token;
-}
+// The harness authorizes with AWS_IAM, so the SDK client signs every request
+// with this Lambda's execution-role credentials (SigV4) — no Cognito JWT. The
+// SDK also owns connection timeouts + retries and decodes the event stream
+// into typed objects, so the hand-rolled binary decoder (and the long-stream
+// `TypeError: terminated` it hit, #57) are both gone.
+const agentCore = new BedrockAgentCoreClient({ region: REGION });
 
 interface InvokeAgentInput {
   runId: string;
@@ -76,19 +41,17 @@ async function log(groupName: string | undefined, streamName: string | undefined
 }
 
 // Runs a shell command in the harness's runtime session via the harness-exec
-// API (`POST /runtimes/{harnessArn}/commands`), keyed by the same
-// runtimeSessionId the subsequent InvokeHarness call uses so both land in the
-// same container. Two things this differs from the (never-working) approach in
-// #52, discovered while verifying #53:
-//   1. The exec endpoint takes the **harness** ARN in its path, not the
-//      backing runtime ARN. Calling the runtime ARN directly returns HTTP 400
+// API (InvokeAgentRuntimeCommand → POST /runtimes/{harnessArn}/commands),
+// keyed by the same runtimeSessionId the subsequent InvokeHarness call uses so
+// both land in the same container. Two things carried over from #52/#53:
+//   1. `agentRuntimeArn` here takes the **harness** ARN, not the backing
+//      runtime ARN. Calling the runtime ARN directly returns HTTP 400
 //      "managed by a harness and cannot be invoked directly".
-//   2. The harness's runtime is CUSTOM_JWT-authorized, so exec must use the
-//      same Cognito Bearer token as /harnesses/invoke — a SigV4 call (what the
-//      SDK's InvokeAgentRuntimeCommand sent) is rejected with HTTP 403
-//      "Authorization method mismatch".
-// The response is an AWS binary event stream of `contentDelta` (stdout/stderr)
-// and a final `contentStop` (exitCode) frames — decoded below for diagnostics.
+//   2. The harness now authorizes with AWS_IAM, so this is SigV4-signed via the
+//      SDK client above (the earlier CUSTOM_JWT setup required a Cognito Bearer
+//      token and a hand-rolled fetch; that's gone).
+// The SDK yields typed `chunk` events carrying contentDelta (stdout/stderr) and
+// a final contentStop (exitCode).
 async function execInHarness(opts: {
   sessionId: string;
   command: string;
@@ -98,41 +61,32 @@ async function execInHarness(opts: {
 
   if (!HARNESS_ARN) throw new Error('HARNESS_ARN not configured');
 
-  const accessToken = await getAccessToken();
-  const url = `${agentCoreHost()}/runtimes/${encodeURIComponent(HARNESS_ARN)}/commands`;
-
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      'Content-Type': 'application/json',
-      'X-Amzn-Bedrock-AgentCore-Runtime-Session-Id': sessionId,
-    },
-    body: JSON.stringify({ command, timeout: timeoutSeconds }),
-  });
-
-  if (!response.ok) {
-    const text = await response.text();
-    if (response.status === 401 || response.status === 403) cachedAccessToken = null;
-    throw new Error(`Harness exec HTTP ${response.status}: ${text}`);
-  }
+  const response = await agentCore.send(new InvokeAgentRuntimeCommandCommand({
+    agentRuntimeArn: HARNESS_ARN,
+    runtimeSessionId: sessionId,
+    contentType: 'application/json',
+    accept: 'application/json',
+    body: { command, timeout: timeoutSeconds },
+  }));
 
   let stdout = '';
   let stderr = '';
   let exitCode: number | undefined;
 
-  await decodeEventStream(response, (headers, payload, payloadBytes) => {
-    if (headers[':message-type'] === 'exception' || headers[':event-type'] === 'exception') {
-      const message = (payload?.message as string | undefined) ?? payloadBytes.toString('utf8');
-      throw new Error(`Harness exec stream exception (${headers[':exception-type'] ?? 'unknown'}): ${message}`);
+  for await (const event of response.stream ?? []) {
+    if (event.validationException || event.accessDeniedException || event.resourceNotFoundException
+      || event.throttlingException || event.serviceQuotaExceededException
+      || event.internalServerException || event.runtimeClientError) {
+      const ex = event.validationException ?? event.accessDeniedException ?? event.resourceNotFoundException
+        ?? event.throttlingException ?? event.serviceQuotaExceededException
+        ?? event.internalServerException ?? event.runtimeClientError;
+      throw new Error(`Harness exec stream exception: ${ex?.message ?? JSON.stringify(ex)}`);
     }
-    // Exec frames are `:event-type: chunk` carrying contentStart/Delta/Stop.
-    const delta = payload?.contentDelta as Record<string, unknown> | undefined;
-    if (delta?.stdout) stdout += delta.stdout as string;
-    if (delta?.stderr) stderr += delta.stderr as string;
-    const stop = payload?.contentStop as Record<string, unknown> | undefined;
-    if (stop && typeof stop.exitCode === 'number') exitCode = stop.exitCode;
-  });
+    const chunk = event.chunk;
+    if (chunk?.contentDelta?.stdout) stdout += chunk.contentDelta.stdout;
+    if (chunk?.contentDelta?.stderr) stderr += chunk.contentDelta.stderr;
+    if (typeof chunk?.contentStop?.exitCode === 'number') exitCode = chunk.contentStop.exitCode;
+  }
 
   return { exitCode: exitCode ?? -1, stdout, stderr };
 }
@@ -159,7 +113,7 @@ async function authenticateGitInHarnessSession(opts: {
   const { sessionId, githubToken } = opts;
 
   // JSON.stringify safely quotes the token for the shell (printf '%s' "<tok>")
-  // and, being the body of a JSON POST, is never echoed to the model.
+  // and, being the body of an SDK request, is never echoed to the model.
   const command = [
     'set -e',
     'git config --global user.name "webhook-agent[bot]"',
@@ -175,56 +129,11 @@ async function authenticateGitInHarnessSession(opts: {
   }
 }
 
-// Decode an AWS binary event stream (the framing both /harnesses/invoke and
-// the harness-exec /commands endpoints return), invoking `onFrame` for each
-// complete frame. Identical framing logic to invoke-agent + scripts/invoke.ts.
-async function decodeEventStream(
-  response: Response,
-  onFrame: (headers: Record<string, string>, payload: Record<string, unknown> | null, payloadBytes: Buffer) => void,
-): Promise<void> {
-  let raw = Buffer.alloc(0);
-
-  for await (const chunk of response.body as unknown as AsyncIterable<Buffer>) {
-    raw = Buffer.concat([raw, chunk]);
-
-    while (raw.length >= 12) {
-      const totalLen = raw.readUInt32BE(0);
-      if (raw.length < totalLen) break;
-
-      const headersLen = raw.readUInt32BE(4);
-      let pos = 12;
-      const headersEnd = pos + headersLen;
-      const headers: Record<string, string> = {};
-
-      while (pos < headersEnd) {
-        const nameLen = raw[pos++];
-        const name = raw.subarray(pos, pos + nameLen).toString('utf8');
-        pos += nameLen;
-        pos++; // value type byte
-        const valLen = raw.readUInt16BE(pos); pos += 2;
-        headers[name] = raw.subarray(pos, pos + valLen).toString('utf8');
-        pos += valLen;
-      }
-
-      const payloadBytes = raw.subarray(12 + headersLen, totalLen - 4);
-      let payload: Record<string, unknown> | null = null;
-      try { payload = JSON.parse(payloadBytes.toString('utf8')); } catch { /* empty frame */ }
-
-      onFrame(headers, payload, payloadBytes);
-
-      raw = raw.subarray(totalLen);
-    }
-  }
-}
-
-// Invoke the AgentCore Harness over its HTTP `/harnesses/invoke` endpoint,
-// authenticated with a Cognito service-account JWT — the same path the
-// browser-initiated invoke-agent Lambda uses (web/amplify/functions/invoke-agent/handler.ts).
-// The harness authorizes with CUSTOM_JWT (not SigV4), so a raw
-// InvokeAgentRuntimeCommand against the runtime fails with an
-// "Authorization method mismatch" error; the JWT path is the supported one.
-// The response is an AWS binary event stream — decode contentBlockDelta frames
-// into the full text.
+// Invoke the AgentCore Harness via the SDK's InvokeHarnessCommand (SigV4-signed
+// against the harness ARN — the same target the browser transport and the
+// invoke-agent Lambda use). The SDK returns a typed event stream; accumulate
+// its contentBlockDelta text into the full response, and surface validation /
+// server exception events instead of silently returning empty text.
 async function invokeHarness(opts: {
   sessionId: string;
   prompt: string;
@@ -233,49 +142,25 @@ async function invokeHarness(opts: {
 
   if (!HARNESS_ARN) throw new Error('HARNESS_ARN not configured');
 
-  const accessToken = await getAccessToken();
-
-  const encodedArn = encodeURIComponent(HARNESS_ARN);
-  const url = `${agentCoreHost()}/harnesses/invoke?harnessArn=${encodedArn}`;
-
-  const body: Record<string, unknown> = {
+  const response = await agentCore.send(new InvokeHarnessCommand({
+    harnessArn: HARNESS_ARN,
     runtimeSessionId: sessionId,
     messages: [{ role: 'user', content: [{ text: prompt }] }],
-  };
-
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(body),
-  });
-
-  if (!response.ok) {
-    const text = await response.text();
-    // Reset token cache on auth errors so the next invocation re-authenticates.
-    if (response.status === 401 || response.status === 403) cachedAccessToken = null;
-    throw new Error(`Harness HTTP ${response.status}: ${text}`);
-  }
+  }));
 
   const chunks: string[] = [];
 
-  await decodeEventStream(response, (headers, payload, payloadBytes) => {
-    // The stream frames errors as `:message-type: exception` (e.g. a bad
-    // model id surfaces here as a ValidationException). Surface it instead
-    // of silently returning "(no response)" — a swallowed exception frame is
-    // what made an invalid harness model look like an empty agent reply.
-    if (headers[':message-type'] === 'exception' || headers[':event-type'] === 'exception') {
-      const message = (payload?.message as string | undefined) ?? payloadBytes.toString('utf8');
-      throw new Error(`Harness stream exception (${headers[':exception-type'] ?? 'unknown'}): ${message}`);
+  for await (const event of response.stream ?? []) {
+    // A bad model id / malformed request surfaces here as a validation or
+    // internal-server exception event — throw it rather than returning
+    // "(no response)", which is what previously masked such failures.
+    if (event.validationException || event.internalServerException || event.runtimeClientError) {
+      const ex = event.validationException ?? event.internalServerException ?? event.runtimeClientError;
+      throw new Error(`Harness stream exception: ${ex?.message ?? JSON.stringify(ex)}`);
     }
-
-    if (headers[':event-type'] === 'contentBlockDelta') {
-      const text = (payload?.delta as Record<string, unknown> | undefined)?.text as string | undefined;
-      if (text) chunks.push(text);
-    }
-  });
+    const text = event.contentBlockDelta?.delta?.text;
+    if (text) chunks.push(text);
+  }
 
   return chunks.join('');
 }

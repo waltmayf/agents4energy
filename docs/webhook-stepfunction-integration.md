@@ -30,11 +30,12 @@ GitHub issue_comment webhook          Jira comment_created webhook
              • GitHub only: mints a GitHub App installation token
         2. agent-webhook-invoke-agent
              • GitHub only: execs a git credential-store setup in the harness's
-               runtime session (POST /runtimes/{harnessArn}/commands, Bearer JWT)
-               before the agent runs — see "Git access" below
-             • invokes the AgentCore Harness (/harnesses/invoke, authenticated
-               as the invoke-agent Cognito service account) with the comment's
-               prompt, and decodes the binary event stream into the full text
+               runtime session (InvokeAgentRuntimeCommand → POST
+               /runtimes/{harnessArn}/commands, SigV4) before the agent runs —
+               see "Git access" below
+             • invokes the AgentCore Harness (InvokeHarnessCommand, SigV4-signed
+               with the Lambda's execution role) with the comment's prompt; the
+               SDK decodes the event stream into the full text
              • appends heartbeat lines to the run's log stream
              • on failure: Catch → agent-webhook-post-comment (stage=final)
                posts the error instead
@@ -70,7 +71,7 @@ Ported directly from `.github/workflows/claude.yml`'s "Post CloudWatch log links
 - One log stream per run, named by the run's UUID, created by `agent-webhook-post-comment` *before* the first comment is posted (so the very first Live Tail link is already valid)
 - The console URL uses the same "rison" string codec as the Actions workflow (`enc()`: unreserved chars pass through, everything else becomes `*` + 2 lowercase hex digits), so both call sites produce byte-identical URL fragments for the same inputs
 
-Unlike the Actions flow — which streams Claude Code's own OTel-exported tool calls and responses — this pipeline's log stream only carries coarse progress markers (`invoking agent`, a 20s heartbeat, `agent responded (N chars)`, or the failure message) written by `agent-webhook-invoke-agent`. The harness `/harnesses/invoke` call is a single blocking event-stream read fully consumed before the Lambda returns — the coarse markers are all this path surfaces without having the harness stream step-by-step progress lines into this run's log stream directly. Left as a follow-up.
+Unlike the Actions flow — which streams Claude Code's own OTel-exported tool calls and responses — this pipeline's log stream only carries coarse progress markers (`invoking agent`, a 20s heartbeat, `agent responded (N chars)`, or the failure message) written by `agent-webhook-invoke-agent`. The `InvokeHarness` call is a single blocking event-stream read fully consumed before the Lambda returns — the coarse markers are all this path surfaces without having the harness stream step-by-step progress lines into this run's log stream directly. Left as a follow-up.
 
 ## Step Function
 
@@ -84,20 +85,22 @@ Defined in [`web/amplify/constructs/agentWebhookStack.ts`](../web/amplify/constr
 |---|---|
 | [`agent-webhook-receiver`](../web/amplify/functions/agent-webhook-receiver/) | API Gateway target. Verifies signature, detects mention, `StartExecution` |
 | [`agent-webhook-post-comment`](../web/amplify/functions/agent-webhook-post-comment/) | Posts initial (Live Tail link) and final comments, mints GitHub tokens |
-| [`agent-webhook-invoke-agent`](../web/amplify/functions/agent-webhook-invoke-agent/) | Invokes the AgentCore Harness via `/harnesses/invoke` (Cognito service-account JWT) |
+| [`agent-webhook-invoke-agent`](../web/amplify/functions/agent-webhook-invoke-agent/) | Invokes the AgentCore Harness via the SDK's `InvokeHarnessCommand` (SigV4, Lambda execution role) |
 
 `agent-webhook-post-comment` reuses [`web/amplify/functions/_shared/githubAppToken.ts`](../web/amplify/functions/_shared/githubAppToken.ts) — the GitHub App JWT/installation-token logic factored out of `mint-github-token` (see `docs/github-integration.md`) so both the browser-initiated flow and this webhook flow mint tokens identically.
 
-`agent-webhook-invoke-agent` invokes the **AgentCore Harness** (`MyHarness`), not the `AgUiHandler` runtime — the same target the browser-initiated `invoke-agent` Lambda uses. The harness authorizes with **CUSTOM_JWT** (Cognito), so it authenticates as the `invoke-agent-service` Cognito user (password read from the shared SSM parameter `/agentcore/invoke-agent-service/password`), then `POST`s to `https://bedrock-agentcore.<region>.amazonaws.com/harnesses/invoke?harnessArn=<arn>` with a `Bearer` token and decodes the returned AWS binary event stream's `contentBlockDelta` frames into the full response text — identical framing logic to `web/amplify/functions/invoke-agent/handler.ts` and `scripts/invoke.ts`.
+`agent-webhook-invoke-agent` invokes the **AgentCore Harness** (`MyHarness`), not the `AgUiHandler` runtime — the same target the browser-initiated `invoke-agent` Lambda uses. The harness authorizes with **AWS_IAM**, so this Lambda calls the SDK's `InvokeHarnessCommand` signed with its own execution-role credentials (SigV4) — no Cognito service account / SSM password. The SDK decodes the event stream's `contentBlockDelta` events into the full response text and owns connection timeouts + retries, which is what retired the hand-rolled binary decoder and the long-stream `TypeError: terminated` (#57). The `invoke-agent` Lambda, the browser transport, and `scripts/invoke.ts` all use the same `InvokeHarnessCommand` path; the browser signs with Cognito Identity Pool credentials rather than the Lambda role.
+
+> **Auth history.** The harness was originally `CUSTOM_JWT`-authorized (every caller sent a Cognito Bearer token to `POST /harnesses/invoke`). It was switched to `AWS_IAM` specifically so the webhook path could use the native SigV4-only `InvokeHarness` / `InvokeAgentRuntimeCommand` SDK operations — see the "Auth history" note in `docs/agentic-architecture.md` for the full rationale.
 
 ### Git access: harness exec (same session as the agent)
 
-The harness runtime has its own shell but no `_prepare_workspace()` like the `AgUiHandler` runtime has. To give a GitHub run's agent write access, `agent-webhook-invoke-agent` runs a setup command in the harness's runtime session via the **harness-exec API** — `POST https://bedrock-agentcore.<region>.amazonaws.com/runtimes/{harnessArn}/commands` — **before** the `InvokeHarness` call, reusing the same `runtimeSessionId` (the Step Function's `runId`) for both so they land in the same container. (Verified empirically: a marker file written by an exec call is readable by the agent's code-interpreter tool in the same session.)
+The harness runtime has its own shell but no `_prepare_workspace()` like the `AgUiHandler` runtime has. To give a GitHub run's agent write access, `agent-webhook-invoke-agent` runs a setup command in the harness's runtime session via the **harness-exec API** — the SDK's `InvokeAgentRuntimeCommand` (`POST /runtimes/{harnessArn}/commands`) — **before** the `InvokeHarness` call, reusing the same `runtimeSessionId` (the Step Function's `runId`) for both so they land in the same container. (Verified empirically: a marker file written by an exec call is readable by the agent's code-interpreter tool in the same session.)
 
-Two things here differ from the original attempt in #52 (which never worked — found while verifying #53):
+Two things here matter (both learned across #52/#53):
 
-- **Path takes the harness ARN, not the backing runtime ARN.** Every `CfnHarness` exposes its backing runtime ARN (`CfnHarness.attrEnvironmentAgentCoreRuntimeEnvironmentAgentRuntimeArn`), but calling that ARN's exec endpoint directly returns HTTP 400 *"managed by a harness and cannot be invoked directly. Use the InvokeAgentRuntimeCommand API with the relevant harness ID instead."* The exec path must use the **harness** ARN.
-- **Auth is the Cognito Bearer JWT, not SigV4.** The harness's runtime is CUSTOM_JWT-authorized, so the SDK's `InvokeAgentRuntimeCommand` (SigV4-signed) is rejected with HTTP 403 *"Authorization method mismatch"*. Exec uses the **same Cognito service-account Bearer token** as `/harnesses/invoke` — so no extra IAM grant is needed beyond `bedrock-agentcore:InvokeHarness`.
+- **Path takes the harness ARN, not the backing runtime ARN.** Every `CfnHarness` exposes its backing runtime ARN (`CfnHarness.attrEnvironmentAgentCoreRuntimeEnvironmentAgentRuntimeArn`), but calling that ARN's exec endpoint directly returns HTTP 400 *"managed by a harness and cannot be invoked directly. Use the InvokeAgentRuntimeCommand API with the relevant harness ID instead."* So `InvokeAgentRuntimeCommand`'s `agentRuntimeArn` is set to the **harness** ARN.
+- **Both operations are SigV4-signed against the harness ARN.** Now that the harness authorizes with `AWS_IAM`, exec (`InvokeAgentRuntimeCommand`) and the agent turn (`InvokeHarness`) are both signed with the Lambda's execution-role credentials. The Lambda role is granted `bedrock-agentcore:InvokeHarness` **and** `bedrock-agentcore:InvokeAgentRuntimeCommand` on the harness ARN. (Under the earlier `CUSTOM_JWT` setup this SigV4 exec was rejected with HTTP 403 *"Authorization method mismatch"*, which is why the interim implementation used a Cognito Bearer token.)
 
 The exec command:
 

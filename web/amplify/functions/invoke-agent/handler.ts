@@ -8,59 +8,23 @@ import {
 } from '@aws-sdk/client-dynamodb';
 import { unmarshall } from '@aws-sdk/util-dynamodb';
 import {
-  CognitoIdentityProviderClient,
-  InitiateAuthCommand,
-} from '@aws-sdk/client-cognito-identity-provider';
-import {
-  SSMClient,
-  GetParameterCommand,
-} from '@aws-sdk/client-ssm';
+  BedrockAgentCoreClient,
+  InvokeHarnessCommand,
+  type HarnessTool,
+} from '@aws-sdk/client-bedrock-agentcore';
 
 const HARNESS_ARN = process.env.HARNESS_ARN!;
 const REGION = process.env.AWS_REGION ?? 'us-east-1';
 const AGENT_TABLE = process.env.AGENT_TABLE!;
 const MCP_SERVER_TABLE = process.env.MCP_SERVER_TABLE!;
 const AGENT_MCP_SERVER_TABLE = process.env.AGENT_MCP_SERVER_TABLE!;
-const COGNITO_USER_POOL_ID = process.env.COGNITO_USER_POOL_ID!;
-const COGNITO_CLIENT_ID = process.env.COGNITO_CLIENT_ID!;
-const SERVICE_ACCOUNT_USERNAME = process.env.SERVICE_ACCOUNT_USERNAME!;
-const SERVICE_ACCOUNT_SSM_PATH = process.env.SERVICE_ACCOUNT_SSM_PATH!;
-
-// Suppress unused variable — COGNITO_USER_POOL_ID is wired via env but not used in code
-void COGNITO_USER_POOL_ID;
 
 const ddb = new DynamoDBClient({ region: REGION });
-const cognito = new CognitoIdentityProviderClient({ region: REGION });
-const ssm = new SSMClient({ region: REGION });
 
-// Cache the access token across warm invocations (~1 hour lifetime)
-let cachedAccessToken: string | null = null;
-
-async function getAccessToken(): Promise<string> {
-  if (cachedAccessToken) return cachedAccessToken;
-
-  const passwordParam = await ssm.send(new GetParameterCommand({
-    Name: SERVICE_ACCOUNT_SSM_PATH,
-    WithDecryption: true,
-  }));
-  const password = passwordParam.Parameter?.Value;
-  if (!password) throw new Error('Service account password not found in SSM');
-
-  const authRes = await cognito.send(new InitiateAuthCommand({
-    AuthFlow: 'USER_PASSWORD_AUTH',
-    ClientId: COGNITO_CLIENT_ID,
-    AuthParameters: {
-      USERNAME: SERVICE_ACCOUNT_USERNAME,
-      PASSWORD: password,
-    },
-  }));
-
-  const token = authRes.AuthenticationResult?.AccessToken;
-  if (!token) throw new Error('Failed to obtain Cognito access token for service account');
-
-  cachedAccessToken = token;
-  return token;
-}
+// The harness authorizes with AWS_IAM: the SDK client signs InvokeHarness with
+// this Lambda's execution-role credentials (SigV4). No Cognito service account
+// / SSM password needed, and the SDK owns the event-stream decode + timeouts.
+const agentCore = new BedrockAgentCoreClient({ region: REGION });
 
 interface InvokeAgentArgs {
   agentSlug: string;
@@ -135,9 +99,9 @@ async function fetchAgentConfig(agentSlug: string) {
   };
 }
 
-function buildTools(mcpServers: McpServerRecord[]) {
+function buildTools(mcpServers: McpServerRecord[]): HarnessTool[] {
   return mcpServers.map((s) => ({
-    type: 'remote_mcp' as const,
+    type: 'remote_mcp',
     name: s.name.replace(/[^a-zA-Z0-9_-]/g, '_'),
     config: {
       remoteMcp: {
@@ -159,74 +123,26 @@ async function invokeHarness(opts: {
 }): Promise<string> {
   const { sessionId, prompt, systemPromptText, modelId, mcpServers } = opts;
 
-  const accessToken = await getAccessToken();
-
-  const region = HARNESS_ARN.split(':')[3];
-  const encodedArn = encodeURIComponent(HARNESS_ARN);
-  const url = `https://bedrock-agentcore.${region}.amazonaws.com/harnesses/invoke?harnessArn=${encodedArn}`;
-
   const tools = buildTools(mcpServers);
-  const body: Record<string, unknown> = {
+
+  const response = await agentCore.send(new InvokeHarnessCommand({
+    harnessArn: HARNESS_ARN,
     runtimeSessionId: sessionId,
     messages: [{ role: 'user', content: [{ text: prompt }] }],
-  };
-  if (systemPromptText) body.systemPrompt = [{ text: systemPromptText }];
-  if (modelId) body.model = { bedrockModelConfig: { modelId } };
-  if (tools.length) body.tools = tools;
+    systemPrompt: systemPromptText ? [{ text: systemPromptText }] : undefined,
+    model: modelId ? { bedrockModelConfig: { modelId } } : undefined,
+    tools: tools.length ? tools : undefined,
+  }));
 
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(body),
-  });
-
-  if (!response.ok) {
-    const text = await response.text();
-    // Reset token cache on auth errors
-    if (response.status === 401 || response.status === 403) cachedAccessToken = null;
-    throw new Error(`Harness HTTP ${response.status}: ${text}`);
-  }
-
-  // Decode AWS binary event stream — same logic as scripts/invoke.ts
   const chunks: string[] = [];
-  let raw = Buffer.alloc(0);
 
-  for await (const chunk of response.body as unknown as AsyncIterable<Buffer>) {
-    raw = Buffer.concat([raw, chunk]);
-
-    while (raw.length >= 12) {
-      const totalLen = raw.readUInt32BE(0);
-      if (raw.length < totalLen) break;
-
-      const headersLen = raw.readUInt32BE(4);
-      let pos = 12;
-      const headersEnd = pos + headersLen;
-      const headers: Record<string, string> = {};
-
-      while (pos < headersEnd) {
-        const nameLen = raw[pos++];
-        const name = raw.subarray(pos, pos + nameLen).toString('utf8');
-        pos += nameLen;
-        pos++; // value type byte
-        const valLen = raw.readUInt16BE(pos); pos += 2;
-        headers[name] = raw.subarray(pos, pos + valLen).toString('utf8');
-        pos += valLen;
-      }
-
-      const payloadBytes = raw.subarray(12 + headersLen, totalLen - 4);
-      let payload: Record<string, unknown> | null = null;
-      try { payload = JSON.parse(payloadBytes.toString('utf8')); } catch { /* empty frame */ }
-
-      if (headers[':event-type'] === 'contentBlockDelta') {
-        const text = (payload?.delta as Record<string, unknown> | undefined)?.text as string | undefined;
-        if (text) chunks.push(text);
-      }
-
-      raw = raw.subarray(totalLen);
+  for await (const event of response.stream ?? []) {
+    if (event.validationException || event.internalServerException || event.runtimeClientError) {
+      const ex = event.validationException ?? event.internalServerException ?? event.runtimeClientError;
+      throw new Error(`Harness stream exception: ${ex?.message ?? JSON.stringify(ex)}`);
     }
+    const text = event.contentBlockDelta?.delta?.text;
+    if (text) chunks.push(text);
   }
 
   return chunks.join('');

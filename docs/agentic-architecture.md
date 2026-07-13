@@ -32,7 +32,7 @@ The agent in this project is a **Bedrock AgentCore Harness** — a managed runti
 
 ```
 Browser
-  │  Bearer JWT request (Cognito access token)
+  │  SigV4-signed InvokeHarnessCommand (Cognito Identity Pool credentials)
   ▼
 bedrock-agentcore.{region}.amazonaws.com/harnesses/invoke
   │
@@ -55,10 +55,12 @@ The harness is configured directly in [`web/amplify/backend.ts`](../web/amplify/
 | Model | `openai.gpt-oss-120b` via Bedrock, chat completions API format |
 | Memory | `MyHarnessMemory` (persistent, per-user + per-session) |
 | Built-in tools | `agentcore_browser`, `agentcore_code_interpreter` |
-| Auth | CUSTOM_JWT — requests carry a Cognito access token as a Bearer header; `discoveryUrl`/`allowedClients` are derived from this deployment's Cognito user pool at synth time (`web/amplify/backend.ts`) |
+| Auth | AWS_IAM — every caller invokes via the SDK's `InvokeHarnessCommand`, SigV4-signed. Omitting `authorizerConfiguration` on the `CfnHarness` selects IAM. Callers are granted `bedrock-agentcore:InvokeHarness` on the harness ARN (`web/amplify/backend.ts`) |
 | Context truncation | Summarization (preserves 10 most-recent messages, summarizes the rest) |
 
 The harness runs as a hosted container on AgentCore infrastructure. Its ARN is exported via `backend.addOutput({ custom: { agentcore_harness_arn, ... } })` and read from `web/amplify_outputs.json` at build time by the frontend transport layer.
+
+> **Auth history.** The harness was originally `CUSTOM_JWT`-authorized — every caller (browser, `invoke-agent` Lambda, webhook Lambda, `scripts/invoke.ts`) hand-rolled a `fetch` to `POST /harnesses/invoke` with a Cognito access token as a `Bearer` header, and decoded the binary event stream manually. It was switched to **AWS_IAM** so the GitHub/Jira webhook path could use the native `InvokeHarness` and `InvokeAgentRuntimeCommand` SDK operations, which are **SigV4-only** — this deleted the hand-rolled decoder in every caller and resolved a long-stream `TypeError: terminated` (#57) by letting the SDK own connection timeouts and retries. Because auth is a single per-harness property (JWT *or* IAM, not both), all four callers moved to SigV4 together: the Lambdas sign with their execution roles, the browser with Cognito Identity Pool credentials, and `scripts/invoke.ts` by exchanging the test user's Cognito login for Identity Pool credentials.
 
 ---
 
@@ -66,9 +68,9 @@ The harness runs as a hosted container on AgentCore infrastructure. Its ARN is e
 
 ### 1. Authentication
 
-The frontend calls `fetchAuthSession()` from `aws-amplify/auth` and sends the Cognito access token as an `Authorization: Bearer <token>` header on every harness invoke request (see `bearerFetch()` in `web/lib/agentcore-transport.ts`). The access token is required rather than the ID token because the CUSTOM_JWT authorizer's `allowedClients` check matches against the token's `client_id` claim, which only access tokens carry — ID tokens carry `aud` instead.
+The harness authorizes with **AWS_IAM**, so callers invoke it with a SigV4-signed `InvokeHarnessCommand` rather than a Bearer JWT. In the browser, `web/lib/agentcore-transport.ts` constructs a `BedrockAgentCoreClient` whose credential provider calls `fetchAuthSession()` from `aws-amplify/auth` and returns the session's temporary **Cognito Identity Pool credentials** (`accessKeyId`/`secretAccessKey`/`sessionToken`). The SDK signs each request with those credentials; the Identity Pool's authenticated role is granted `bedrock-agentcore:InvokeHarness` on the harness ARN in `web/amplify/backend.ts`.
 
-The harness uses CUSTOM_JWT auth — it validates the token against the Cognito user pool's discovery URL and checks the client ID against `allowedClients`. `web/amplify/backend.ts` derives both values from `backend.auth.resources.userPool`/`userPoolClient` at synth time (the same pattern `AgentCoreRuntimeWithBuild` uses for the AG-UI runtime), so the harness always authorizes against the Cognito user pool it's actually deployed alongside.
+Server-side callers sign with their own IAM identity: the `invoke-agent` and `agent-webhook-invoke-agent` Lambdas use their execution-role credentials (each role granted `InvokeHarness`), and `scripts/invoke.ts` exchanges the test user's Cognito login for Identity Pool credentials via `fromCognitoIdentityPool`.
 
 ### 2. Request construction
 
@@ -79,7 +81,7 @@ The harness uses CUSTOM_JWT auth — it validates the token against the Cognito 
   runtimeSessionId: string,   // stable per-tab session; stored in sessionStorage
   messages: HarnessMessage[], // conversation history in Bedrock message format
   systemPrompt?: [...],       // from selected Agent's systemPromptText field
-  model?: { bedrock: { modelId } }, // from selected Agent's modelId field
+  model?: { bedrockModelConfig: { modelId } }, // from selected Agent's modelId field
   tools?: [                   // from selected Agent's mcpServers
     { type: "remote_mcp", name, config: { remoteMcp: { url, headers? } } },
     ...
@@ -91,7 +93,7 @@ The harness uses CUSTOM_JWT auth — it validates the token against the Cognito 
 
 ### 3. Streaming response
 
-The harness returns a binary AWS event stream (Smithy protocol). `web/lib/aws-event-stream.ts` decodes it frame-by-frame, yielding events:
+The harness returns a binary AWS event stream (Smithy protocol). The SDK client decodes it into typed async-iterable events (`response.stream`), yielding:
 
 - `messageStart` — signals the assistant turn has begun
 - `contentBlockDelta` — text delta (streamed token by token)
@@ -201,16 +203,16 @@ ChatView (React)
        │
        ▼
 HarnessChatTransport
-  fetchAuthSession() → Cognito access token
-  build invoke body (messages + systemPrompt + model + tools)
+  fetchAuthSession() → Cognito Identity Pool credentials
+  BedrockAgentCoreClient.send(InvokeHarnessCommand{ messages, systemPrompt, model, tools })
        │
        ▼
 POST /harnesses/invoke?harnessArn=...
-  Authorization: Bearer <Cognito access token>
+  SigV4 signature (Identity Pool credentials)
        │
        ▼
 AgentCore Harness (MyHarness)
-  1. Validate JWT against Cognito discovery URL (CUSTOM_JWT auth)
+  1. Validate SigV4 signature / IAM authorization (AWS_IAM auth)
   2. Load memory context for actorId + sessionId
   3. Build model request (history + system prompt + tools)
        │
@@ -228,7 +230,7 @@ AgentCore tool execution
 Streaming binary event stream response
        │
        ▼
-aws-event-stream.ts decoder
+SDK event-stream decode (response.stream)
   contentBlockDelta → UIMessageChunk
        │
        ▼
