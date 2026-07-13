@@ -9,6 +9,11 @@ const JIRA_BASE_URL = process.env.JIRA_BASE_URL ?? '';
 const JIRA_API_EMAIL = process.env.JIRA_API_EMAIL ?? '';
 const JIRA_API_TOKEN_SECRET_ARN = process.env.JIRA_API_TOKEN_SECRET_ARN ?? '';
 
+// Labels the Step Function manages around a label-triggered run (issue #56):
+// `agent-working` while the agent runs, `agent-error` if it fails.
+const WORKING_LABEL = 'agent-working';
+const ERROR_LABEL = 'agent-error';
+
 interface PostCommentInput {
   runId: string;
   source: 'github' | 'jira';
@@ -20,6 +25,13 @@ interface PostCommentInput {
   issueKey?: string;
   // final stage only
   responseText?: string;
+  // 'label' when the run was started by the `agentcore` label (vs a comment
+  // mention). Only label-triggered GitHub runs get the agent-working/agent-error
+  // label bookkeeping below.
+  trigger?: 'label' | 'comment';
+  // Set on the final stage reached via the Step Function's failure Catch, so
+  // this stage adds `agent-error` in addition to removing `agent-working`.
+  isError?: boolean;
 }
 
 interface PostCommentOutput {
@@ -49,6 +61,38 @@ async function postGithubComment(repo: string, issueNumber: number, body: string
     throw new Error(`GitHub createComment failed (HTTP ${res.status}): ${await res.text()}`);
   }
   return { token, expiresAt };
+}
+
+// Add/remove a GitHub label using an already-minted installation token.
+// Best-effort: label bookkeeping must never fail the run, so callers swallow
+// errors. `addLabel` is idempotent (GitHub ignores a label already present);
+// `removeLabel` treats a 404 (label not on the issue) as success.
+async function addLabel(repo: string, issueNumber: number, token: string, label: string): Promise<void> {
+  const res = await fetch(`https://api.github.com/repos/${repo}/issues/${issueNumber}/labels`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ labels: [label] }),
+  });
+  if (!res.ok) throw new Error(`GitHub addLabel(${label}) failed (HTTP ${res.status}): ${await res.text()}`);
+}
+
+async function removeLabel(repo: string, issueNumber: number, token: string, label: string): Promise<void> {
+  const res = await fetch(`https://api.github.com/repos/${repo}/issues/${issueNumber}/labels/${encodeURIComponent(label)}`, {
+    method: 'DELETE',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+    },
+  });
+  if (!res.ok && res.status !== 404) {
+    throw new Error(`GitHub removeLabel(${label}) failed (HTTP ${res.status}): ${await res.text()}`);
+  }
 }
 
 const secretsManager = new SecretsManagerClient({ region: REGION });
@@ -110,6 +154,16 @@ export const handler = async (input: PostCommentInput): Promise<PostCommentOutpu
       const minted = await postGithubComment(input.repo, input.issueNumber, body);
       githubToken = minted.token;
       githubTokenExpiresAt = minted.expiresAt;
+
+      // Label-triggered runs: mark the issue/PR as actively being worked on.
+      // Best-effort — never fail the run over label bookkeeping.
+      if (input.trigger === 'label') {
+        try {
+          await addLabel(input.repo, input.issueNumber, minted.token, WORKING_LABEL);
+        } catch (err) {
+          console.warn(`Could not add ${WORKING_LABEL} label: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
     } else {
       if (!input.issueKey) throw new Error('issueKey required for jira source');
       await postJiraComment(input.issueKey, body);
@@ -122,7 +176,21 @@ export const handler = async (input: PostCommentInput): Promise<PostCommentOutpu
   const responseText = input.responseText ?? '(no response)';
   if (input.source === 'github') {
     if (!input.repo || input.issueNumber === undefined) throw new Error('repo/issueNumber required for github source');
-    await postGithubComment(input.repo, input.issueNumber, responseText);
+    const { token } = await postGithubComment(input.repo, input.issueNumber, responseText);
+
+    // Label-triggered runs: clear agent-working now that the run is done, and
+    // flag agent-error if this final stage was reached via the failure Catch.
+    // Best-effort — a label API hiccup must not fail the whole execution.
+    if (input.trigger === 'label') {
+      try {
+        await removeLabel(input.repo, input.issueNumber, token, WORKING_LABEL);
+        if (input.isError) {
+          await addLabel(input.repo, input.issueNumber, token, ERROR_LABEL);
+        }
+      } catch (err) {
+        console.warn(`Could not update labels: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
   } else {
     if (!input.issueKey) throw new Error('issueKey required for jira source');
     await postJiraComment(input.issueKey, responseText);

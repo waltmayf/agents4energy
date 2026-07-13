@@ -17,7 +17,8 @@ GitHub issue_comment webhook          Jira comment_created webhook
                     ▼
       agent-webhook-receiver Lambda
         • verifies the signature/secret (per source)
-        • detects the "@webhook-agent" mention
+        • detects EITHER: the "@webhook-agent" comment mention (issue_comment),
+          OR the "agentcore" label applied to an issue/PR (issues/pull_request)
         • loop prevention: ignores Bot / *[bot] senders (GitHub)
         • StartExecution (fire-and-forget — returns 202 immediately,
           well under GitHub's/Jira's webhook timeout)
@@ -28,20 +29,64 @@ GitHub issue_comment webhook          Jira comment_created webhook
              • creates this run's CloudWatch Logs stream
              • posts a comment with a Live Tail deep-link
              • GitHub only: mints a GitHub App installation token
-        2. agent-webhook-invoke-agent
+             • label-triggered runs only: adds the "agent-working" label
+        2. agent-webhook-invoke-agent  (git-auth prep — Lambda)
              • GitHub only: execs a git credential-store setup in the harness's
                runtime session (InvokeAgentRuntimeCommand → POST
                /runtimes/{harnessArn}/commands, SigV4) before the agent runs —
                see "Git access" below
-             • invokes the AgentCore Harness (InvokeHarnessCommand, SigV4-signed
-               with the Lambda's execution role) with the comment's prompt; the
-               SDK decodes the event stream into the full text
-             • appends heartbeat lines to the run's log stream
-             • on failure: Catch → agent-webhook-post-comment (stage=final)
-               posts the error instead
-        3. agent-webhook-post-comment (stage=final)
+             • writes the exec stdout/stderr + exit code to the run's log stream
+               (and this Lambda's own log group) for debugging
+             • returns the <github_access>-annotated prompt as
+               $.prepared.effectivePrompt
+             • on failure: Catch → agent-webhook-post-comment (stage=final,
+               isError=true) posts the error AND (label runs) adds "agent-error"
+        3. InvokeHarness  (NATIVE bedrockagentcore:invokeHarness task)
+             • the optimized Step Functions integration invokes the harness and
+               decodes the streamed response into a Converse-shaped result; the
+               final assistant text is $.agentResult.Output.Message.Content[0].Text
+             • signed with the STATE MACHINE role (not a Lambda) — no code
+             • on failure: Catch → agent-webhook-post-comment (stage=final,
+               isError=true)
+        4. agent-webhook-post-comment (stage=final)
              • posts the agent's response as a follow-up comment
+             • label-triggered runs only: removes "agent-working" (and, on the
+               failure path, adds "agent-error")
 ```
+
+## Label triggers (issue #56)
+
+Alongside the `@webhook-agent` comment mention, applying the **`agentcore`** label to a GitHub issue or PR starts the same pipeline. The receiver handles GitHub `issues` and `pull_request` webhook events with `action == "labeled"` and `label.name == "agentcore"`; the prompt is built from the issue/PR title and body. Label-applied-by-bot events are ignored (same loop-prevention as comments).
+
+The receiver stamps each execution's input with `trigger: "label" | "comment"`. Only `label` runs get the label bookkeeping the issue asked for:
+
+| Step | Label action |
+|---|---|
+| initial comment posted | add **`agent-working`** |
+| final comment posted (success) | remove **`agent-working`** |
+| final comment posted (failure Catch, `isError=true`) | remove **`agent-working`**, add **`agent-error`** |
+
+All label calls are best-effort — a label API hiccup logs a warning but never fails the execution. They reuse the same GitHub App installation token minted for posting the comment (no extra mint). `agent-working`/`agent-error` must already exist as repo labels (GitHub auto-creates them on first apply if the App has `issues: write`).
+
+**Why label add/remove stays inside `agent-webhook-post-comment` and not separate Step Function states:** the GitHub label API needs a GitHub **App** installation token (RS256 JWT → installation token), which only the Lambda mints. Adding native `states:` HTTP tasks would each have to re-mint a token; folding the label calls into the comment-posting stage (which already holds a fresh token) is one fewer round-trip and one fewer failure surface.
+
+### Native harness invoke, Lambda-backed git-auth (issue #56)
+
+The harness invoke is the **native `arn:aws:states:::bedrockagentcore:invokeHarness`** optimized integration ([SFN docs](https://docs.aws.amazon.com/step-functions/latest/dg/connect-bedrockagentcore.html)). It decodes the harness's streamed response into a Converse-shaped result, so the final assistant message is read directly from `$.agentResult.Output.Message.Content[0].Text` — no hand-rolled event-stream decoding, and no `agent-webhook-invoke-agent` Lambda in the invoke path. Notes:
+
+- **Request-Response only** — `.sync` / task-token patterns aren't supported (fine here; we want the reply inline).
+- **Only the final assistant message** is returned; earlier turns, tool-use, and reasoning blocks are dropped. That's exactly what we post back to the issue.
+- **15-minute hard cap** on the task regardless of `TimeoutSeconds`; the state machine's own timeout is also 15 min.
+- **Output size** is bounded by the Task state output quota (256 KB) — long agent replies are truncated by that limit, not by us.
+- The task is signed with the **state machine's execution role** (granted `bedrock-agentcore:InvokeHarness` + `InvokeAgentRuntime` on the harness ARN in `agentWebhookStack.ts`), not a Lambda role.
+
+**Git-auth stays a Lambda** (`agent-webhook-invoke-agent`, step 2). It runs the pre-invoke git credential-store setup via `InvokeAgentRuntimeCommand` (the harness *exec* API), which:
+- has **no optimized Step Functions integration** (only `InvokeHarness` does), and returns an **event stream** whose exit code must be read — a generic `states:` AWS-SDK task can't consume that; and
+- produces **stdout/stderr we want captured in CloudWatch** for debugging a failed clone/push — the Lambda writes both to the run's log stream and its own log group.
+
+It shares the run's `runId` as the harness `RuntimeSessionId`, so the credentials it seeds land in the same container the native invoke then uses. It no longer calls `InvokeHarness` (that grant moved to the state machine role).
+
+> **ChatSession is intentionally NOT created by this pipeline.** A `ChatSession` is created browser-side only, when the user opens the chat page. If the page is opened with a session id that doesn't exist yet, the browser creates it and starts listening for AgentCore-memory messages on it. Keeping session creation out of the Step Function avoids orphan sessions for runs nobody watches.
 
 ## Why alongside, not instead
 
@@ -71,19 +116,13 @@ Ported directly from `.github/workflows/claude.yml`'s "Post CloudWatch log links
 - One log stream per run, named by the run's UUID, created by `agent-webhook-post-comment` *before* the first comment is posted (so the very first Live Tail link is already valid)
 - The console URL uses the same "rison" string codec as the Actions workflow (`enc()`: unreserved chars pass through, everything else becomes `*` + 2 lowercase hex digits), so both call sites produce byte-identical URL fragments for the same inputs
 
-Unlike the Actions flow — which streams Claude Code's own OTel-exported tool calls and responses — this pipeline's log stream only carries coarse progress markers (`invoking agent`, a 20s heartbeat, `agent responded (N chars)`, or the failure message) written by `agent-webhook-invoke-agent`. The `InvokeHarness` call is a single blocking event-stream read fully consumed before the Lambda returns — the coarse markers are all this path surfaces without having the harness stream step-by-step progress lines into this run's log stream directly. Left as a follow-up.
-
-## Browser chat live view
-
-`agent-webhook-receiver` creates a `ChatSession` row (`id = runId`) before calling `StartExecution`, and that same `runId` is reused unchanged as the harness `runtimeSessionId` in `agent-webhook-invoke-agent`. Since the harness always writes memory under `actorId = "default"` — the same actor the browser's `list-session-messages` Lambda reads — a single id ties the webhook run to a session the browser can load directly: `/chat?sessionId=<runId>` shows that run's messages once the agent has produced any (see `web/app/(with-auth)/chat/use-chat-session.ts` / `use-initial-messages.ts`). No separate id-mapping table is needed. This is the foundational piece of the "Webhook chat-session live view" milestone (issue #61); the ChatSession write is best-effort and never blocks starting the agent run if it fails.
-
-The `ChatSession` row is written with a raw `dynamodb:PutItem` (env var `CHAT_SESSION_TABLE`, granted via `backend.data.resources.tables['ChatSession']` in `backend.ts`) rather than the generated Amplify Data client — same pattern `invoke-agent/handler.ts` uses to read the `Agent`/`McpServer` tables directly, since IAM-only Lambda access to a model's DynamoDB table doesn't require the AppSync-mediated `allow.resource()` grant.
+Unlike the Actions flow — which streams Claude Code's own OTel-exported tool calls and responses — this pipeline's log stream carries coarse markers written by the git-auth Lambda: the git-auth exec's stdout/stderr + exit code. The harness turn itself is the native `bedrockagentcore:invokeHarness` task, which runs without a Lambda, so its step-by-step reasoning isn't in this stream — the SFN console shows a per-turn CloudWatch link beside the InvokeHarness step for that (enable CloudWatch Transaction Search). Streaming the harness's own progress into this run's stream is left as a follow-up.
 
 ## Step Function
 
-Defined in [`web/amplify/constructs/agentWebhookStack.ts`](../web/amplify/constructs/agentWebhookStack.ts) as a 3-state `Chain` (`LambdaInvoke` → `LambdaInvoke` → `LambdaInvoke`, with a `Catch` on the middle state). State input/output is threaded via JSONPath (`$.initialComment`, `$.agentResult`, `$.error`) rather than a Lambda-per-source-type branch — `agent-webhook-post-comment` and `agent-webhook-invoke-agent` both branch on `source` (`github` | `jira`) internally.
+Defined in [`web/amplify/constructs/agentWebhookStack.ts`](../web/amplify/constructs/agentWebhookStack.ts) as a 4-state `Chain`: `LambdaInvoke` (post-initial) → `LambdaInvoke` (git-auth prep) → `CustomState` (native `bedrockagentcore:invokeHarness`) → `LambdaInvoke` (post-final), with a `Catch` on both the git-auth and invoke states routing to a failure-comment state. State input/output is threaded via JSONPath (`$.initialComment`, `$.prepared`, `$.agentResult`, `$.error`); `agent-webhook-post-comment` and the git-auth Lambda both branch on `source` (`github` | `jira`) internally.
 
-`AgentWebhookStack` is provisioned in its **own CDK stack** (`backend.createStack('agent-webhook')`), not inside the existing `agentStack`. Building it inside `agentStack` created a circular nested-stack dependency: the state machine's `LambdaInvoke` tasks need the function-stack Lambdas' ARNs (function stack depends on this stack), while `agentStack` already depends on the function stack for other Lambdas' env vars. `agentWebhookReceiver`'s `states:StartExecution` permission is granted against a **plain-string ARN** (`arn:aws:states:<region>:<account>:stateMachine:<name>`) rather than `stateMachine.stateMachineArn`, for the same reason — the latter is a cross-stack CloudFormation token that would reintroduce the cycle.
+`AgentWebhookStack` is provisioned in its **own CDK stack** (`backend.createStack('agent-webhook')`), not inside the existing `agentStack`. Building it inside `agentStack` created a circular nested-stack dependency: the state machine's `LambdaInvoke` tasks need the function-stack Lambdas' ARNs (function stack depends on this stack), while `agentStack` already depends on the function stack for other Lambdas' env vars. `agentWebhookReceiver`'s `states:StartExecution` permission is granted against a **plain-string ARN** (`arn:aws:states:<region>:<account>:stateMachine:<name>`) rather than `stateMachine.stateMachineArn`, for the same reason — the latter is a cross-stack CloudFormation token that would reintroduce the cycle. The native invoke task's `bedrock-agentcore:InvokeHarness` grant is added to the **state machine role** (`stateMachine.addToRolePolicy`), scoped to the harness ARN.
 
 ## Lambda functions
 
@@ -91,27 +130,27 @@ Defined in [`web/amplify/constructs/agentWebhookStack.ts`](../web/amplify/constr
 |---|---|
 | [`agent-webhook-receiver`](../web/amplify/functions/agent-webhook-receiver/) | API Gateway target. Verifies signature, detects mention, `StartExecution` |
 | [`agent-webhook-post-comment`](../web/amplify/functions/agent-webhook-post-comment/) | Posts initial (Live Tail link) and final comments, mints GitHub tokens |
-| [`agent-webhook-invoke-agent`](../web/amplify/functions/agent-webhook-invoke-agent/) | Invokes the AgentCore Harness via the SDK's `InvokeHarnessCommand` (SigV4, Lambda execution role) |
+| [`agent-webhook-invoke-agent`](../web/amplify/functions/agent-webhook-invoke-agent/) | Git-auth prep: seeds git credentials in the harness session via `InvokeAgentRuntimeCommand`, logs its stdout/stderr, returns the annotated prompt. (Despite the name, it no longer invokes the harness — that's the native SFN task.) |
 
 `agent-webhook-post-comment` reuses [`web/amplify/functions/_shared/githubAppToken.ts`](../web/amplify/functions/_shared/githubAppToken.ts) — the GitHub App JWT/installation-token logic factored out of `mint-github-token` (see `docs/github-integration.md`) so both the browser-initiated flow and this webhook flow mint tokens identically.
 
-`agent-webhook-invoke-agent` invokes the **AgentCore Harness** (`MyHarness`), not the `AgUiHandler` runtime — the same target the browser-initiated `invoke-agent` Lambda uses. The harness authorizes with **AWS_IAM**, so this Lambda calls the SDK's `InvokeHarnessCommand` signed with its own execution-role credentials (SigV4) — no Cognito service account / SSM password. The SDK decodes the event stream's `contentBlockDelta` events into the full response text and owns connection timeouts + retries, which is what retired the hand-rolled binary decoder and the long-stream `TypeError: terminated` (#57). The `invoke-agent` Lambda, the browser transport, and `scripts/invoke.ts` all use the same `InvokeHarnessCommand` path; the browser signs with Cognito Identity Pool credentials rather than the Lambda role.
+The harness turn is the **native `bedrockagentcore:invokeHarness` Step Functions task** (see "Native harness invoke" above), which targets the **AgentCore Harness** (`MyHarness`) — the same target the browser-initiated `invoke-agent` Lambda uses. The harness authorizes with **AWS_IAM**; the native task signs with the state machine role, and the browser transport / `scripts/invoke.ts` sign the SDK's `InvokeHarnessCommand` with Cognito Identity Pool credentials.
 
-> **Auth history.** The harness was originally `CUSTOM_JWT`-authorized (every caller sent a Cognito Bearer token to `POST /harnesses/invoke`). It was switched to `AWS_IAM` specifically so the webhook path could use the native SigV4-only `InvokeHarness` / `InvokeAgentRuntimeCommand` SDK operations — see the "Auth history" note in `docs/agentic-architecture.md` for the full rationale.
+> **Auth history.** The harness was originally `CUSTOM_JWT`-authorized (every caller sent a Cognito Bearer token to `POST /harnesses/invoke`). It was switched to `AWS_IAM` specifically so SigV4-only callers — the native `bedrockagentcore:invokeHarness` task and the `InvokeAgentRuntimeCommand` git-auth exec — work without a Cognito token. See the "Auth history" note in `docs/agentic-architecture.md` for the full rationale.
 
 ### Git access: harness exec (same session as the agent)
 
-The harness runtime has its own shell but no `_prepare_workspace()` like the `AgUiHandler` runtime has. To give a GitHub run's agent write access, `agent-webhook-invoke-agent` runs a setup command in the harness's runtime session via the **harness-exec API** — the SDK's `InvokeAgentRuntimeCommand` (`POST /runtimes/{harnessArn}/commands`) — **before** the `InvokeHarness` call, reusing the same `runtimeSessionId` (the Step Function's `runId`) for both so they land in the same container. (Verified empirically: a marker file written by an exec call is readable by the agent's code-interpreter tool in the same session.)
+The harness runtime has its own shell but no `_prepare_workspace()` like the `AgUiHandler` runtime has. To give a GitHub run's agent write access, the git-auth Lambda (`agent-webhook-invoke-agent`, step 2) runs a setup command in the harness's runtime session via the **harness-exec API** — the SDK's `InvokeAgentRuntimeCommand` (`POST /runtimes/{harnessArn}/commands`) — **before** the native `invokeHarness` task, reusing the same `runtimeSessionId` (the Step Function's `runId`) for both so they land in the same container. (Verified empirically: a marker file written by an exec call is readable by the agent's code-interpreter tool in the same session.)
 
 Two things here matter (both learned across #52/#53):
 
 - **Path takes the harness ARN, not the backing runtime ARN.** Every `CfnHarness` exposes its backing runtime ARN (`CfnHarness.attrEnvironmentAgentCoreRuntimeEnvironmentAgentRuntimeArn`), but calling that ARN's exec endpoint directly returns HTTP 400 *"managed by a harness and cannot be invoked directly. Use the InvokeAgentRuntimeCommand API with the relevant harness ID instead."* So `InvokeAgentRuntimeCommand`'s `agentRuntimeArn` is set to the **harness** ARN.
-- **Both operations are SigV4-signed against the harness ARN.** Now that the harness authorizes with `AWS_IAM`, exec (`InvokeAgentRuntimeCommand`) and the agent turn (`InvokeHarness`) are both signed with the Lambda's execution-role credentials. The Lambda role is granted `bedrock-agentcore:InvokeHarness` **and** `bedrock-agentcore:InvokeAgentRuntimeCommand` on the harness ARN. (Under the earlier `CUSTOM_JWT` setup this SigV4 exec was rejected with HTTP 403 *"Authorization method mismatch"*, which is why the interim implementation used a Cognito Bearer token.)
+- **Each operation is SigV4-signed against the harness ARN, by a different principal.** Now that the harness authorizes with `AWS_IAM`, the git-auth exec (`InvokeAgentRuntimeCommand`) is signed with the **git-auth Lambda's** execution role (granted `bedrock-agentcore:InvokeAgentRuntime` + `InvokeAgentRuntimeCommand` on the harness ARN), and the agent turn (native `invokeHarness` task) is signed with the **state machine's** role (granted `bedrock-agentcore:InvokeHarness` + `InvokeAgentRuntime`). (Under the earlier `CUSTOM_JWT` setup this SigV4 exec was rejected with HTTP 403 *"Authorization method mismatch"*, which is why the interim implementation used a Cognito Bearer token.)
 
 The exec command:
 
-1. Configures `git` identity (`user.name`/`user.email` → `webhook-agent[bot]`) and a **credential-store helper** seeded with the GitHub App installation token minted by `agent-webhook-post-comment` (`printf 'https://x-access-token:<token>@github.com' > ~/.git-credentials`) — the same token, the same minting path as the AgUiHandler's `_prepare_workspace()`. This makes `git clone`/`push` over HTTPS work with no interactive auth.
-2. The prompt sent to `InvokeHarness` is annotated with a `<github_access>` block telling the agent its `git` is already authenticated for the target repo, so it clones/commits/pushes directly instead of assuming (as it did in early testing on #48) that it lacks write access.
+1. Configures `git` identity (`user.name`/`user.email` → `webhook-agent[bot]`) and a **credential-store helper** seeded with the GitHub App installation token minted by `agent-webhook-post-comment` (`printf 'https://x-access-token:<token>@github.com' > ~/.git-credentials`) — the same token, the same minting path as the AgUiHandler's `_prepare_workspace()`. This makes `git clone`/`push` over HTTPS work with no interactive auth. The exec's stdout/stderr + exit code are written to the run's log stream and the Lambda's own log group for debugging.
+2. The Lambda returns the prompt annotated with a `<github_access>` block (as `$.prepared.effectivePrompt`); the native `invokeHarness` task sends that to the agent, telling it `git` is already authenticated for the target repo so it clones/commits/pushes directly instead of assuming (as it did in early testing on #48) that it lacks write access.
 
 **No `gh` CLI.** The harness image (Amazon Linux 2023) ships `git` but not `gh`, and `gh` can't be cleanly installed at exec time (no `cpio`, not in the AL2023 repos, `rpm -i` rejects the official package as non-relocatable). So the agent does **not** run `gh pr create`; instead the `<github_access>` block instructs it to push its branch and end its reply with a GitHub **compare URL** (`/compare/<base>...<head>?quick_pull=1&title=…&body=…`, per [GitHub's query-parameter docs](https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/proposing-changes-to-your-work-with-pull-requests/using-query-parameters-to-create-a-pull-request)). The Step Function posts the agent's reply back as an issue comment, so that one-click "open PR" link reaches the user there. Baking `gh` into the harness image (so `gh pr create` works directly) is tracked in #54.
 

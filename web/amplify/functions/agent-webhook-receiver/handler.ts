@@ -2,42 +2,21 @@ import type { APIGatewayProxyEventV2, APIGatewayProxyStructuredResultV2 } from '
 import { randomUUID } from 'crypto';
 import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-secrets-manager';
 import { SFNClient, StartExecutionCommand } from '@aws-sdk/client-sfn';
-import { DynamoDBClient, PutItemCommand } from '@aws-sdk/client-dynamodb';
 import { verifyGithubSignature, verifyJiraSharedSecret, extractPromptAfterMention } from '../_shared/webhookVerify';
 
 const REGION = process.env.AWS_REGION ?? 'us-east-1';
 const GITHUB_WEBHOOK_SECRET_ARN = process.env.GITHUB_WEBHOOK_SECRET_ARN ?? '';
 const JIRA_WEBHOOK_SECRET_ARN = process.env.JIRA_WEBHOOK_SECRET_ARN ?? '';
 const STATE_MACHINE_ARN = process.env.STATE_MACHINE_ARN ?? '';
-const CHAT_SESSION_TABLE = process.env.CHAT_SESSION_TABLE ?? '';
+
+// Applying this label to a GitHub issue/PR triggers the agent, exactly like an
+// `@webhook-agent` comment does — but the Step Function additionally manages the
+// `agent-working` / `agent-error` labels around the run (see issue #56 and
+// docs/webhook-stepfunction-integration.md "Label triggers").
+const TRIGGER_LABEL = 'agentcore';
 
 const secretsManager = new SecretsManagerClient({ region: REGION });
 const sfn = new SFNClient({ region: REGION });
-const ddb = new DynamoDBClient({ region: REGION });
-
-// Creates the ChatSession the browser's /chat?sessionId=<runId> reads from —
-// runId doubles as both the ChatSession.id and the harness runtimeSessionId
-// (see agent-webhook-invoke-agent), so a single id ties the webhook run to a
-// live-viewable chat with no separate mapping table. Best-effort: if this
-// write fails, log and still start the agent run rather than blocking it.
-async function createChatSession(runId: string, name: string): Promise<void> {
-  if (!CHAT_SESSION_TABLE) return;
-  try {
-    const now = new Date().toISOString();
-    await ddb.send(new PutItemCommand({
-      TableName: CHAT_SESSION_TABLE,
-      Item: {
-        id: { S: runId },
-        name: { S: name },
-        createdAt: { S: now },
-        updatedAt: { S: now },
-        __typename: { S: 'ChatSession' },
-      },
-    }));
-  } catch (err) {
-    console.error(`[${runId}] failed to create ChatSession record`, err);
-  }
-}
 
 // Cached across warm invocations — secrets don't change between requests.
 const secretCache = new Map<string, string>();
@@ -64,6 +43,18 @@ interface GithubIssueCommentPayload {
   sender: { login: string; type: string };
 }
 
+// `issues`/`pull_request` labeled events. GitHub sends the issue under `issue`
+// and PRs under `pull_request`; both carry number/title/body and a top-level
+// `label` for the label that was just added. issueKey/comment fields are absent.
+interface GithubLabeledPayload {
+  action: string;
+  label?: { name: string };
+  issue?: { number: number; title: string; body: string | null };
+  pull_request?: { number: number; title: string; body: string | null };
+  repository: { full_name: string };
+  sender: { login: string; type: string };
+}
+
 interface JiraCommentPayload {
   webhookEvent: string;
   issue: { key: string; fields: { summary: string; project: { key: string } } };
@@ -85,8 +76,11 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
   const isJira = event.queryStringParameters?.source === 'jira';
 
   if (isGithub) {
-    if (headers['x-github-event'] !== 'issue_comment') {
-      return json(200, { skipped: 'not an issue_comment event' });
+    const githubEvent = headers['x-github-event'];
+    // Two GitHub triggers: an `@webhook-agent` mention in a new comment, or the
+    // `agentcore` label applied to an issue/PR. Everything else is ignored.
+    if (githubEvent !== 'issue_comment' && githubEvent !== 'issues' && githubEvent !== 'pull_request') {
+      return json(200, { skipped: `unsupported github event: ${githubEvent}` });
     }
     if (!GITHUB_WEBHOOK_SECRET_ARN) {
       return json(500, { error: 'GITHUB_WEBHOOK_SECRET_ARN not configured' });
@@ -96,6 +90,50 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
       return json(401, { error: 'invalid signature' });
     }
 
+    // ── Label trigger: `agentcore` added to an issue or PR ──────────────────
+    if (githubEvent === 'issues' || githubEvent === 'pull_request') {
+      const payload: GithubLabeledPayload = JSON.parse(rawBody);
+      if (payload.action !== 'labeled') return json(200, { skipped: `action=${payload.action}` });
+      if (payload.label?.name !== TRIGGER_LABEL) {
+        return json(200, { skipped: `label=${payload.label?.name ?? '(none)'}` });
+      }
+
+      // Loop prevention — ignore labels applied by bots (e.g. our own automation).
+      const senderLogin = payload.sender?.login ?? '';
+      const senderType = payload.sender?.type ?? '';
+      if (senderType === 'Bot' || senderLogin.endsWith('[bot]')) {
+        return json(200, { skipped: 'bot sender' });
+      }
+
+      const target = payload.issue ?? payload.pull_request;
+      if (!target) return json(200, { skipped: 'no issue/pull_request in payload' });
+
+      const runId = randomUUID();
+      await sfn.send(new StartExecutionCommand({
+        stateMachineArn: STATE_MACHINE_ARN,
+        name: `github-${payload.repository.full_name.replace(/\//g, '-')}-${target.number}-${runId}`,
+        input: JSON.stringify({
+          runId,
+          source: 'github',
+          // Signals the Step Function to manage the agent-working/agent-error
+          // labels around the run (a comment-mention run leaves labels alone).
+          trigger: 'label',
+          repo: payload.repository.full_name,
+          issueNumber: target.number,
+          issueKey: null,
+          prompt: [
+            `Work on this GitHub ${payload.pull_request ? 'pull request' : 'issue'}: #${target.number} — ${target.title}`,
+            '',
+            target.body ?? '',
+          ].join('\n'),
+          sender: senderLogin,
+        }),
+      }));
+
+      return json(202, { started: runId });
+    }
+
+    // ── Comment-mention trigger: `@webhook-agent <prompt>` ──────────────────
     const payload: GithubIssueCommentPayload = JSON.parse(rawBody);
     if (payload.action !== 'created') return json(200, { skipped: `action=${payload.action}` });
 
@@ -110,13 +148,13 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
     if (prompt === null) return json(200, { skipped: 'no trigger mention' });
 
     const runId = randomUUID();
-    await createChatSession(runId, `GitHub #${payload.issue.number}: ${payload.repository.full_name}`);
     await sfn.send(new StartExecutionCommand({
       stateMachineArn: STATE_MACHINE_ARN,
       name: `github-${payload.repository.full_name.replace(/\//g, '-')}-${payload.issue.number}-${runId}`,
       input: JSON.stringify({
         runId,
         source: 'github',
+        trigger: 'comment',
         repo: payload.repository.full_name,
         issueNumber: payload.issue.number,
         issueKey: null,
@@ -146,13 +184,13 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
     if (prompt === null) return json(200, { skipped: 'no trigger mention' });
 
     const runId = randomUUID();
-    await createChatSession(runId, `Jira ${payload.issue.key}: ${payload.issue.fields.summary}`);
     await sfn.send(new StartExecutionCommand({
       stateMachineArn: STATE_MACHINE_ARN,
       name: `jira-${payload.issue.key}-${runId}`,
       input: JSON.stringify({
         runId,
         source: 'jira',
+        trigger: 'comment',
         repo: null,
         issueNumber: null,
         issueKey: payload.issue.key,

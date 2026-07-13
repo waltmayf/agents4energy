@@ -168,23 +168,31 @@ const configFields = [
   '-f', 'config[insecure_ssl]=0',
 ];
 
+// issue_comment → `@webhook-agent` mention; issues/pull_request → `agentcore`
+// label trigger (issue #56). All three route to the same receiver Lambda.
+const eventFields = [
+  '-f', 'events[]=issue_comment',
+  '-f', 'events[]=issues',
+  '-f', 'events[]=pull_request',
+];
+
 if (existing) {
   gh([
     'api', '-X', 'PATCH', `repos/${repo}/hooks/${existing.id}`,
     '-F', 'active=true',
-    '-f', 'events[]=issue_comment',
+    ...eventFields,
     ...configFields,
   ]);
-  console.log(`✓ Updated existing webhook (id ${existing.id}) — issue_comment events, secret refreshed.`);
+  console.log(`✓ Updated existing webhook (id ${existing.id}) — issue_comment/issues/pull_request events, secret refreshed.`);
 } else {
   const created = ghJson<{ id: number }>([
     'api', '-X', 'POST', `repos/${repo}/hooks`,
     '-f', 'name=web',
     '-F', 'active=true',
-    '-f', 'events[]=issue_comment',
+    ...eventFields,
     ...configFields,
   ]);
-  console.log(`✓ Created webhook (id ${created.id}) — issue_comment events.`);
+  console.log(`✓ Created webhook (id ${created.id}) — issue_comment/issues/pull_request events.`);
 }
 
 // ─── Verify the ping delivered ─────────────────────────────────────────────────
@@ -207,8 +215,9 @@ console.log(`
 ${'─'.repeat(72)}
 Webhook configured for ${repo}.
 
-Comment "@webhook-agent <your request>" on any issue or PR to trigger the
-API Gateway → Step Function → AgentCore Harness pipeline.
+Trigger the API Gateway → Step Function → AgentCore Harness pipeline by either:
+  • commenting "@webhook-agent <your request>" on any issue or PR, or
+  • applying the "agentcore" label to an issue or PR.
 See docs/webhook-stepfunction-integration.md.
 ${'─'.repeat(72)}
 `);

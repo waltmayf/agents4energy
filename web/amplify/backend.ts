@@ -406,26 +406,12 @@ const webhookReceiverLambda = backend.agentWebhookReceiver.resources.lambda as L
 const webhookPostCommentLambda = backend.agentWebhookPostComment.resources.lambda as LambdaFunction;
 const webhookInvokeAgentLambda = backend.agentWebhookInvokeAgent.resources.lambda as LambdaFunction;
 
-// Invoke the AgentCore Harness (not the SigV4 AgUiHandler runtime). The
-// harness authorizes with AWS_IAM, so this Lambda invokes it via the SDK's
-// InvokeHarnessCommand — and the pre-invoke git-auth exec via
-// InvokeAgentRuntimeCommand — both signed with its own execution-role
-// credentials. No Cognito service account / SSM password anymore.
+// The harness INVOKE is now a native `bedrockagentcore:invokeHarness` Step
+// Functions task (see agentWebhookStack + issue #56). This Lambda only performs
+// the pre-invoke git-auth exec (InvokeAgentRuntimeCommand), SigV4-signed with
+// its own execution-role credentials against the harness ARN.
 backend.agentWebhookInvokeAgent.addEnvironment('HARNESS_ARN', AGENTCORE_HARNESS_ARN);
 backend.agentWebhookPostComment.addEnvironment('ACCOUNT_ID', backend.stack.account);
-
-// The receiver creates a ChatSession row (id = runId) so the browser's
-// /chat?sessionId=<runId> can display the run's messages — see issue #61.
-// Written via a raw PutItem (same pattern invoke-agent/handler.ts uses to
-// read the Agent/McpServer tables) rather than the generated Data client,
-// since granting `allow.resource()` schema access wires an AppSync policy,
-// not table-level IAM — a plain DynamoDB grant is simpler for a single write.
-const chatSessionTable = backend.data.resources.tables['ChatSession'];
-backend.agentWebhookReceiver.addEnvironment('CHAT_SESSION_TABLE', chatSessionTable.tableName);
-webhookReceiverLambda.addToRolePolicy(new PolicyStatement({
-  actions: ['dynamodb:PutItem'],
-  resources: [chatSessionTable.tableArn],
-}));
 
 const secretArns = [GITHUB_WEBHOOK_SECRET_ARN, JIRA_WEBHOOK_SECRET_ARN].filter(Boolean);
 if (secretArns.length) {
@@ -455,15 +441,13 @@ webhookInvokeAgentLambda.addToRolePolicy(new PolicyStatement({
   actions: ['logs:PutLogEvents'],
   resources: [`arn:aws:logs:${AGENTCORE_REGION}:${backend.stack.account}:log-group:/agent-webhook/*:log-stream:*`],
 }));
-// Both harness operations this Lambda performs are SigV4-signed against the
-// same harness ARN: the agent turn (InvokeHarnessCommand, which checks both
-// the InvokeAgentRuntime and InvokeHarness IAM actions) and the pre-invoke
-// git-auth exec (InvokeAgentRuntimeCommand → POST /runtimes/{harnessArn}/commands
-// — see docs/webhook-stepfunction-integration.md "Git access").
+// This Lambda now only runs the git-auth exec (InvokeAgentRuntimeCommand → POST
+// /runtimes/{harnessArn}/commands — see docs/webhook-stepfunction-integration.md
+// "Git access"). The harness turn moved to the native Step Functions task, whose
+// InvokeHarness grant lives on the state machine role (in agentWebhookStack).
 webhookInvokeAgentLambda.addToRolePolicy(new PolicyStatement({
   actions: [
     'bedrock-agentcore:InvokeAgentRuntime',
-    'bedrock-agentcore:InvokeHarness',
     'bedrock-agentcore:InvokeAgentRuntimeCommand',
   ],
   resources: [AGENTCORE_HARNESS_ARN],
@@ -478,7 +462,10 @@ const agentWebhookCdkStack = backend.createStack('agent-webhook');
 const agentWebhookStack = new AgentWebhookStack(agentWebhookCdkStack, 'AgentWebhook', {
   receiverLambda: webhookReceiverLambda,
   postCommentLambda: webhookPostCommentLambda,
-  invokeAgentLambda: webhookInvokeAgentLambda,
+  // Git-auth prep only — the harness invoke is the native task in the stack,
+  // granted InvokeHarness on the state machine role via harnessArn below.
+  prepareGitAuthLambda: webhookInvokeAgentLambda,
+  harnessArn: AGENTCORE_HARNESS_ARN,
   // Physical name unique per sandbox/branch (same scheme as the AgentCore
   // gateway name above) so concurrent deployments in the same account never
   // collide on state machine names. State machine names are capped at 80
