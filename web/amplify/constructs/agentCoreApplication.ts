@@ -187,20 +187,6 @@ export class AgentCoreApplication extends Construct {
     return entry.role.roleArn;
   }
 
-  /**
-   * ARN of the AgentCore Runtime backing a harness by its logical name — the
-   * container `InvokeAgentRuntimeCommand` (the exec API) runs shell commands
-   * in, keyed by the same `runtimeSessionId` an `InvokeHarnessCommand` call
-   * later uses. Distinct from `harnessArn`: that ARN is CUSTOM_JWT-authorized
-   * for chat-style invocation, while the exec API on this runtime ARN is a
-   * plain SigV4/IAM-authorized operational endpoint.
-   */
-  public harnessRuntimeArn(name: string): string {
-    const entry = this.harnesses.get(name);
-    if (!entry) throw new Error(`Harness "${name}" not found in AgentCoreApplication`);
-    return entry.harness.attrEnvironmentAgentCoreRuntimeEnvironmentAgentRuntimeArn;
-  }
-
   public memoryArn(name: string): string {
     const memory = this.memories.get(name);
     if (!memory) throw new Error(`Memory "${name}" not found in AgentCoreApplication`);

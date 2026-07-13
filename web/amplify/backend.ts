@@ -12,7 +12,7 @@ import { agentWebhookPostComment } from './functions/agent-webhook-post-comment/
 import { agentWebhookInvokeAgent } from './functions/agent-webhook-invoke-agent/resource';
 import { Policy, PolicyStatement, ServicePrincipal, Effect, Role } from 'aws-cdk-lib/aws-iam';
 import { Function as LambdaFunction } from 'aws-cdk-lib/aws-lambda';
-import { Fn, Stack } from 'aws-cdk-lib';
+import { Fn, Stack, CfnOutput } from 'aws-cdk-lib';
 import { HttpDataSource, CfnResolver } from 'aws-cdk-lib/aws-appsync';
 import { fileURLToPath } from 'url';
 import { resolve, dirname } from 'path';
@@ -229,6 +229,27 @@ const agentCoreApp = new AgentCoreApplication(agentStack, 'AgentCoreApplication'
     : undefined,
 });
 
+// @aws/agentcore-cdk stamps every CfnOutput it creates with an
+// `exportName: exportName(stack.stackName, …)`. Because AgentCoreApplication
+// lives in an Amplify *nested* stack, `stack.stackName` is an unresolved CDK
+// token that stringifies to `TokenTOKEN<n>` — a per-synth counter, NOT the
+// real (branch-unique) stack name. Two deployments (e.g. `main` and a leftover
+// branch sandbox) that happen to land on the same counter value produce the
+// SAME CloudFormation export name, and CloudFormation rejects the second with
+// "Export … is already exported by stack …", rolling back the whole deploy.
+// This blocked every `main` deploy after these exports were introduced (#52's
+// deploy was the first casualty — its git/gh-auth Lambda code never shipped).
+//
+// Nothing imports these exports cross-stack (we read ARNs off same-stack
+// tokens and via `describe-stacks` Outputs, never `Fn.importValue`), so strip
+// the `exportName` from all of them. The plain Output value is still emitted —
+// `aws cloudformation describe-stacks` surfaces it — just no longer collidable.
+for (const child of agentCoreApp.node.findAll()) {
+  if (child instanceof CfnOutput) {
+    child.exportName = undefined;
+  }
+}
+
 const memoryName = harnessSpecs[0]?.memoryName;
 const harnessName = harnessSpecs[0]?.name;
 const gatewayName = projectSpec.agentCoreGateways?.[0]?.name;
@@ -240,7 +261,6 @@ const AGENTCORE_GATEWAY_ARN = gatewayName ? agentCoreApp.gatewayArn(gatewayName)
 const AGENTCORE_GATEWAY_ENDPOINT = gatewayName ? agentCoreApp.gatewayEndpoint(gatewayName) : '';
 const AGENTCORE_HARNESS_ARN = harnessName ? agentCoreApp.harnessArn(harnessName) : '';
 const AGENTCORE_HARNESS_ROLE_ARN = harnessName ? agentCoreApp.harnessRoleArn(harnessName) : '';
-const AGENTCORE_HARNESS_RUNTIME_ARN = harnessName ? agentCoreApp.harnessRuntimeArn(harnessName) : '';
 const AGENTCORE_REGION = Stack.of(agentStack).region;
 
 // ============================================================================
@@ -374,7 +394,6 @@ backend.agentWebhookInvokeAgent.addEnvironment('HARNESS_ARN', AGENTCORE_HARNESS_
 backend.agentWebhookInvokeAgent.addEnvironment('COGNITO_CLIENT_ID', backend.auth.resources.userPoolClient.userPoolClientId);
 backend.agentWebhookInvokeAgent.addEnvironment('SERVICE_ACCOUNT_USERNAME', 'invoke-agent-service@internal.local');
 backend.agentWebhookInvokeAgent.addEnvironment('SERVICE_ACCOUNT_SSM_PATH', SVC_SSM_PATH);
-backend.agentWebhookInvokeAgent.addEnvironment('HARNESS_RUNTIME_ARN', AGENTCORE_HARNESS_RUNTIME_ARN);
 backend.agentWebhookPostComment.addEnvironment('ACCOUNT_ID', backend.stack.account);
 
 const secretArns = [GITHUB_WEBHOOK_SECRET_ARN, JIRA_WEBHOOK_SECRET_ARN].filter(Boolean);
@@ -409,13 +428,10 @@ webhookInvokeAgentLambda.addToRolePolicy(new PolicyStatement({
   actions: ['bedrock-agentcore:InvokeHarness'],
   resources: [AGENTCORE_HARNESS_ARN],
 }));
-// Exec a setup command (gh auth login/setup-git) in the harness's runtime
-// session before the InvokeHarness call above — see docs/github-integration.md
-// "Git access: harness exec, not the code interpreter".
-webhookInvokeAgentLambda.addToRolePolicy(new PolicyStatement({
-  actions: ['bedrock-agentcore:InvokeAgentRuntimeCommand'],
-  resources: [AGENTCORE_HARNESS_RUNTIME_ARN],
-}));
+// The pre-invoke harness-exec that authenticates git (POST
+// /runtimes/{harnessArn}/commands) is authorized purely by the Cognito
+// service-account Bearer JWT (same as /harnesses/invoke) — no extra SigV4/IAM
+// grant is needed. See docs/webhook-stepfunction-integration.md "Git access".
 // Read the service-account Cognito password from SSM to mint the harness JWT.
 webhookInvokeAgentLambda.addToRolePolicy(new PolicyStatement({
   actions: ['ssm:GetParameter'],
