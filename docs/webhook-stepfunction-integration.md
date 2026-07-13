@@ -73,6 +73,12 @@ Ported directly from `.github/workflows/claude.yml`'s "Post CloudWatch log links
 
 Unlike the Actions flow — which streams Claude Code's own OTel-exported tool calls and responses — this pipeline's log stream only carries coarse progress markers (`invoking agent`, a 20s heartbeat, `agent responded (N chars)`, or the failure message) written by `agent-webhook-invoke-agent`. The `InvokeHarness` call is a single blocking event-stream read fully consumed before the Lambda returns — the coarse markers are all this path surfaces without having the harness stream step-by-step progress lines into this run's log stream directly. Left as a follow-up.
 
+## Browser chat live view
+
+`agent-webhook-receiver` creates a `ChatSession` row (`id = runId`) before calling `StartExecution`, and that same `runId` is reused unchanged as the harness `runtimeSessionId` in `agent-webhook-invoke-agent`. Since the harness always writes memory under `actorId = "default"` — the same actor the browser's `list-session-messages` Lambda reads — a single id ties the webhook run to a session the browser can load directly: `/chat?sessionId=<runId>` shows that run's messages once the agent has produced any (see `web/app/(with-auth)/chat/use-chat-session.ts` / `use-initial-messages.ts`). No separate id-mapping table is needed. This is the foundational piece of the "Webhook chat-session live view" milestone (issue #61); the ChatSession write is best-effort and never blocks starting the agent run if it fails.
+
+The `ChatSession` row is written with a raw `dynamodb:PutItem` (env var `CHAT_SESSION_TABLE`, granted via `backend.data.resources.tables['ChatSession']` in `backend.ts`) rather than the generated Amplify Data client — same pattern `invoke-agent/handler.ts` uses to read the `Agent`/`McpServer` tables directly, since IAM-only Lambda access to a model's DynamoDB table doesn't require the AppSync-mediated `allow.resource()` grant.
+
 ## Step Function
 
 Defined in [`web/amplify/constructs/agentWebhookStack.ts`](../web/amplify/constructs/agentWebhookStack.ts) as a 3-state `Chain` (`LambdaInvoke` → `LambdaInvoke` → `LambdaInvoke`, with a `Catch` on the middle state). State input/output is threaded via JSONPath (`$.initialComment`, `$.agentResult`, `$.error`) rather than a Lambda-per-source-type branch — `agent-webhook-post-comment` and `agent-webhook-invoke-agent` both branch on `source` (`github` | `jira`) internally.

@@ -414,6 +414,19 @@ const webhookInvokeAgentLambda = backend.agentWebhookInvokeAgent.resources.lambd
 backend.agentWebhookInvokeAgent.addEnvironment('HARNESS_ARN', AGENTCORE_HARNESS_ARN);
 backend.agentWebhookPostComment.addEnvironment('ACCOUNT_ID', backend.stack.account);
 
+// The receiver creates a ChatSession row (id = runId) so the browser's
+// /chat?sessionId=<runId> can display the run's messages — see issue #61.
+// Written via a raw PutItem (same pattern invoke-agent/handler.ts uses to
+// read the Agent/McpServer tables) rather than the generated Data client,
+// since granting `allow.resource()` schema access wires an AppSync policy,
+// not table-level IAM — a plain DynamoDB grant is simpler for a single write.
+const chatSessionTable = backend.data.resources.tables['ChatSession'];
+backend.agentWebhookReceiver.addEnvironment('CHAT_SESSION_TABLE', chatSessionTable.tableName);
+webhookReceiverLambda.addToRolePolicy(new PolicyStatement({
+  actions: ['dynamodb:PutItem'],
+  resources: [chatSessionTable.tableArn],
+}));
+
 const secretArns = [GITHUB_WEBHOOK_SECRET_ARN, JIRA_WEBHOOK_SECRET_ARN].filter(Boolean);
 if (secretArns.length) {
   webhookReceiverLambda.addToRolePolicy(new PolicyStatement({

@@ -8,5 +8,6 @@ export const agentWebhookReceiver = defineFunction({
     GITHUB_WEBHOOK_SECRET_ARN: process.env.GITHUB_WEBHOOK_SECRET_ARN ?? '',
     JIRA_WEBHOOK_SECRET_ARN: process.env.JIRA_WEBHOOK_SECRET_ARN ?? '',
     STATE_MACHINE_ARN: '',
+    CHAT_SESSION_TABLE: '',
   },
 });
