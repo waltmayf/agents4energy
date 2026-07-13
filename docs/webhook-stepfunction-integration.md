@@ -44,7 +44,9 @@ GitHub issue_comment webhook          Jira comment_created webhook
         3. InvokeHarness  (NATIVE bedrockagentcore:invokeHarness task)
              • the optimized Step Functions integration invokes the harness and
                decodes the streamed response into a Converse-shaped result; the
-               final assistant text is $.agentResult.Output.Message.Content[0].Text
+               whole $.agentResult.Output.Message.Content array is passed to
+               PostFinalComment, which joins its text blocks (Content can be []
+               when the turn ends on a tool action)
              • signed with the STATE MACHINE role (not a Lambda) — no code
              • on failure: Catch → agent-webhook-post-comment (stage=final,
                isError=true)
@@ -72,7 +74,7 @@ All label calls are best-effort — a label API hiccup logs a warning but never 
 
 ### Native harness invoke, Lambda-backed git-auth (issue #56)
 
-The harness invoke is the **native `arn:aws:states:::bedrockagentcore:invokeHarness`** optimized integration ([SFN docs](https://docs.aws.amazon.com/step-functions/latest/dg/connect-bedrockagentcore.html)). It decodes the harness's streamed response into a Converse-shaped result, so the final assistant message is read directly from `$.agentResult.Output.Message.Content[0].Text` — no hand-rolled event-stream decoding, and no `agent-webhook-invoke-agent` Lambda in the invoke path. Notes:
+The harness invoke is the **native `arn:aws:states:::bedrockagentcore:invokeHarness`** optimized integration ([SFN docs](https://docs.aws.amazon.com/step-functions/latest/dg/connect-bedrockagentcore.html)). It decodes the harness's streamed response into a Converse-shaped result. `PostFinalComment` receives the whole `$.agentResult.Output.Message.Content` array and joins its text blocks — **not** a direct `Content[0].Text` JSONPath, which crashes the state when the array is empty. The array **can** be empty (`StopReason=end_turn`, `Content=[]`): the integration omits tool-use and reasoning blocks, so a turn that ends on a tool action has no text block (observed on a web-browsing run, issue #70). When empty, the Lambda posts a friendly "no text response" note instead. No hand-rolled event-stream decoding, and no `agent-webhook-invoke-agent` Lambda in the invoke path. Notes:
 
 - **Request-Response only** — `.sync` / task-token patterns aren't supported (fine here; we want the reply inline).
 - **Only the final assistant message** is returned; earlier turns, tool-use, and reasoning blocks are dropped. That's exactly what we post back to the issue.
