@@ -2,15 +2,42 @@ import type { APIGatewayProxyEventV2, APIGatewayProxyStructuredResultV2 } from '
 import { randomUUID } from 'crypto';
 import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-secrets-manager';
 import { SFNClient, StartExecutionCommand } from '@aws-sdk/client-sfn';
+import { DynamoDBClient, PutItemCommand } from '@aws-sdk/client-dynamodb';
 import { verifyGithubSignature, verifyJiraSharedSecret, extractPromptAfterMention } from '../_shared/webhookVerify';
 
 const REGION = process.env.AWS_REGION ?? 'us-east-1';
 const GITHUB_WEBHOOK_SECRET_ARN = process.env.GITHUB_WEBHOOK_SECRET_ARN ?? '';
 const JIRA_WEBHOOK_SECRET_ARN = process.env.JIRA_WEBHOOK_SECRET_ARN ?? '';
 const STATE_MACHINE_ARN = process.env.STATE_MACHINE_ARN ?? '';
+const CHAT_SESSION_TABLE = process.env.CHAT_SESSION_TABLE ?? '';
 
 const secretsManager = new SecretsManagerClient({ region: REGION });
 const sfn = new SFNClient({ region: REGION });
+const ddb = new DynamoDBClient({ region: REGION });
+
+// Creates the ChatSession the browser's /chat?sessionId=<runId> reads from —
+// runId doubles as both the ChatSession.id and the harness runtimeSessionId
+// (see agent-webhook-invoke-agent), so a single id ties the webhook run to a
+// live-viewable chat with no separate mapping table. Best-effort: if this
+// write fails, log and still start the agent run rather than blocking it.
+async function createChatSession(runId: string, name: string): Promise<void> {
+  if (!CHAT_SESSION_TABLE) return;
+  try {
+    const now = new Date().toISOString();
+    await ddb.send(new PutItemCommand({
+      TableName: CHAT_SESSION_TABLE,
+      Item: {
+        id: { S: runId },
+        name: { S: name },
+        createdAt: { S: now },
+        updatedAt: { S: now },
+        __typename: { S: 'ChatSession' },
+      },
+    }));
+  } catch (err) {
+    console.error(`[${runId}] failed to create ChatSession record`, err);
+  }
+}
 
 // Cached across warm invocations — secrets don't change between requests.
 const secretCache = new Map<string, string>();
@@ -83,6 +110,7 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
     if (prompt === null) return json(200, { skipped: 'no trigger mention' });
 
     const runId = randomUUID();
+    await createChatSession(runId, `GitHub #${payload.issue.number}: ${payload.repository.full_name}`);
     await sfn.send(new StartExecutionCommand({
       stateMachineArn: STATE_MACHINE_ARN,
       name: `github-${payload.repository.full_name.replace(/\//g, '-')}-${payload.issue.number}-${runId}`,
@@ -118,6 +146,7 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
     if (prompt === null) return json(200, { skipped: 'no trigger mention' });
 
     const runId = randomUUID();
+    await createChatSession(runId, `Jira ${payload.issue.key}: ${payload.issue.fields.summary}`);
     await sfn.send(new StartExecutionCommand({
       stateMachineArn: STATE_MACHINE_ARN,
       name: `jira-${payload.issue.key}-${runId}`,
