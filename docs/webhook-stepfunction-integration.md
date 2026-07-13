@@ -29,13 +29,16 @@ GitHub issue_comment webhook          Jira comment_created webhook
              • posts a comment with a Live Tail deep-link
              • GitHub only: mints a GitHub App installation token
         2. agent-webhook-invoke-agent
-             • GitHub only: execs a git credential-store setup in the harness's
+             • GitHub only: execs a git+gh credential setup in the harness's
                runtime session (InvokeAgentRuntimeCommand → POST
                /runtimes/{harnessArn}/commands, SigV4) before the agent runs —
                see "Git access" below
+             • GitHub only: prepends the issue's full title/body/comment thread
+               (fetched by agent-webhook-post-comment) to the prompt, so the
+               agent sees the whole discussion, not just the triggering comment
              • invokes the AgentCore Harness (InvokeHarnessCommand, SigV4-signed
-               with the Lambda's execution role) with the comment's prompt; the
-               SDK decodes the event stream into the full text
+               with the Lambda's execution role) with the prompt; the SDK
+               decodes the event stream into the full text
              • appends heartbeat lines to the run's log stream
              • on failure: Catch → agent-webhook-post-comment (stage=final)
                posts the error instead
@@ -90,7 +93,7 @@ Defined in [`web/amplify/constructs/agentWebhookStack.ts`](../web/amplify/constr
 | Function | Role |
 |---|---|
 | [`agent-webhook-receiver`](../web/amplify/functions/agent-webhook-receiver/) | API Gateway target. Verifies signature, detects mention, `StartExecution` |
-| [`agent-webhook-post-comment`](../web/amplify/functions/agent-webhook-post-comment/) | Posts initial (Live Tail link) and final comments, mints GitHub tokens |
+| [`agent-webhook-post-comment`](../web/amplify/functions/agent-webhook-post-comment/) | Posts initial (Live Tail link) and final comments, mints GitHub tokens, fetches the full issue thread (GitHub only) |
 | [`agent-webhook-invoke-agent`](../web/amplify/functions/agent-webhook-invoke-agent/) | Invokes the AgentCore Harness via the SDK's `InvokeHarnessCommand` (SigV4, Lambda execution role) |
 
 `agent-webhook-post-comment` reuses [`web/amplify/functions/_shared/githubAppToken.ts`](../web/amplify/functions/_shared/githubAppToken.ts) — the GitHub App JWT/installation-token logic factored out of `mint-github-token` (see `docs/github-integration.md`) so both the browser-initiated flow and this webhook flow mint tokens identically.
@@ -111,11 +114,31 @@ Two things here matter (both learned across #52/#53):
 The exec command:
 
 1. Configures `git` identity (`user.name`/`user.email` → `webhook-agent[bot]`) and a **credential-store helper** seeded with the GitHub App installation token minted by `agent-webhook-post-comment` (`printf 'https://x-access-token:<token>@github.com' > ~/.git-credentials`) — the same token, the same minting path as the AgUiHandler's `_prepare_workspace()`. This makes `git clone`/`push` over HTTPS work with no interactive auth.
-2. The prompt sent to `InvokeHarness` is annotated with a `<github_access>` block telling the agent its `git` is already authenticated for the target repo, so it clones/commits/pushes directly instead of assuming (as it did in early testing on #48) that it lacks write access.
+2. Installs `gh` if it isn't already on `$PATH` (see "`gh` CLI install" below), then runs `gh auth login --with-token` / `gh auth setup-git` with the same token.
+3. The prompt sent to `InvokeHarness` is annotated with a `<github_access>` block telling the agent its `git` and `gh` are already authenticated for the target repo, so it clones/commits/pushes and opens PRs directly with `gh pr create` instead of assuming (as it did in early testing on #48) that it lacks write access.
 
-**No `gh` CLI.** The harness image (Amazon Linux 2023) ships `git` but not `gh`, and `gh` can't be cleanly installed at exec time (no `cpio`, not in the AL2023 repos, `rpm -i` rejects the official package as non-relocatable). So the agent does **not** run `gh pr create`; instead the `<github_access>` block instructs it to push its branch and end its reply with a GitHub **compare URL** (`/compare/<base>...<head>?quick_pull=1&title=…&body=…`, per [GitHub's query-parameter docs](https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/proposing-changes-to-your-work-with-pull-requests/using-query-parameters-to-create-a-pull-request)). The Step Function posts the agent's reply back as an issue comment, so that one-click "open PR" link reaches the user there. Baking `gh` into the harness image (so `gh pr create` works directly) is tracked in #54.
+The token travels once in the exec request body (TLS-encrypted, never surfaced to the model) and is stored only in the session's `~/.git-credentials` and `gh`'s config — the agent's subsequent tool calls never receive it.
 
-The token travels once in the exec request body (TLS-encrypted, never surfaced to the model) and is stored only in the session's `~/.git-credentials` — the agent's subsequent tool calls never receive it.
+#### `gh` CLI install (#54)
+
+The harness image (Amazon Linux 2023) ships `git` but not `gh`, and `gh` isn't in the AL2023 `dnf` repos. Verified in a sandbox: `dnf install gh` has no match, and extracting the official RPM needs `cpio` (also absent) or hits `rpm -i`'s "not relocatable" rejection.
+
+The install that works, run as part of the same exec command (skipped via `command -v gh` if the underlying container happens to already have it from a prior run):
+
+1. Detect the container architecture (`uname -m`: `aarch64` → `arm64`, `x86_64` → `amd64`).
+2. `curl` the matching pre-built tarball from `https://github.com/cli/cli/releases/download/v<version>/gh_<version>_linux_<arch>.tar.gz` (pinned version, bumped deliberately — see `GH_VERSION` in the handler).
+3. Extract it with Python's stdlib `tarfile` module (`python3 -c "import tarfile; ..."`) rather than `tar`, since `tar` also isn't installed on the image but `python3` is — this avoids installing yet another package via `dnf` just to unpack one.
+4. Move the extracted `bin/gh` to `/usr/local/bin/gh`.
+
+Cost: one ~13MB download (~0.5s over a fast link in testing) plus a fast local extract — well under the harness-exec's 90s timeout, and a one-time cost per fresh container rather than per run if the container is reused. This runs on every cold session rather than being baked into a Dockerfile, because `MyHarness`'s runtime is a managed AgentCore harness image (unlike `AgUiHandler`, which has its own `agent/handler/Dockerfile`) with no image-build step this repo controls.
+
+With `gh` authenticated, the `<github_access>` prompt block tells the agent to open PRs with `gh pr create --repo <repo> --base main --head <branch> --title "<title>" --body "<body>"` instead of the previous compare-URL workaround.
+
+### Issue context: full thread, not just the triggering comment
+
+`agent-webhook-receiver` only forwards the text of the one comment that mentioned `@webhook-agent` — the agent otherwise has no visibility into the issue's title, description, or any earlier discussion. `agent-webhook-post-comment` (GitHub only, `stage=initial`) closes that gap: after minting the installation token, it also calls `GET /repos/{repo}/issues/{issueNumber}` and `GET /repos/{repo}/issues/{issueNumber}/comments` and formats the issue title, body, and every existing comment (`@login: body`) into a single `issueContext` string, returned alongside the token.
+
+The Step Function threads `$.initialComment.issueContext` into `agent-webhook-invoke-agent`'s payload, which prepends it to the prompt inside an `<issue_context>` block, ahead of the triggering comment's text and (for GitHub runs) the `<github_access>` block. Jira runs don't get this treatment — Jira's webhook payload already includes the comment body but there's no equivalent "fetch full issue + thread" call wired up yet.
 
 ## Setup
 

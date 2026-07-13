@@ -27,6 +27,7 @@ interface PostCommentOutput {
   logStreamName?: string;
   githubToken?: string;
   githubTokenExpiresAt?: string;
+  issueContext?: string;
 }
 
 async function postGithubComment(repo: string, issueNumber: number, body: string): Promise<{ token: string; expiresAt: string }> {
@@ -49,6 +50,53 @@ async function postGithubComment(repo: string, issueNumber: number, body: string
     throw new Error(`GitHub createComment failed (HTTP ${res.status}): ${await res.text()}`);
   }
   return { token, expiresAt };
+}
+
+interface GithubIssueSummary {
+  title: string;
+  body: string | null;
+}
+
+interface GithubCommentSummary {
+  user: { login: string };
+  body: string;
+}
+
+// Fetches the issue's title/body plus every existing comment, so the agent
+// gets the full thread (not just the triggering comment's text after the
+// mention) — the receiver Lambda only forwards the one comment that mentioned
+// it, which drops all prior discussion/context on the issue.
+async function fetchGithubIssueContext(repo: string, issueNumber: number, token: string): Promise<string> {
+  const headers = {
+    Authorization: `Bearer ${token}`,
+    Accept: 'application/vnd.github+json',
+    'X-GitHub-Api-Version': '2022-11-28',
+  };
+
+  const issueRes = await fetch(`https://api.github.com/repos/${repo}/issues/${issueNumber}`, { headers });
+  if (!issueRes.ok) {
+    throw new Error(`GitHub getIssue failed (HTTP ${issueRes.status}): ${await issueRes.text()}`);
+  }
+  const issue = await issueRes.json() as GithubIssueSummary;
+
+  const commentsRes = await fetch(`https://api.github.com/repos/${repo}/issues/${issueNumber}/comments?per_page=100`, { headers });
+  if (!commentsRes.ok) {
+    throw new Error(`GitHub listComments failed (HTTP ${commentsRes.status}): ${await commentsRes.text()}`);
+  }
+  const comments = await commentsRes.json() as GithubCommentSummary[];
+
+  const parts = [
+    `Issue #${issueNumber}: ${issue.title}`,
+    '',
+    issue.body ?? '(no description)',
+  ];
+  if (comments.length) {
+    parts.push('', '--- Comments ---');
+    for (const comment of comments) {
+      parts.push('', `@${comment.user.login}:`, comment.body);
+    }
+  }
+  return parts.join('\n');
 }
 
 const secretsManager = new SecretsManagerClient({ region: REGION });
@@ -104,18 +152,20 @@ export const handler = async (input: PostCommentInput): Promise<PostCommentOutpu
 
     let githubToken: string | undefined;
     let githubTokenExpiresAt: string | undefined;
+    let issueContext: string | undefined;
 
     if (input.source === 'github') {
       if (!input.repo || input.issueNumber === undefined) throw new Error('repo/issueNumber required for github source');
       const minted = await postGithubComment(input.repo, input.issueNumber, body);
       githubToken = minted.token;
       githubTokenExpiresAt = minted.expiresAt;
+      issueContext = await fetchGithubIssueContext(input.repo, input.issueNumber, githubToken);
     } else {
       if (!input.issueKey) throw new Error('issueKey required for jira source');
       await postJiraComment(input.issueKey, body);
     }
 
-    return { logGroupName: groupName, logStreamName: streamName, githubToken, githubTokenExpiresAt };
+    return { logGroupName: groupName, logStreamName: streamName, githubToken, githubTokenExpiresAt, issueContext };
   }
 
   // Final stage — post the agent's response as a follow-up comment.

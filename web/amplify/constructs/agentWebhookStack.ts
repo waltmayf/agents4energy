@@ -77,6 +77,7 @@ export class AgentWebhookStack extends Construct {
         issueNumber: sfn.JsonPath.numberAt('$.issueNumber'),
         issueKey: sfn.JsonPath.stringAt('$.issueKey'),
         githubToken: sfn.JsonPath.stringAt('$.initialComment.githubToken'),
+        issueContext: sfn.JsonPath.stringAt('$.initialComment.issueContext'),
         logGroupName: sfn.JsonPath.stringAt('$.initialComment.logGroupName'),
         logStreamName: sfn.JsonPath.stringAt('$.initialComment.logStreamName'),
       }),
