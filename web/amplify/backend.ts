@@ -180,8 +180,8 @@ const agUiHandlerRuntime = new AgentCoreRuntimeWithBuild(agentStack, 'AgUiHandle
 // decoder and resolving the long-stream `TypeError: terminated` (#57), since
 // the SDK owns connection timeouts and retries. Browser callers sign with
 // Cognito Identity Pool credentials (the pool's authenticated role is granted
-// bedrock-agentcore:InvokeAgentRuntime in the wiring below — that's the IAM
-// action InvokeHarnessCommand authorizes under, not a distinct "InvokeHarness").
+// both bedrock-agentcore:InvokeAgentRuntime and :InvokeHarness in the wiring
+// below — InvokeHarnessCommand's IAM authorization checks both actions).
 const harnessSpecsWithAuth: HarnessSpec[] = harnessSpecs;
 
 // Memory/Harness/Gateway from agentcore.json — same-stack CDK tokens, no
@@ -279,11 +279,13 @@ if (AGENTCORE_HARNESS_ARN) {
     roles: [backend.auth.resources.authenticatedUserIamRole],
     statements: [
       new PolicyStatement({
-        // InvokeHarnessCommand authorizes under the InvokeAgentRuntime IAM
-        // action (the harness invoke rides the runtime action), not a
-        // hypothetical "InvokeHarness" action — confirmed by the AccessDenied
-        // returned when only InvokeHarness was granted.
-        actions: ['bedrock-agentcore:InvokeAgentRuntime'],
+        // InvokeHarnessCommand checks BOTH IAM actions — InvokeAgentRuntime
+        // and InvokeHarness (confirmed by successive AccessDenied errors,
+        // each naming the missing one). Grant both.
+        actions: [
+          'bedrock-agentcore:InvokeAgentRuntime',
+          'bedrock-agentcore:InvokeHarness',
+        ],
         resources: [AGENTCORE_HARNESS_ARN],
       }),
     ],
@@ -349,9 +351,12 @@ const invokeAgentLambda = backend.invokeAgent.resources.lambda as LambdaFunction
 // MyHarness authorizes with AWS_IAM: this Lambda invokes it via the SDK's
 // InvokeHarnessCommand, signed with its own execution-role credentials — no
 // Cognito service account / SSM password needed anymore. InvokeHarnessCommand
-// authorizes under the InvokeAgentRuntime IAM action.
+// checks both the InvokeAgentRuntime and InvokeHarness IAM actions.
 invokeAgentLambda.addToRolePolicy(new PolicyStatement({
-  actions: ['bedrock-agentcore:InvokeAgentRuntime'],
+  actions: [
+    'bedrock-agentcore:InvokeAgentRuntime',
+    'bedrock-agentcore:InvokeHarness',
+  ],
   resources: [AGENTCORE_HARNESS_ARN],
 }));
 
@@ -438,13 +443,14 @@ webhookInvokeAgentLambda.addToRolePolicy(new PolicyStatement({
   resources: [`arn:aws:logs:${AGENTCORE_REGION}:${backend.stack.account}:log-group:/agent-webhook/*:log-stream:*`],
 }));
 // Both harness operations this Lambda performs are SigV4-signed against the
-// same harness ARN: the agent turn (InvokeHarnessCommand, which authorizes
-// under the InvokeAgentRuntime IAM action) and the pre-invoke git-auth exec
-// (InvokeAgentRuntimeCommand → POST /runtimes/{harnessArn}/commands — see
-// docs/webhook-stepfunction-integration.md "Git access").
+// same harness ARN: the agent turn (InvokeHarnessCommand, which checks both
+// the InvokeAgentRuntime and InvokeHarness IAM actions) and the pre-invoke
+// git-auth exec (InvokeAgentRuntimeCommand → POST /runtimes/{harnessArn}/commands
+// — see docs/webhook-stepfunction-integration.md "Git access").
 webhookInvokeAgentLambda.addToRolePolicy(new PolicyStatement({
   actions: [
     'bedrock-agentcore:InvokeAgentRuntime',
+    'bedrock-agentcore:InvokeHarness',
     'bedrock-agentcore:InvokeAgentRuntimeCommand',
   ],
   resources: [AGENTCORE_HARNESS_ARN],
