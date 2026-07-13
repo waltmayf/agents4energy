@@ -264,11 +264,25 @@ const AGENTCORE_REGION = Stack.of(agentStack).region;
 // MyHarness now authorizes with AWS_IAM, so the browser signs InvokeHarness
 // requests with Cognito Identity Pool credentials (see web/lib/agentcore-transport.ts).
 // Grant the pool's authenticated role permission to invoke the harness.
+//
+// Attach via a standalone Policy rather than `role.addToPrincipalPolicy(...)`:
+// Amplify surfaces authenticatedUserIamRole as a role owned by the auth stack,
+// and adding a principal policy to it silently no-ops — the statement never
+// synthesizes onto the role (observed as an AccessDeniedException at invoke
+// time). An AWS::IAM::Policy only needs the role name to attach, so create it
+// in agentStack (which owns AGENTCORE_HARNESS_ARN and already depends on the
+// auth stack for the AgUiHandler's Cognito config — so referencing the auth
+// role here adds no new dependency and introduces no cycle).
 if (AGENTCORE_HARNESS_ARN) {
-  backend.auth.resources.authenticatedUserIamRole.addToPrincipalPolicy(new PolicyStatement({
-    actions: ['bedrock-agentcore:InvokeHarness'],
-    resources: [AGENTCORE_HARNESS_ARN],
-  }));
+  new Policy(agentStack, 'HarnessInvokeAuthPolicy', {
+    roles: [backend.auth.resources.authenticatedUserIamRole],
+    statements: [
+      new PolicyStatement({
+        actions: ['bedrock-agentcore:InvokeHarness'],
+        resources: [AGENTCORE_HARNESS_ARN],
+      }),
+    ],
+  });
 }
 
 // ============================================================================
