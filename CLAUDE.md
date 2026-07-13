@@ -13,6 +13,9 @@ If you would like to run an aws cli command you don't have access to, put the co
 You can't direclty push changes to `.github/workflows/`, so instead update `.github/workflow-drafts/` and ask the user to copy the workflow to the other folder.
 
 ### GitHub Issues
+
+When you start working on an issue, inspect the code base to check if they description and comments in the issue are stale.
+
 If you discover a bug:
 1. Check the current github issues cover the bug, and if so make sure the issue has sufficient context
 2. If not, create a github issue. Use the github native relationships feature to describe blocking relationships with other issues.
