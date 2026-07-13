@@ -23,8 +23,11 @@ interface PostCommentInput {
   issueNumber?: number;
   // jira
   issueKey?: string;
-  // final stage only
+  // final stage only — the failure path sends a plain responseText (the error
+  // cause); the success path sends responseContent, the native invokeHarness
+  // result's Message.Content array (which may be empty).
   responseText?: string;
+  responseContent?: Array<{ Text?: string }>;
   // 'label' when the run was started by the `agentcore` label (vs a comment
   // mention). Only label-triggered GitHub runs get the agent-working/agent-error
   // label bookkeeping below.
@@ -173,7 +176,16 @@ export const handler = async (input: PostCommentInput): Promise<PostCommentOutpu
   }
 
   // Final stage — post the agent's response as a follow-up comment.
-  const responseText = input.responseText ?? '(no response)';
+  // Success path: join the text blocks of the native invokeHarness result's
+  // Message.Content (the integration omits tool-use/reasoning blocks, so this
+  // can be empty). Failure path: responseText carries the error cause.
+  const joinedContent = (input.responseContent ?? [])
+    .map((block) => block?.Text ?? '')
+    .filter(Boolean)
+    .join('\n')
+    .trim();
+  const responseText = input.responseText
+    ?? (joinedContent || '_The agent finished but produced no text response (it may have ended on a tool action). See the CloudWatch logs linked above._');
   if (input.source === 'github') {
     if (!input.repo || input.issueNumber === undefined) throw new Error('repo/issueNumber required for github source');
     const { token } = await postGithubComment(input.repo, input.issueNumber, responseText);

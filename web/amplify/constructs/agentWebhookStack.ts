@@ -158,8 +158,13 @@ export class AgentWebhookStack extends Construct {
         repo: sfn.JsonPath.stringAt('$.repo'),
         issueNumber: sfn.JsonPath.numberAt('$.issueNumber'),
         issueKey: sfn.JsonPath.stringAt('$.issueKey'),
-        // Final assistant message from the native invokeHarness result.
-        responseText: sfn.JsonPath.stringAt('$.agentResult.Output.Message.Content[0].Text'),
+        // Pass the whole content-block array (always present, even when empty)
+        // and let the Lambda join the text blocks with a fallback. A direct
+        // `Content[0].Text` JSONPath crashes the state when the agent's final
+        // turn has no text block — the native integration omits tool-use /
+        // reasoning blocks, so Content can legitimately be [] (observed on a
+        // web-browsing run: StopReason=end_turn, Content=[]).
+        responseContent: sfn.JsonPath.listAt('$.agentResult.Output.Message.Content'),
       }),
       payloadResponseOnly: true,
       resultPath: '$.finalComment',
