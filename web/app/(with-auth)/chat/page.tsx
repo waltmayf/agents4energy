@@ -252,8 +252,8 @@ function ChatView({
               .join('');
             // Extract toolResult content if present
             const toolContent = message.parts
-              .filter((p): p is { type: 'toolResult'; content?: { text: string }[] } => p.type === 'toolResult')
-              .flatMap((p) => p.content?.map((c) => c.text) ?? [])
+              .filter((p) => p.type === 'toolResult')
+              .flatMap((p: any) => p.content?.map((c: any) => c.text) ?? [])
               .join('\n');
 
             return (
