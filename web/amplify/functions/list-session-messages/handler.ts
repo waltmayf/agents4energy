@@ -19,7 +19,40 @@ interface ConversationalEvent {
   eventId: string;
   role: string;
   text: string;
+  // JSON string of the Bedrock Converse ContentBlock[] for this message, or null
+  // when the stored payload wasn't structured JSON. Parsed once, here.
+  contentJson: string | null;
   timestamp: string;
+}
+
+/**
+ * The harness stores each message's payload text as a JSON string. It's usually
+ * a Converse message ({ role, content: ContentBlock[] }) or a bare
+ * ContentBlock[]. Normalize to the content-block array, or return null when the
+ * text isn't structured JSON (plain-text fallback).
+ */
+function extractContentBlocks(rawText: string): any[] | null {
+  try {
+    const parsed = JSON.parse(rawText);
+    const msg = parsed?.message ?? parsed;
+    const content = Array.isArray(msg) ? msg : msg?.content;
+    return Array.isArray(content) ? content : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Flatten Converse content blocks to plain text (text + reasoning + toolResult text). */
+function flattenBlocksToText(blocks: any[]): string {
+  const collect = (item: any): string => {
+    if (!item || typeof item !== 'object') return '';
+    if (typeof item.text === 'string') return item.text;
+    if (item.reasoningContent?.reasoningText?.text) return item.reasoningContent.reasoningText.text;
+    if (item.toolResult?.content) return item.toolResult.content.map(collect).join(' ');
+    if (Array.isArray(item.content)) return item.content.map(collect).join(' ');
+    return '';
+  };
+  return blocks.map(collect).filter(Boolean).join(' ').trim();
 }
 
 interface ListSessionMessagesResult {
@@ -96,42 +129,22 @@ export const handler = async (
       const { role, content } = payload.conversational;
       if (!role) continue;
 
-      // The harness SDK stores the full message as a JSON string in the text field.
-      // Try to parse it and extract the actual message text; fall back to raw text.
-      // The harness SDK stores the full message as a JSON string in the text field.
-      // Try to parse it and extract all textual content, handling toolResult, reasoningContent, etc.
-      let text = content?.text ?? '';
-      if (text) {
-        try {
-          const parsed = JSON.parse(text);
-          const msg = parsed?.message ?? parsed;
-          const contentArr: any[] = msg?.content ?? [];
-          const extractText = (item: any): string => {
-            if (!item || typeof item !== 'object') return '';
-            if (item.text) return item.text;
-            if (item.toolResult?.content) {
-              return item.toolResult.content.map(extractText).join(' ');
-            }
-            if (item.reasoningContent?.reasoningText?.text) {
-              return item.reasoningContent.reasoningText.text;
-            }
-            if (Array.isArray(item.content)) {
-              return item.content.map(extractText).join(' ');
-            }
-            return '';
-          };
-          const extracted = contentArr.map(extractText).filter(Boolean).join(' ');
-          if (extracted) text = extracted;
-        } catch {
-          // not JSON — keep raw text
-        }
-      }
+      // The harness SDK stores the full Converse message as a JSON string in the
+      // text field. Parse it ONCE into content blocks here: `contentJson` carries
+      // the structured blocks (for rich rendering), `text` is the flattened
+      // plain text (for simple consumers). Fall back to raw text when unparseable.
+      const rawText = content?.text ?? '';
+      const blocks = rawText ? extractContentBlocks(rawText) : null;
+      const text = blocks ? flattenBlocksToText(blocks) : rawText;
 
-      if (!text) continue;
+      // Keep messages that have renderable text OR structured blocks (a pure
+      // toolUse/toolResult message has no flattened text but is still meaningful).
+      if (!text && !blocks) continue;
       events.push({
         eventId: e.eventId!,
         role: role.toLowerCase(),
         text,
+        contentJson: blocks ? JSON.stringify(blocks) : null,
         timestamp: e.eventTimestamp?.toISOString() ?? '',
       });
     }
