@@ -270,19 +270,19 @@ export class AgentCoreStack extends Stack {
         new CfnOutput(this, 'UserMcpGatewayArn', {
           description: 'ARN of the default-gateway (user MCP gateway)',
           value: cfnGateway.attrGatewayArn,
-          exportName: `${this.stackName}-UserMcpGateway-Arn`,
+          // exportName removed to avoid cross-stack export conflict
         });
 
         new CfnOutput(this, 'UserMcpGatewayId', {
           description: 'ID of the default-gateway (user MCP gateway)',
           value: cfnGateway.attrGatewayIdentifier,
-          exportName: `${this.stackName}-UserMcpGateway-Id`,
+          // exportName removed to avoid cross-stack export conflict
         });
 
         new CfnOutput(this, 'UserMcpGatewayEndpoint', {
           description: 'Endpoint URL of the default-gateway (user MCP gateway)',
           value: cfnGateway.attrGatewayUrl,
-          exportName: `${this.stackName}-UserMcpGateway-Endpoint`,
+          // exportName removed to avoid cross-stack export conflict
         });
 
         if (seedData) {
