@@ -50,13 +50,44 @@ export async function fetchSessionMessages(sessionId: string): Promise<SessionDa
   const messages = allEvents
     .filter((e): e is NonNullable<typeof e> => e != null)
     .sort((a, b) => a.timestamp.localeCompare(b.timestamp))
-    .map((e, i) => ({
-      id: e.eventId ?? `msg-${i}`,
-      role: (e.role === 'assistant' || e.role === 'user' ? e.role : 'assistant') as UIMessage['role'],
-      content: e.text,
-      parts: [{ type: 'text' as const, text: e.text }],
-      createdAt: e.timestamp ? new Date(e.timestamp) : new Date(),
-    }));
+    .map((e, i) => {
+      // Attempt to parse JSON-encoded message content from AgentCore memory.
+      let parsed: any = null;
+      try {
+        parsed = JSON.parse(e.text);
+      } catch (_) {
+        // Not JSON, fall back to raw text.
+      }
+      const parts: any[] = [];
+      let combinedText = '';
+      if (parsed && parsed.message && parsed.message.content) {
+        for (const item of parsed.message.content) {
+          if (item.toolResult && Array.isArray(item.toolResult.content)) {
+            const texts = item.toolResult.content.map((c: any) => c.text).filter(Boolean);
+            parts.push({ type: 'toolResult' as const, content: texts });
+            combinedText += texts.join('\n') + '\n';
+          } else if (item.reasoningContent && item.reasoningContent.reasoningText && item.reasoningContent.reasoningText.text) {
+            const txt = item.reasoningContent.reasoningText.text;
+            parts.push({ type: 'text' as const, text: txt });
+            combinedText += txt + '\n';
+          } else if (item.text) {
+            parts.push({ type: 'text' as const, text: item.text });
+            combinedText += item.text + '\n';
+          }
+        }
+      } else {
+        parts.push({ type: 'text' as const, text: e.text });
+        combinedText = e.text;
+      }
+      combinedText = combinedText.trimEnd();
+      return {
+        id: e.eventId ?? `msg-${i}`,
+        role: (e.role === 'assistant' || e.role === 'user' ? e.role : 'assistant') as UIMessage['role'],
+        content: combinedText,
+        parts,
+        createdAt: e.timestamp ? new Date(e.timestamp) : new Date(),
+      };
+    });
 
   return { messages, summary, summaryTimestamp, summaryRecordId };
 }
