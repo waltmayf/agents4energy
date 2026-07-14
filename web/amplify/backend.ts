@@ -24,11 +24,7 @@ import { AgentCoreApplication, type HarnessSpec } from './constructs/agentCoreAp
 import { E2eTestUser } from './constructs/e2eTestUser/resource';
 import { AgentWebhookStack } from './constructs/agentWebhookStack';
 
-import { 
-  aws_bedrock as bedrock,
-  aws_bedrockagentcore as agentcore,
-  aws_iam as iam
-} from 'aws-cdk-lib'
+import { StringParameter } from 'aws-cdk-lib/aws-ssm';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -46,13 +42,14 @@ const __dirname = dirname(__filename);
 const agentcoreRoot = resolve(__dirname, '../../agent/default/agentcore');
 const projectSpec = JSON.parse(readFileSync(resolve(agentcoreRoot, 'agentcore.json'), 'utf8'));
 
-// MyHarness — see agent/default/app/MyHarness/ (system-prompt.md is still read
-// from disk since it's prose, not config; everything else is inlined here as
-// literal CfnHarness sub-properties, passed straight through by
-// AgentCoreApplication with no field-mapping).
-const myHarnessSystemPrompt = `
-You are a coding agent. Users will assign coding tasks to you
-`
+// MyHarness — see agent/default/app/MyHarness/. The system prompt is prose, not
+// config, so it lives in system-prompt.md and is read from disk here; everything
+// else is inlined below as literal CfnHarness sub-properties, passed straight
+// through by AgentCoreApplication with no field-mapping.
+const myHarnessSystemPrompt = readFileSync(
+  resolve(agentcoreRoot, '../app/MyHarness/system-prompt.md'),
+  'utf8',
+).trim();
 
 const harnessSpecs: HarnessSpec[] = [
   {
@@ -66,7 +63,7 @@ const harnessSpecs: HarnessSpec[] = [
     systemPrompt: myHarnessSystemPrompt,
     tools: [
       { type: 'agentcore_browser', name: 'browser', config: { agentCoreBrowser: {} } },
-      { type: 'agentcore_code_interpreter', name: 'code-interpreter', config: { agentCoreCodeInterpreter: {} } },
+      // { type: 'agentcore_code_interpreter', name: 'code-interpreter', config: { agentCoreCodeInterpreter: {} } },
     ],
     memoryName: 'MyHarnessMemory',
     truncation: {
@@ -266,6 +263,57 @@ const AGENTCORE_REGION = Stack.of(agentStack).region;
 
 // MyHarness now authorizes with AWS_IAM, so the browser signs InvokeHarness
 // requests with Cognito Identity Pool credentials (see web/lib/agentcore-transport.ts).
+
+// Store AgentCore runtime identifiers in SSM Parameter Store to avoid cross-stack exports.
+// Parameter names include the stack name (which encodes repo and sanitized branch) to
+// keep values isolated per sandbox.
+// simpleName: false on every parameter — the path is `/agentcore/<stackName>/…`
+// and `stackName` is an unresolved CDK token here, so CDK can't infer from the
+// name string that these are path-style ("/"-prefixed) rather than simple
+// names. Without it synth fails with "Unable to determine ARN separator for SSM
+// parameter since the parameter name is an unresolved token."
+const ssmBasePath = `/agentcore/${Stack.of(agentStack).stackName}`;
+new StringParameter(agentStack, 'SsmAgentcoreMemoryId', {
+  parameterName: `${ssmBasePath}/memory_id`,
+  stringValue: AGENTCORE_MEMORY_ID,
+  simpleName: false,
+});
+new StringParameter(agentStack, 'SsmAgentcoreMemoryArn', {
+  parameterName: `${ssmBasePath}/memory_arn`,
+  stringValue: AGENTCORE_MEMORY_ARN,
+  simpleName: false,
+});
+new StringParameter(agentStack, 'SsmAgentcoreGatewayId', {
+  parameterName: `${ssmBasePath}/gateway_id`,
+  stringValue: AGENTCORE_GATEWAY_ID,
+  simpleName: false,
+});
+new StringParameter(agentStack, 'SsmAgentcoreGatewayArn', {
+  parameterName: `${ssmBasePath}/gateway_arn`,
+  stringValue: AGENTCORE_GATEWAY_ARN,
+  simpleName: false,
+});
+new StringParameter(agentStack, 'SsmAgentcoreGatewayEndpoint', {
+  parameterName: `${ssmBasePath}/gateway_endpoint`,
+  stringValue: AGENTCORE_GATEWAY_ENDPOINT,
+  simpleName: false,
+});
+new StringParameter(agentStack, 'SsmAgentcoreHarnessArn', {
+  parameterName: `${ssmBasePath}/harness_arn`,
+  stringValue: AGENTCORE_HARNESS_ARN,
+  simpleName: false,
+});
+new StringParameter(agentStack, 'SsmAgentcoreHarnessRoleArn', {
+  parameterName: `${ssmBasePath}/harness_role_arn`,
+  stringValue: AGENTCORE_HARNESS_ROLE_ARN,
+  simpleName: false,
+});
+new StringParameter(agentStack, 'SsmAgentcoreRegion', {
+  parameterName: `${ssmBasePath}/region`,
+  stringValue: AGENTCORE_REGION,
+  simpleName: false,
+});
+
 // Grant the pool's authenticated role permission to invoke the harness.
 //
 // Attach via a standalone Policy rather than `role.addToPrincipalPolicy(...)`:

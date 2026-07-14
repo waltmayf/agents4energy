@@ -328,5 +328,5 @@ export const handler = async (input: PrepareInput): Promise<PrepareOutput> => {
     ].join('\n');
   }
 
-  return { effectivePrompt, gitAuth };
+  return { effectivePrompt: withAgentsPrompt(effectivePrompt), gitAuth };
 };
