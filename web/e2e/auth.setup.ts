@@ -12,24 +12,20 @@ const storageStatePath = resolve(__dirname, '../.auth/user.json');
 
 // Prefer web/e2e-config.json (fetched from SSM via `pnpm fetch:e2e-config`) so
 // tests can run against an already-deployed branch with no local build/deploy.
-// Fall back to amplify_outputs.json for the traditional local-sandbox flow.
+// This file is required; if missing, run the fetch script.
 const e2eConfigPath = resolve(root, 'web/e2e-config.json');
 let clientId: string;
 let region: string;
 let emailSsmPath: string | undefined;
 let passwordSsmPath: string | undefined;
-if (existsSync(e2eConfigPath)) {
-  const e2eConfig = JSON.parse(readFileSync(e2eConfigPath, 'utf8'));
-  clientId = e2eConfig.userPoolClientId;
-  region = e2eConfig.region;
-  emailSsmPath = e2eConfig.testUserEmailSsmPath;
-  passwordSsmPath = e2eConfig.testUserPasswordSsmPath;
-} else {
-  const amplifyOutputs = JSON.parse(readFileSync(resolve(root, 'web/amplify_outputs.json'), 'utf8'));
-  ({ user_pool_client_id: clientId, aws_region: region } = amplifyOutputs.auth);
-  ({ e2e_test_user_email_ssm_path: emailSsmPath, e2e_test_user_password_ssm_path: passwordSsmPath } =
-    amplifyOutputs.custom ?? {});
+if (!existsSync(e2eConfigPath)) {
+  throw new Error('Missing web/e2e-config.json. Run `pnpm fetch:e2e-config` to retrieve test configuration from SSM.');
 }
+const e2eConfig = JSON.parse(readFileSync(e2eConfigPath, 'utf8'));
+clientId = e2eConfig.userPoolClientId;
+region = e2eConfig.region;
+emailSsmPath = e2eConfig.testUserEmailSsmPath;
+passwordSsmPath = e2eConfig.testUserPasswordSsmPath;
 
 // Key format used by Amplify v6 CookieStorage / DefaultTokenStore.
 // With ssr: true, tokens go into cookies. With ssr: false they go into localStorage.

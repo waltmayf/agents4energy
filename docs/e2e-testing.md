@@ -40,7 +40,7 @@ pnpm test:e2e
 
 Requires AWS credentials with `ssm:GetParameter` on `/outputs/*` (see [scripts/setup-deploy-role.ts](../scripts/setup-deploy-role.ts) for the deploy role's grant of this).
 
-When `web/e2e-config.json` exists, [playwright.config.ts](../web/playwright.config.ts) points `baseURL` at the deployed CloudFront URL (`https://<domain>/<branch>/`) and skips starting a local dev server. [auth.setup.ts](../web/e2e/auth.setup.ts) reads Cognito pool info from the same file instead of `amplify_outputs.json`.
+When `web/e2e-config.json` exists, [playwright.config.ts](../web/playwright.config.ts) points `baseURL` at the deployed CloudFront URL (`https://<domain>/<branch>/`) and skips starting a local dev server. [auth.setup.ts](../web/e2e/auth.setup.ts) reads Cognito pool info from the same file; `amplify_outputs.json` is no longer required for e2e tests.
 
 Delete `web/e2e-config.json` (or don't create it) to fall back to the local dev-server flow described above.
 
@@ -49,7 +49,8 @@ Delete `web/e2e-config.json` (or don't create it) to fall back to the local dev-
 Authentication runs once as a setup project before any tests execute.
 The setup lives in [web/e2e/auth.setup.ts](../web/e2e/auth.setup.ts) and produces `.auth/user.json` (gitignored).
 
-The test user itself is provisioned at deploy time, not by the test runner. `web/amplify/constructs/e2eTestUser/` is a CDK custom resource in `agentStack` (wired in `backend.ts`) that creates a Cognito user with a cryptographically random password and writes both to SSM Parameter Store (`custom.e2e_test_user_email_ssm_path` / `..._password_ssm_path` in `amplify_outputs.json` point at the paths). `auth.setup.ts` reads those two parameters and signs in via `InitiateAuthCommand` — it needs only `ssm:GetParameter`, not any Cognito admin permission.
+The test user is provisioned at deploy time via a CDK custom resource (`web/amplify/constructs/e2eTestUser/`). It stores the user's email and password in SSM Parameter Store. The e2e setup script reads those parameters (paths are included in `web/e2e-config.json`) and signs in via `InitiateAuthCommand` — it needs only `ssm:GetParameter`, not any Cognito admin permission.
+
 
 This means the AWS credentials running the test suite never need `cognito-idp:AdminCreateUser` — that permission is scoped to the custom resource's own Lambda role at deploy time. Re-running `pnpm run deploy` rotates the test user's password (the custom resource runs `AdminSetUserPassword` on every Update).
 
