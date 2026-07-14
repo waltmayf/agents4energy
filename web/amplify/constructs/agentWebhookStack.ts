@@ -2,6 +2,7 @@ import { Duration, Stack } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import * as apigwv2 from 'aws-cdk-lib/aws-apigatewayv2';
 import { HttpLambdaIntegration } from 'aws-cdk-lib/aws-apigatewayv2-integrations';
+import { HttpLambdaAuthorizer, HttpLambdaResponseType } from 'aws-cdk-lib/aws-apigatewayv2-authorizers';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as sfn from 'aws-cdk-lib/aws-stepfunctions';
 import * as tasks from 'aws-cdk-lib/aws-stepfunctions-tasks';
@@ -10,6 +11,15 @@ import { PolicyStatement } from 'aws-cdk-lib/aws-iam';
 export interface AgentWebhookStackProps {
   /** Lambda backing the API Gateway route — verifies signatures and starts the state machine. */
   receiverLambda: lambda.IFunction;
+  /**
+   * REQUEST authorizer Lambda in front of receiverLambda (issue #83). For
+   * GitHub deliveries, rejects requests with a missing/malformed
+   * `X-Hub-Signature-256` before they reach the receiver — a signature-FORMAT
+   * gate only. It cannot verify the HMAC itself (authorizers never see the
+   * request body), so that check stays in receiverLambda; this is defense in
+   * depth, not a replacement. Jira deliveries (no such header) pass through.
+   */
+  authorizerLambda: lambda.IFunction;
   /** Lambda that posts the initial (Live Tail link) and final comments. */
   postCommentLambda: lambda.IFunction;
   /**
@@ -221,10 +231,32 @@ export class AgentWebhookStack extends Construct {
       description: 'Webhook receiver for GitHub/Jira agent-mention comments',
     });
 
+    // REQUEST authorizer (issue #83): flips the route from AuthorizationType
+    // NONE to CUSTOM. Caching disabled (resultsCacheTtl=0) — every webhook
+    // delivery has a unique signature, so caching an allow/deny would be
+    // incorrect. Simple response format (isAuthorized boolean), matching what
+    // agentWebhookAuthorizer's handler returns.
+    //
+    // identitySource intentionally does NOT name X-Hub-Signature-256: per the
+    // HTTP API Lambda-authorizer docs, if an identity source names a header,
+    // API Gateway rejects any request missing that header with a blanket 401
+    // *without ever invoking the Lambda*. This route also serves Jira
+    // deliveries, which never send that header — naming it here would 401
+    // every Jira webhook before the authorizer Lambda got a chance to allow
+    // it. $context.routeKey is always present, so every request reaches the
+    // Lambda, which does the GitHub-vs-Jira branching itself.
+    const authorizer = new HttpLambdaAuthorizer('WebhookAuthorizer', props.authorizerLambda, {
+      authorizerName: 'webhook-signature-format',
+      identitySource: ['$context.routeKey'],
+      responseTypes: [HttpLambdaResponseType.SIMPLE],
+      resultsCacheTtl: Duration.seconds(0),
+    });
+
     this.httpApi.addRoutes({
       path: '/webhook',
       methods: [apigwv2.HttpMethod.POST],
       integration: new HttpLambdaIntegration('ReceiverIntegration', props.receiverLambda),
+      authorizer,
     });
 
     props.receiverLambda.addToRolePolicy(new PolicyStatement({

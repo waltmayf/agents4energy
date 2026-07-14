@@ -10,6 +10,7 @@ import { mintGithubToken } from './functions/mint-github-token/resource';
 import { agentWebhookReceiver } from './functions/agent-webhook-receiver/resource';
 import { agentWebhookPostComment } from './functions/agent-webhook-post-comment/resource';
 import { agentWebhookInvokeAgent } from './functions/agent-webhook-invoke-agent/resource';
+import { agentWebhookAuthorizer } from './functions/agent-webhook-authorizer/resource';
 import { Policy, PolicyStatement, ServicePrincipal, Effect, Role } from 'aws-cdk-lib/aws-iam';
 import { Function as LambdaFunction } from 'aws-cdk-lib/aws-lambda';
 import { Fn, Stack, CfnOutput } from 'aws-cdk-lib';
@@ -122,6 +123,7 @@ const backend = defineBackend({
   agentWebhookReceiver,
   agentWebhookPostComment,
   agentWebhookInvokeAgent,
+  agentWebhookAuthorizer,
 });
 
 backend.stack.tags.setTag('Project', 'workshop');
@@ -453,6 +455,7 @@ const JIRA_API_TOKEN_SECRET_ARN = process.env.JIRA_API_TOKEN_SECRET_ARN ?? '';
 const webhookReceiverLambda = backend.agentWebhookReceiver.resources.lambda as LambdaFunction;
 const webhookPostCommentLambda = backend.agentWebhookPostComment.resources.lambda as LambdaFunction;
 const webhookInvokeAgentLambda = backend.agentWebhookInvokeAgent.resources.lambda as LambdaFunction;
+const webhookAuthorizerLambda = backend.agentWebhookAuthorizer.resources.lambda as LambdaFunction;
 
 // The harness INVOKE is now a native `bedrockagentcore:invokeHarness` Step
 // Functions task (see agentWebhookStack + issue #56). This Lambda only performs
@@ -511,6 +514,7 @@ webhookInvokeAgentLambda.addToRolePolicy(new PolicyStatement({
 const agentWebhookCdkStack = backend.createStack('agent-webhook');
 const agentWebhookStack = new AgentWebhookStack(agentWebhookCdkStack, 'AgentWebhook', {
   receiverLambda: webhookReceiverLambda,
+  authorizerLambda: webhookAuthorizerLambda,
   postCommentLambda: webhookPostCommentLambda,
   // Git-auth prep only — the harness invoke is the native task in the stack,
   // granted InvokeHarness on the state machine role via harnessArn below.

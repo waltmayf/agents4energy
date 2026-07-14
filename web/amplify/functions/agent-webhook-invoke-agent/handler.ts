@@ -270,27 +270,23 @@ async function buildGithubContextBlock(repo: string, issueNumber: number, token:
 // invokeHarness task.
 export const handler = async (input: PrepareInput): Promise<PrepareOutput> => {
   const { runId, source, prompt, repo, issueNumber, githubToken, agentsSystemPrompt, logGroupName, logStreamName } = input;
-
-  // Prepend the repo's AGENTS.md (if the receiver fetched one) as a system-style
-  // preamble so every annotation below builds on top of it.
-  const withAgentsPrompt = (p: string): string =>
-    agentsSystemPrompt ? [agentsSystemPrompt, p].join('\n\n') : p;
+  const promptWithAgentsMd = agentsSystemPrompt ? [agentsSystemPrompt, prompt].join('\n\n') : prompt;
 
   if (source !== 'github' || !githubToken) {
     // Jira (or a GitHub run with no token): nothing to authenticate, pass the
     // prompt through unchanged for the native invoke.
-    return { effectivePrompt: withAgentsPrompt(prompt) };
+    return { effectivePrompt: promptWithAgentsMd };
   }
 
   // Pull the full current issue/PR context (issue #73) before the agent's turn —
   // labels, the full comment thread, and PR file/diff stats — so the initial
   // message carries everything a human triager would see, not just the
   // title+body the webhook payload happened to include.
-  let effectivePromptWithContext = prompt;
+  let effectivePromptWithContext = promptWithAgentsMd;
   if (repo && issueNumber !== null) {
     try {
       const contextBlock = await buildGithubContextBlock(repo, issueNumber, githubToken);
-      effectivePromptWithContext = [prompt, '', contextBlock].join('\n');
+      effectivePromptWithContext = [promptWithAgentsMd, '', contextBlock].join('\n');
     } catch (err) {
       // Missing context shouldn't block the run — the agent still gets the
       // title+body prompt the receiver already built.
