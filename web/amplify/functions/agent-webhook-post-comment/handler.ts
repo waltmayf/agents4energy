@@ -43,6 +43,7 @@ interface PostCommentOutput {
   githubToken?: string;
   githubTokenExpiresAt?: string;
   issueContext?: string;
+  agentsSystemPrompt?: string;
 }
 
 async function postGithubComment(repo: string, issueNumber: number, body: string): Promise<{ token: string; expiresAt: string }> {
@@ -208,6 +209,27 @@ export const handler = async (input: PostCommentInput): Promise<PostCommentOutpu
       githubTokenExpiresAt = minted.expiresAt;
       issueContext = await fetchGithubIssueContext(input.repo, input.issueNumber, githubToken);
 
+      // Attempt to fetch AGENTS.md from the repo root. If it exists, include its content as a system prompt.
+      let agentsSystemPrompt: string | undefined;
+      try {
+        const agentsRes = await fetch(`https://api.github.com/repos/${input.repo}/contents/AGENTS.md`, {
+          headers: {
+            Authorization: `Bearer ${githubToken}`,
+            Accept: 'application/vnd.github+json',
+            'X-GitHub-Api-Version': '2022-11-28',
+          },
+        });
+        if (agentsRes.ok) {
+          const agentsData = await agentsRes.json();
+          // The content field is base64-encoded.
+          if (agentsData.content) {
+            agentsSystemPrompt = Buffer.from(agentsData.content, 'base64').toString('utf-8');
+          }
+        }
+      } catch (e) {
+        console.warn('Failed to fetch AGENTS.md:', e instanceof Error ? e.message : String(e));
+      }
+
       // Label-triggered runs: mark the issue/PR as actively being worked on.
       // Best-effort — never fail the run over label bookkeeping.
       if (input.trigger === 'label') {
@@ -222,7 +244,7 @@ export const handler = async (input: PostCommentInput): Promise<PostCommentOutpu
       await postJiraComment(input.issueKey, body);
     }
 
-    return { logGroupName: groupName, logStreamName: streamName, githubToken, githubTokenExpiresAt, issueContext };
+    return { logGroupName: groupName, logStreamName: streamName, githubToken, githubTokenExpiresAt, issueContext, agentsSystemPrompt };
   }
 
   // Final stage — post the agent's response as a follow-up comment.

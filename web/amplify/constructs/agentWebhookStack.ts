@@ -106,7 +106,7 @@ export class AgentWebhookStack extends Construct {
         githubToken: sfn.JsonPath.stringAt('$.initialComment.githubToken'),
         issueContext: sfn.JsonPath.stringAt('$.initialComment.issueContext'),
         logGroupName: sfn.JsonPath.stringAt('$.initialComment.logGroupName'),
-        logStreamName: sfn.JsonPath.stringAt('$.initialComment.logStreamName'),
+        agentsSystemPrompt: sfn.JsonPath.stringAt('$.initialComment.agentsSystemPrompt'),
       }),
       payloadResponseOnly: true,
       resultPath: '$.prepared',

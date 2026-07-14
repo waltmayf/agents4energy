@@ -27,10 +27,7 @@ interface PrepareInput {
   issueNumber: number | null;
   issueKey: string | null;
   githubToken?: string | null;
-  // Issue title/body + all prior comments, fetched by agent-webhook-post-comment
-  // (GitHub only) so the agent sees the full thread, not just the triggering
-  // comment's text after the mention.
-  issueContext?: string | null;
+  agentsSystemPrompt?: string | null;
   logGroupName?: string;
   logStreamName?: string;
 }
@@ -163,7 +160,7 @@ async function authenticateGitInHarnessSession(opts: {
 // session and annotate the prompt. Returns the prompt for the native
 // invokeHarness task.
 export const handler = async (input: PrepareInput): Promise<PrepareOutput> => {
-  const { runId, source, prompt, repo, issueContext, githubToken, logGroupName, logStreamName } = input;
+  const { runId, source, prompt, repo, issueContext, githubToken, agentsSystemPrompt, logGroupName, logStreamName } = input;
 
   let effectivePrompt = prompt;
 
@@ -178,6 +175,11 @@ export const handler = async (input: PrepareInput): Promise<PrepareOutput> => {
       '',
       effectivePrompt,
     ].join('\n');
+  }
+
+  // Prepend AGENTS.md system prompt if provided.
+  if (agentsSystemPrompt) {
+    effectivePrompt = [agentsSystemPrompt, effectivePrompt].join('\n\n');
   }
 
   if (source !== 'github' || !githubToken) {
