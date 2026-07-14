@@ -12,8 +12,8 @@
     "test:e2e:install": "playwright install chromium"
   },
   "dependencies": {
+    "@ag-ui/client": "^0.0.57",
     "@agentcore/shared-types": "workspace:*",
-    "@ai-sdk/react": "^3.0.201",
     "@aws-amplify/ui-react": "^6.15.4",
     "@aws-sdk/client-bedrock-agentcore": "^3.1065.0",
     "@aws-sdk/client-bedrock-agentcore-control": "^3.1071.0",
@@ -25,6 +25,8 @@
     "@aws-sdk/util-dynamodb": "^3.996.5",
     "@aws/agentcore-cdk": "^0.1.0-alpha.36",
     "@base-ui/react": "^1.5.0",
+    "@copilotkit/react-core": "^1.62.3",
+    "@copilotkit/react-ui": "^1.62.3",
     "@streamdown/cjk": "^1.0.3",
     "@streamdown/code": "^1.1.1",
     "@streamdown/math": "^1.0.2",
@@ -41,6 +43,7 @@
     "next": "16.2.7",
     "react": "19.2.4",
     "react-dom": "19.2.4",
+    "rxjs": "7.8.1",
     "shadcn": "^4.11.0",
     "streamdown": "^2.5.0",
     "tailwind-merge": "^3.6.0",
