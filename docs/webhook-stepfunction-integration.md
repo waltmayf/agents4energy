@@ -116,6 +116,16 @@ To avoid both paths firing on the same GitHub comment, they use **distinct trigg
 
 Both secrets are Secrets Manager ARNs supplied as deploy-time inputs (`GITHUB_WEBHOOK_SECRET_ARN`, `JIRA_WEBHOOK_SECRET_ARN`) — see "Setup" below. If unset, the receiver Lambda fails cleanly at invoke time with a clear error; synth/deploy still succeeds (same pattern as `GITHUB_APP_PRIVATE_KEY_SECRET_ARN` in `docs/github-integration.md`).
 
+### Lambda REQUEST authorizer (issue #83)
+
+`POST /webhook` reports `AuthorizationType: CUSTOM`, backed by a `agent-webhook-authorizer` Lambda REQUEST authorizer (`web/amplify/functions/agent-webhook-authorizer/`, wired in `agentWebhookStack.ts`). This closes an AppSec finding (route with `AuthorizationType: NONE`) without changing the trust model above — it's a fast **signature-format** gate in front of the receiver, not a replacement for the HMAC check:
+
+- **What it checks:** for requests carrying `X-GitHub-Event` or `X-Hub-Signature-256`, the signature header must match `^sha256=[0-9a-f]{64}$`. Everything else (Jira deliveries) passes through unconditionally — Jira's auth is the `?secret=` query param, checked by the receiver, not this authorizer.
+- **Why it can't do the real check:** Lambda authorizers (REQUEST or TOKEN, REST or HTTP API) never receive the request body — only headers, query string, and request context. GitHub's HMAC is computed over the *raw body*, so the cryptographic comparison (`crypto.timingSafeEqual` in `agent-webhook-receiver`) has to stay where the body is available. This authorizer only rejects obviously-malformed requests before they reach the receiver.
+- **Identity source is `$context.routeKey`, not the signature header.** Per the [HTTP API Lambda-authorizer docs](https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-lambda-authorizer.html#http-api-lambda-authorizer.identity-sources), if an identity source names a header, API Gateway rejects any request *missing* that header with a blanket `401` — without ever invoking the Lambda. Since this route also serves Jira (which never sends `X-Hub-Signature-256`), naming that header as the identity source would 401 every Jira delivery outright. `$context.routeKey` is always present, so every request reaches the Lambda, which does the GitHub-vs-Jira branch itself.
+- **Caching is disabled** (`resultsCacheTtl: Duration.seconds(0)`) — every webhook delivery has a unique signature, so caching an allow/deny decision would be incorrect.
+- **Response format:** simple boolean (`HttpLambdaResponseType.SIMPLE`) — `{ isAuthorized: true|false }`.
+
 ## CloudWatch Logs Live Tail link
 
 The initial comment also includes a **live chat session link** to the deployed UI (`/chat?sessionId=<runId>`), allowing users to watch the agent's progress directly in the web interface.
@@ -138,6 +148,7 @@ Defined in [`web/amplify/constructs/agentWebhookStack.ts`](../web/amplify/constr
 
 | Function | Role |
 |---|---|
+| [`agent-webhook-authorizer`](../web/amplify/functions/agent-webhook-authorizer/) | REQUEST authorizer on `POST /webhook` (issue #83). Signature-*format* gate only — see above |
 | [`agent-webhook-receiver`](../web/amplify/functions/agent-webhook-receiver/) | API Gateway target. Verifies signature, detects mention, `StartExecution` |
 | [`agent-webhook-post-comment`](../web/amplify/functions/agent-webhook-post-comment/) | Posts initial (Live Tail link) and final comments, mints GitHub tokens |
 | [`agent-webhook-invoke-agent`](../web/amplify/functions/agent-webhook-invoke-agent/) | GitHub context enrichment + git/gh-auth prep: fetches the issue/PR's labels/comments/diffstat and seeds git+gh credentials in the harness session via `InvokeAgentRuntimeCommand`, logs its stdout/stderr, returns the annotated prompt. (Despite the name, it no longer invokes the harness — that's the native SFN task.) |

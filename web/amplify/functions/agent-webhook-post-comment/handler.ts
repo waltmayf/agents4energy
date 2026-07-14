@@ -44,7 +44,6 @@ interface PostCommentOutput {
   logStreamName?: string;
   githubToken?: string;
   githubTokenExpiresAt?: string;
-  issueContext?: string;
   agentsSystemPrompt?: string;
 }
 
@@ -162,6 +161,7 @@ export const handler = async (input: PostCommentInput): Promise<PostCommentOutpu
 
     let githubToken: string | undefined;
     let githubTokenExpiresAt: string | undefined;
+    let agentsSystemPrompt: string | undefined;
 
     if (input.source === 'github') {
       if (!input.repo || input.issueNumber === undefined) throw new Error('repo/issueNumber required for github source');
@@ -170,7 +170,6 @@ export const handler = async (input: PostCommentInput): Promise<PostCommentOutpu
       githubTokenExpiresAt = minted.expiresAt;
 
       // Attempt to fetch AGENTS.md from the repo root. If it exists, include its content as a system prompt.
-      let agentsSystemPrompt: string | undefined;
       try {
         const agentsRes = await fetch(`https://api.github.com/repos/${input.repo}/contents/AGENTS.md`, {
           headers: {
@@ -204,7 +203,7 @@ export const handler = async (input: PostCommentInput): Promise<PostCommentOutpu
       await postJiraComment(input.issueKey, body);
     }
 
-    return { logGroupName: groupName, logStreamName: streamName, githubToken, githubTokenExpiresAt, issueContext, agentsSystemPrompt };
+    return { logGroupName: groupName, logStreamName: streamName, githubToken, githubTokenExpiresAt, agentsSystemPrompt };
   }
 
   // Final stage — post the agent's response as a follow-up comment.
