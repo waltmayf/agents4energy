@@ -1858,21 +1858,21 @@ export default function AgentsPage() {
                       >
                         <StarIcon className={cn('size-3.5', mcpFavorites.has(s.id) && 'fill-current text-amber-400')} />
                       </button>
+                      {s.oauthClientId?.trim() && (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          onClick={handleConnect}
+                          className="shrink-0 mx-1"
+                          data-testid={`connect-mcp-${s.id}`}
+                        >
+                          Connect
+                        </Button>
+                      )}
                     </li>
-                        {s.oauthClientId?.trim() && (
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="outline"
-                            onClick={handleConnect}
-                            className="shrink-0 mx-1"
-                            data-testid={`connect-mcp-${s.id}`}
-                          >
-                            Connect
-                          </Button>
-                        )}
-
-                  ))}
+                    );
+                  })}
                 </ul>
                 {mcpServersNextToken && !mcpQueryActive && (
                   <div className="px-4 py-3 border-t">

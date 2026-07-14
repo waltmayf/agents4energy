@@ -16,6 +16,10 @@ const custom = (outputs as { custom?: { agentcore_harness_arn?: string; agentcor
 export const HARNESS_ARN = custom?.agentcore_harness_arn as string;
 export const DEPLOYMENT_REGION = custom?.agentcore_region ?? 'us-east-1';
 
+// AppSync data client used to map MCP server URLs -> IDs when injecting stored
+// OAuth credentials into remote_mcp tool headers.
+const dataClient = generateClient<Schema>({ authMode: 'userPool' });
+
 // MyHarness authorizes with AWS_IAM (SigV4), so the browser signs InvokeHarness
 // requests with the Cognito Identity Pool's authenticated-role credentials
 // (granted bedrock-agentcore:InvokeHarness in web/amplify/backend.ts) rather
@@ -28,7 +32,6 @@ function makeClient(): BedrockAgentCoreClient {
     credentials: async () => {
       const session = await fetchAuthSession();
       const creds = session.credentials;
-  const dataClient = generateClient<Schema>({ authMode: 'userPool' });
 
       if (!creds) throw new Error('No AWS credentials — sign in first.');
       return {
