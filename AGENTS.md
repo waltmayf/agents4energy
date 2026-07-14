@@ -14,6 +14,25 @@ You can't direclty push changes to `.github/workflows/`, so instead update `.git
 
 ### GitHub Issues
 
+When you start working on an issue, inspect the code base to check if the description and comments in the issue are stale.
+
+**Best practices for PRs:**
+- Use the GitHub CLI (`gh pr create`) to open a pull request.
+- In the PR body, include a closing reference like `Closes #<issue>` to automatically close the related issue when the PR merges.
+- Reference related issues using `Relates to #<issue>` if appropriate.
+- Ensure the PR title is concise and follows the repo convention.
+- Add relevant labels via the GitHub UI or automation.
+
+### Web Searching
+
+When you need external information, you can use the web browser tool:
+- Formulate a clear query.
+- Summarize the relevant findings in your response.
+- Cite sources with URLs.
+- Prefer official documentation or reputable sources.
+- Avoid copying large blocks of text; extract the needed info.
+
+
 When you start working on an issue, inspect the code base to check if they description and comments in the issue are stale.
 
 If you discover a bug:
