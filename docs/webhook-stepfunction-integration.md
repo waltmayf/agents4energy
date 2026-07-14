@@ -29,21 +29,22 @@ GitHub issue_comment webhook          Jira comment_created webhook
              • creates this run's CloudWatch Logs stream
              • posts a comment with a Live Tail deep-link
              • GitHub only: mints a GitHub App installation token
-             • GitHub only: fetches the full issue thread (title/body/all
-               comments) so the agent sees the whole discussion, not just the
-               triggering comment
              • label-triggered runs only: adds the "agent-working" label
         2. agent-webhook-invoke-agent  (git-auth prep — Lambda)
+             • GitHub only: fetches the issue/PR's full current state (title,
+               body, labels, the entire comment thread, and — for PRs — base/
+               head branches and the changed-files diffstat) via the GitHub
+               REST API using the token minted above, and prepends it to the
+               prompt as a <github_context> block — see "Issue/PR context"
+               below (issue #73)
              • GitHub only: execs a git+gh credential setup in the harness's
                runtime session (InvokeAgentRuntimeCommand → POST
                /runtimes/{harnessArn}/commands, SigV4) before the agent runs —
                see "Git access" below
-             • prepends the fetched issue thread to the prompt inside an
-               <issue_context> block
              • writes the exec stdout/stderr + exit code to the run's log stream
                (and this Lambda's own log group) for debugging
-             • returns the <issue_context>/<github_access>-annotated prompt as
-               $.prepared.effectivePrompt
+             • returns the <github_context>- and <github_access>-annotated
+               prompt as $.prepared.effectivePrompt
              • on failure: Catch → agent-webhook-post-comment (stage=final,
                isError=true) posts the error AND (label runs) adds "agent-error"
         3. InvokeHarness  (NATIVE bedrockagentcore:invokeHarness task)
@@ -117,9 +118,7 @@ Both secrets are Secrets Manager ARNs supplied as deploy-time inputs (`GITHUB_WE
 
 ## CloudWatch Logs Live Tail link
 
-The initial comment also includes a **live chat session link** to the deployed UI (`/chat?sessionId=<runId>`), allowing users to watch the agent’s progress directly in the web interface.
-
-
+The initial comment also includes a **live chat session link** to the deployed UI (`/chat?sessionId=<runId>`), allowing users to watch the agent's progress directly in the web interface.
 
 Ported directly from `.github/workflows/claude.yml`'s "Post CloudWatch log links" step (see [`web/amplify/functions/_shared/liveTail.ts`](../web/amplify/functions/_shared/liveTail.ts)):
 
@@ -140,14 +139,28 @@ Defined in [`web/amplify/constructs/agentWebhookStack.ts`](../web/amplify/constr
 | Function | Role |
 |---|---|
 | [`agent-webhook-receiver`](../web/amplify/functions/agent-webhook-receiver/) | API Gateway target. Verifies signature, detects mention, `StartExecution` |
-| [`agent-webhook-post-comment`](../web/amplify/functions/agent-webhook-post-comment/) | Posts initial (Live Tail link) and final comments, mints GitHub tokens, fetches the full issue thread (GitHub only) |
-| [`agent-webhook-invoke-agent`](../web/amplify/functions/agent-webhook-invoke-agent/) | Git-auth prep: seeds git/gh credentials in the harness session via `InvokeAgentRuntimeCommand`, logs its stdout/stderr, returns the annotated prompt. (Despite the name, it no longer invokes the harness — that's the native SFN task.) |
+| [`agent-webhook-post-comment`](../web/amplify/functions/agent-webhook-post-comment/) | Posts initial (Live Tail link) and final comments, mints GitHub tokens |
+| [`agent-webhook-invoke-agent`](../web/amplify/functions/agent-webhook-invoke-agent/) | GitHub context enrichment + git/gh-auth prep: fetches the issue/PR's labels/comments/diffstat and seeds git+gh credentials in the harness session via `InvokeAgentRuntimeCommand`, logs its stdout/stderr, returns the annotated prompt. (Despite the name, it no longer invokes the harness — that's the native SFN task.) |
 
 `agent-webhook-post-comment` reuses [`web/amplify/functions/_shared/githubAppToken.ts`](../web/amplify/functions/_shared/githubAppToken.ts) — the GitHub App JWT/installation-token logic factored out of `mint-github-token` (see `docs/github-integration.md`) so both the browser-initiated flow and this webhook flow mint tokens identically.
 
 The harness turn is the **native `bedrockagentcore:invokeHarness` Step Functions task** (see "Native harness invoke" above), which targets the **AgentCore Harness** (`MyHarness`) — the same target the browser-initiated `invoke-agent` Lambda uses. The harness authorizes with **AWS_IAM**; the native task signs with the state machine role, and the browser transport / `scripts/invoke.ts` sign the SDK's `InvokeHarnessCommand` with Cognito Identity Pool credentials.
 
 > **Auth history.** The harness was originally `CUSTOM_JWT`-authorized (every caller sent a Cognito Bearer token to `POST /harnesses/invoke`). It was switched to `AWS_IAM` specifically so SigV4-only callers — the native `bedrockagentcore:invokeHarness` task and the `InvokeAgentRuntimeCommand` git-auth exec — work without a Cognito token. See the "Auth history" note in `docs/agentic-architecture.md` for the full rationale.
+
+### Issue/PR context (issue #73)
+
+The receiver Lambda builds the initial `prompt` from whatever the triggering webhook payload carries — for a label trigger that's the issue/PR's title + body at the moment the label was applied; for a comment mention it's just the comment text (falling back to the issue title). Neither carries labels, the surrounding discussion, or (for PRs) what actually changed.
+
+`agent-webhook-invoke-agent` (step 2, GitHub runs only) fills that gap before the native harness invoke: using the same GitHub App installation token minted by `agent-webhook-post-comment`, it re-fetches the issue/PR fresh from the REST API —
+
+- `GET /repos/{repo}/issues/{issueNumber}` — title, body, state, author, labels
+- `GET /repos/{repo}/issues/{issueNumber}/comments` — the full comment thread (up to 20 comments, each truncated to 2000 chars)
+- `GET /repos/{repo}/pulls/{issueNumber}` + `.../files` — PR only: base/head branch, additions/deletions, and a per-file diffstat (up to 50 files)
+
+— and prepends the result as a `<github_context>` block ahead of the `<github_access>` block described below, so the agent's very first turn sees the same context a human triager would (not just a title+body snapshot). Fetching fresh (rather than trusting the webhook payload) also means label-triggered and comment-triggered runs on the same issue get identical context.
+
+This is best-effort: a GitHub API failure here is logged (to the run's CloudWatch stream and this Lambda's own log group) and swallowed — the run continues with the receiver's original title+body prompt rather than failing the whole execution over a context-enrichment call.
 
 ### Git access: harness exec (same session as the agent)
 
@@ -180,12 +193,6 @@ The install that works, run as part of the same exec command (skipped via `comma
 Cost: one ~13MB download (~0.5s over a fast link in testing) plus a fast local extract — well under the harness-exec's 90s timeout, and a one-time cost per fresh container rather than per run if the container is reused. This runs on every cold session rather than being baked into a Dockerfile, because `MyHarness`'s runtime is a managed AgentCore harness image (unlike `AgUiHandler`, which has its own `agent/handler/Dockerfile`) with no image-build step this repo controls.
 
 With `gh` authenticated, the `<github_access>` prompt block tells the agent to open PRs with `gh pr create --repo <repo> --base main --head <branch> --title "<title>" --body "<body>"` instead of a compare-URL workaround.
-
-### Issue context: full thread, not just the triggering comment
-
-`agent-webhook-receiver` only forwards the text of the one comment that mentioned `@webhook-agent` (or, for label-triggered runs, the issue/PR title and body) — the agent otherwise has no visibility into the rest of the discussion. `agent-webhook-post-comment` (GitHub only, `stage=initial`) closes that gap: after minting the installation token, it also calls `GET /repos/{repo}/issues/{issueNumber}` and `GET /repos/{repo}/issues/{issueNumber}/comments` and formats the issue title, body, and every existing comment (`@login: body`) into a single `issueContext` string, returned alongside the token.
-
-The Step Function threads `$.initialComment.issueContext` into `agent-webhook-invoke-agent`'s payload (the git-auth prep Lambda), which prepends it to the prompt inside an `<issue_context>` block, ahead of the triggering comment's text and (for GitHub runs) the `<github_access>` block. Jira runs don't get this treatment — Jira's webhook payload already includes the comment body but there's no equivalent "fetch full issue + thread" call wired up yet.
 
 ## Setup
 
