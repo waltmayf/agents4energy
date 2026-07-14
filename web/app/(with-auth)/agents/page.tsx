@@ -1812,7 +1812,21 @@ export default function AgentsPage() {
             ) : (
               <>
                 <ul data-testid="mcp-server-sidebar-list">
-                  {sortedMcpServers.map((s) => (
+                  {sortedMcpServers.map((s) => {
+    const handleConnect = async () => {
+      if (!s.id || !s.oauthClientId) return;
+      try {
+        await authenticateViaPkce({
+          mcpServerId: s.id,
+          mcpServerUrl: s.url,
+          oauthClientId: s.oauthClientId.trim(),
+        });
+      } catch (e) {
+        console.error('Connect error', e);
+      }
+    };
+    return (
+
                     <li key={s.id} className={cn('flex items-center border-b transition-colors hover:bg-muted/50', selectedMcpId === s.id && 'bg-muted/70')}>
                       <button
                         type="button"
@@ -1845,6 +1859,19 @@ export default function AgentsPage() {
                         <StarIcon className={cn('size-3.5', mcpFavorites.has(s.id) && 'fill-current text-amber-400')} />
                       </button>
                     </li>
+                        {s.oauthClientId?.trim() && (
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            onClick={handleConnect}
+                            className="shrink-0 mx-1"
+                            data-testid={`connect-mcp-${s.id}`}
+                          >
+                            Connect
+                          </Button>
+                        )}
+
                   ))}
                 </ul>
                 {mcpServersNextToken && !mcpQueryActive && (
