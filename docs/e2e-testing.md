@@ -24,7 +24,9 @@ The dev server starts automatically. If it's already running, Playwright reuses 
 
 ## Running against a deployed branch (no local build required)
 
-Every deploy (`pnpm deploy` locally, or the CI `Deploy` workflow) publishes a small e2e config — the CloudFront app URL and Cognito user pool info — to SSM Parameter Store at `/outputs/<owner>-<repo>/<branch>/e2e-config`, keyed by repo and branch so concurrent branches don't collide. This is done by `scripts/extract-deployment-info.js`, which already runs as part of every deploy.
+Every deploy (`pnpm deploy` locally, or the CI `Deploy` workflow) publishes a small e2e config — the CloudFront app URL and Cognito user pool info — to SSM Parameter Store at `/outputs/<owner>-<repo>/<branch>/e2e-config`, keyed by repo and branch so concurrent branches don't collide. `scripts/fetch-e2e-config.ts` reads it back by deriving that same path from the current repo + branch — no CloudFormation lookup.
+
+> **Note:** the publish side is being migrated to a CDK-owned `aws_ssm.StringParameter` in `web/amplify/backend.ts` so it lands on every `ampx sandbox --once` (local and CI alike), replacing the old `scripts/extract-deployment-info.js` step. See [#82](https://github.com/waltmayf/agents4energy/issues/82).
 
 To run the full e2e suite from a fresh checkout, on a branch that has already been deployed, with no local `ampx sandbox` or `pnpm build` step:
 
