@@ -91,9 +91,9 @@ export class AgentWebhookStack extends Construct {
     });
 
     // Step 2 — git-auth prep (Lambda). Seeds git/gh credentials in the harness
-    // session and returns the <issue_context>/<github_access>-annotated prompt
-    // as $.prepared.effectivePrompt. NOT the harness invoke — that's the native
-    // task below.
+    // session and returns the <github_context>/<github_access>-annotated
+    // prompt as $.prepared.effectivePrompt. NOT the harness invoke — that's
+    // the native task below.
     const prepareGitAuth = new tasks.LambdaInvoke(this, 'PrepareGitAuth', {
       lambdaFunction: props.prepareGitAuthLambda,
       payload: sfn.TaskInput.fromObject({
@@ -104,7 +104,6 @@ export class AgentWebhookStack extends Construct {
         issueNumber: sfn.JsonPath.numberAt('$.issueNumber'),
         issueKey: sfn.JsonPath.stringAt('$.issueKey'),
         githubToken: sfn.JsonPath.stringAt('$.initialComment.githubToken'),
-        issueContext: sfn.JsonPath.stringAt('$.initialComment.issueContext'),
         logGroupName: sfn.JsonPath.stringAt('$.initialComment.logGroupName'),
         agentsSystemPrompt: sfn.JsonPath.stringAt('$.initialComment.agentsSystemPrompt'),
       }),

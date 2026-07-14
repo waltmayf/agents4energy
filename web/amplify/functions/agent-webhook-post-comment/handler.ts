@@ -8,6 +8,8 @@ const GITHUB_APP_PRIVATE_KEY_SECRET_ARN = process.env.GITHUB_APP_PRIVATE_KEY_SEC
 const JIRA_BASE_URL = process.env.JIRA_BASE_URL ?? '';
 const JIRA_API_EMAIL = process.env.JIRA_API_EMAIL ?? '';
 const JIRA_API_TOKEN_SECRET_ARN = process.env.JIRA_API_TOKEN_SECRET_ARN ?? '';
+const HOSTING_DOMAIN = process.env.HOSTING_DOMAIN ?? '';
+const BRANCH_SLUG = process.env.BRANCH_SLUG ?? '';
 
 // Labels the Step Function manages around a label-triggered run (issue #56):
 // `agent-working` while the agent runs, `agent-error` if it fails.
@@ -100,53 +102,6 @@ async function removeLabel(repo: string, issueNumber: number, token: string, lab
   }
 }
 
-interface GithubIssueSummary {
-  title: string;
-  body: string | null;
-}
-
-interface GithubCommentSummary {
-  user: { login: string };
-  body: string;
-}
-
-// Fetches the issue's title/body plus every existing comment, so the agent
-// gets the full thread (not just the triggering comment's text after the
-// mention) — the receiver Lambda only forwards the one comment that mentioned
-// it, which drops all prior discussion/context on the issue.
-async function fetchGithubIssueContext(repo: string, issueNumber: number, token: string): Promise<string> {
-  const headers = {
-    Authorization: `Bearer ${token}`,
-    Accept: 'application/vnd.github+json',
-    'X-GitHub-Api-Version': '2022-11-28',
-  };
-
-  const issueRes = await fetch(`https://api.github.com/repos/${repo}/issues/${issueNumber}`, { headers });
-  if (!issueRes.ok) {
-    throw new Error(`GitHub getIssue failed (HTTP ${issueRes.status}): ${await issueRes.text()}`);
-  }
-  const issue = await issueRes.json() as GithubIssueSummary;
-
-  const commentsRes = await fetch(`https://api.github.com/repos/${repo}/issues/${issueNumber}/comments?per_page=100`, { headers });
-  if (!commentsRes.ok) {
-    throw new Error(`GitHub listComments failed (HTTP ${commentsRes.status}): ${await commentsRes.text()}`);
-  }
-  const comments = await commentsRes.json() as GithubCommentSummary[];
-
-  const parts = [
-    `Issue #${issueNumber}: ${issue.title}`,
-    '',
-    issue.body ?? '(no description)',
-  ];
-  if (comments.length) {
-    parts.push('', '--- Comments ---');
-    for (const comment of comments) {
-      parts.push('', `@${comment.user.login}:`, comment.body);
-    }
-  }
-  return parts.join('\n');
-}
-
 const secretsManager = new SecretsManagerClient({ region: REGION });
 
 async function getJiraApiToken(): Promise<string> {
@@ -194,20 +149,25 @@ export const handler = async (input: PostCommentInput): Promise<PostCommentOutpu
       ? buildLiveTailUrl(REGION, accountId, groupName, streamName)
       : null;
 
-    const body = liveTailUrl
-      ? `🤖 Working on it — [watch live via CloudWatch Logs Live Tail](${liveTailUrl})`
+    let chatUrl: string | null = null;
+    if (HOSTING_DOMAIN && BRANCH_SLUG) {
+      chatUrl = `https://${HOSTING_DOMAIN}/${BRANCH_SLUG}/chat?sessionId=${input.runId}`;
+    }
+    const links = [];
+    if (chatUrl) links.push(`[watch live in the chat UI](${chatUrl})`);
+    if (liveTailUrl) links.push(`[watch live via CloudWatch Logs Live Tail](${liveTailUrl})`);
+    const body = links.length
+      ? `🤖 Working on it — ${links.join(' · ')}`
       : `🤖 Working on it (run \`${input.runId}\`)…`;
 
     let githubToken: string | undefined;
     let githubTokenExpiresAt: string | undefined;
-    let issueContext: string | undefined;
 
     if (input.source === 'github') {
       if (!input.repo || input.issueNumber === undefined) throw new Error('repo/issueNumber required for github source');
       const minted = await postGithubComment(input.repo, input.issueNumber, body);
       githubToken = minted.token;
       githubTokenExpiresAt = minted.expiresAt;
-      issueContext = await fetchGithubIssueContext(input.repo, input.issueNumber, githubToken);
 
       // Attempt to fetch AGENTS.md from the repo root. If it exists, include its content as a system prompt.
       let agentsSystemPrompt: string | undefined;

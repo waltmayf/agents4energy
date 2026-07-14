@@ -24,7 +24,9 @@ The dev server starts automatically. If it's already running, Playwright reuses 
 
 ## Running against a deployed branch (no local build required)
 
-Every deploy (`pnpm deploy` locally, or the CI `Deploy` workflow) publishes a small e2e config — the CloudFront app URL and Cognito user pool info — to SSM Parameter Store at `/outputs/<owner>-<repo>/<branch>/e2e-config`, keyed by repo and branch so concurrent branches don't collide. This is done by `scripts/extract-deployment-info.js`, which already runs as part of every deploy.
+Every deploy (`pnpm deploy` locally, or the CI `Deploy` workflow) publishes a small e2e config — the CloudFront app URL and Cognito user pool info — to SSM Parameter Store at `/outputs/<owner>-<repo>/<branch>/e2e-config`, keyed by repo and branch so concurrent branches don't collide. `scripts/fetch-e2e-config.ts` reads it back by deriving that same path from the current repo + branch — no CloudFormation lookup.
+
+> **Note:** the publish side is being migrated to a CDK-owned `aws_ssm.StringParameter` in `web/amplify/backend.ts` so it lands on every `ampx sandbox --once` (local and CI alike), replacing the old `scripts/extract-deployment-info.js` step. See [#82](https://github.com/waltmayf/agents4energy/issues/82).
 
 To run the full e2e suite from a fresh checkout, on a branch that has already been deployed, with no local `ampx sandbox` or `pnpm build` step:
 
@@ -38,7 +40,7 @@ pnpm test:e2e
 
 Requires AWS credentials with `ssm:GetParameter` on `/outputs/*` (see [scripts/setup-deploy-role.ts](../scripts/setup-deploy-role.ts) for the deploy role's grant of this).
 
-When `web/e2e-config.json` exists, [playwright.config.ts](../web/playwright.config.ts) points `baseURL` at the deployed CloudFront URL (`https://<domain>/<branch>/`) and skips starting a local dev server. [auth.setup.ts](../web/e2e/auth.setup.ts) reads Cognito pool info from the same file instead of `amplify_outputs.json`.
+When `web/e2e-config.json` exists, [playwright.config.ts](../web/playwright.config.ts) points `baseURL` at the deployed CloudFront URL (`https://<domain>/<branch>/`) and skips starting a local dev server. [auth.setup.ts](../web/e2e/auth.setup.ts) reads Cognito pool info from the same file; `amplify_outputs.json` is no longer required for e2e tests.
 
 Delete `web/e2e-config.json` (or don't create it) to fall back to the local dev-server flow described above.
 
@@ -47,7 +49,8 @@ Delete `web/e2e-config.json` (or don't create it) to fall back to the local dev-
 Authentication runs once as a setup project before any tests execute.
 The setup lives in [web/e2e/auth.setup.ts](../web/e2e/auth.setup.ts) and produces `.auth/user.json` (gitignored).
 
-The test user itself is provisioned at deploy time, not by the test runner. `web/amplify/constructs/e2eTestUser/` is a CDK custom resource in `agentStack` (wired in `backend.ts`) that creates a Cognito user with a cryptographically random password and writes both to SSM Parameter Store (`custom.e2e_test_user_email_ssm_path` / `..._password_ssm_path` in `amplify_outputs.json` point at the paths). `auth.setup.ts` reads those two parameters and signs in via `InitiateAuthCommand` — it needs only `ssm:GetParameter`, not any Cognito admin permission.
+The test user is provisioned at deploy time via a CDK custom resource (`web/amplify/constructs/e2eTestUser/`). It stores the user's email and password in SSM Parameter Store. The e2e setup script reads those parameters (paths are included in `web/e2e-config.json`) and signs in via `InitiateAuthCommand` — it needs only `ssm:GetParameter`, not any Cognito admin permission.
+
 
 This means the AWS credentials running the test suite never need `cognito-idp:AdminCreateUser` — that permission is scoped to the custom resource's own Lambda role at deploy time. Re-running `pnpm run deploy` rotates the test user's password (the custom resource runs `AdminSetUserPassword` on every Update).
 

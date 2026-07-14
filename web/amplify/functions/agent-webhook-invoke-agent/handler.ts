@@ -32,9 +32,40 @@ interface PrepareInput {
   logStreamName?: string;
 }
 
+interface GithubIssueDetails {
+  title: string;
+  body: string | null;
+  state: string;
+  user: { login: string };
+  labels: Array<{ name: string } | string>;
+  pull_request?: { url: string };
+}
+
+interface GithubComment {
+  user: { login: string };
+  body: string;
+  created_at: string;
+}
+
+interface GithubPullFile {
+  filename: string;
+  status: string;
+  additions: number;
+  deletions: number;
+}
+
+interface GithubPullDetails {
+  base: { ref: string };
+  head: { ref: string };
+  additions: number;
+  deletions: number;
+  changed_files: number;
+}
+
 interface PrepareOutput {
-  // The prompt to send to the native invokeHarness task — annotated with an
-  // <issue_context> block and (for GitHub runs) a <github_access> block.
+  // The prompt to send to the native invokeHarness task — annotated with a
+  // <github_context> block (issue/PR state) and a <github_access> block for
+  // GitHub runs, unchanged otherwise.
   effectivePrompt: string;
   // Git/gh-auth exec results, surfaced for debugging (also written to the log stream).
   gitAuth?: { exitCode: number; stdout: string; stderr: string };
@@ -161,20 +192,71 @@ async function authenticateGitInHarnessSession(opts: {
 // invokeHarness task.
 export const handler = async (input: PrepareInput): Promise<PrepareOutput> => {
   const { runId, source, prompt, repo, issueContext, githubToken, agentsSystemPrompt, logGroupName, logStreamName } = input;
+async function githubApiGet<T>(path: string, token: string): Promise<T> {
+  const res = await fetch(`https://api.github.com${path}`, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+    },
+  });
+  if (!res.ok) throw new Error(`GitHub GET ${path} failed (HTTP ${res.status}): ${await res.text()}`);
+  return res.json() as Promise<T>;
+}
 
-  let effectivePrompt = prompt;
+// Truncation caps so a long-running thread or huge PR can't blow past the
+// harness invoke's own input limits or bury the actual request in noise.
+const MAX_COMMENTS = 20;
+const MAX_COMMENT_CHARS = 2000;
+const MAX_FILES_LISTED = 50;
 
-  // Prepend the full issue thread (title/body/all comments) so the agent has
-  // the same context a human reading the issue would, not just the text after
-  // the trigger mention in whichever comment invoked this run.
-  if (issueContext) {
-    effectivePrompt = [
-      '<issue_context>',
-      issueContext,
-      '</issue_context>',
+function labelNames(labels: GithubIssueDetails['labels']): string[] {
+  return labels.map((l) => (typeof l === 'string' ? l : l.name));
+}
+
+function truncate(text: string, maxChars: number): string {
+  return text.length > maxChars ? `${text.slice(0, maxChars)}\n… (truncated)` : text;
+}
+
+// Fetches the issue/PR's full current state (issue #73) — labels, the entire
+// comment thread, and (for PRs) the changed-files summary — so the agent sees
+// the same context a human triager would, not just the title+body snapshot
+// the webhook payload happened to carry. Fetched fresh here (rather than
+// trusting the webhook payload) so label/comment/PR runs all get identical,
+// up-to-date context regardless of which webhook event triggered the run.
+async function buildGithubContextBlock(repo: string, issueNumber: number, token: string): Promise<string> {
+  const issue = await githubApiGet<GithubIssueDetails>(`/repos/${repo}/issues/${issueNumber}`, token);
+  const isPr = Boolean(issue.pull_request);
+
+  const comments = await githubApiGet<GithubComment[]>(
+    `/repos/${repo}/issues/${issueNumber}/comments?per_page=${MAX_COMMENTS}`,
+    token,
+  );
+
+  const lines: string[] = [
+    '<github_context>',
+    `Repository: ${repo}`,
+    `${isPr ? 'Pull request' : 'Issue'} #${issueNumber}: ${issue.title}`,
+    `State: ${issue.state}`,
+    `Author: @${issue.user.login}`,
+    `Labels: ${labelNames(issue.labels).join(', ') || '(none)'}`,
+    '',
+    'Description:',
+    truncate(issue.body ?? '(no description)', MAX_COMMENT_CHARS),
+  ];
+
+  if (isPr) {
+    const pr = await githubApiGet<GithubPullDetails>(`/repos/${repo}/pulls/${issueNumber}`, token);
+    const files = await githubApiGet<GithubPullFile[]>(
+      `/repos/${repo}/pulls/${issueNumber}/files?per_page=${MAX_FILES_LISTED}`,
+      token,
+    );
+    lines.push(
       '',
-      effectivePrompt,
-    ].join('\n');
+      `Base branch: ${pr.base.ref}  Head branch: ${pr.head.ref}`,
+      `Changed files: ${pr.changed_files} (+${pr.additions} / -${pr.deletions})`,
+      ...files.map((f) => `  ${f.status}: ${f.filename} (+${f.additions} / -${f.deletions})`),
+    );
   }
 
   // Prepend AGENTS.md system prompt if provided.
@@ -182,10 +264,45 @@ export const handler = async (input: PrepareInput): Promise<PrepareOutput> => {
     effectivePrompt = [agentsSystemPrompt, effectivePrompt].join('\n\n');
   }
 
+  if (comments.length > 0) {
+    lines.push('', `Comment thread (${comments.length}${comments.length === MAX_COMMENTS ? '+' : ''}):`);
+    for (const c of comments) {
+      lines.push(`--- @${c.user.login} at ${c.created_at} ---`, truncate(c.body, MAX_COMMENT_CHARS));
+    }
+  }
+
+  lines.push('</github_context>');
+  return lines.join('\n');
+}
+
+// Step 1 of the (git-only) preparation: authenticate git/gh in the harness
+// session and annotate the prompt. Returns the prompt for the native
+// invokeHarness task.
+export const handler = async (input: PrepareInput): Promise<PrepareOutput> => {
+  const { runId, source, prompt, repo, issueNumber, githubToken, logGroupName, logStreamName } = input;
+
   if (source !== 'github' || !githubToken) {
     // Jira (or a GitHub run with no token): nothing to authenticate, pass the
     // prompt through unchanged for the native invoke.
-    return { effectivePrompt };
+    return { effectivePrompt: prompt };
+  }
+
+  // Pull the full current issue/PR context (issue #73) before the agent's turn —
+  // labels, the full comment thread, and PR file/diff stats — so the initial
+  // message carries everything a human triager would see, not just the
+  // title+body the webhook payload happened to include.
+  let effectivePromptWithContext = prompt;
+  if (repo && issueNumber !== null) {
+    try {
+      const contextBlock = await buildGithubContextBlock(repo, issueNumber, githubToken);
+      effectivePromptWithContext = [prompt, '', contextBlock].join('\n');
+    } catch (err) {
+      // Missing context shouldn't block the run — the agent still gets the
+      // title+body prompt the receiver already built.
+      console.warn(`Could not fetch GitHub context for ${repo}#${issueNumber}: ${err instanceof Error ? err.message : String(err)}`);
+      await log(logGroupName, logStreamName,
+        `[${runId}] warning: could not fetch GitHub context: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   await log(logGroupName, logStreamName, `[${runId}] authenticating git/gh in harness session`);
@@ -205,9 +322,10 @@ export const handler = async (input: PrepareInput): Promise<PrepareOutput> => {
   // this session's shell — tell the agent so it clones/pushes/opens PRs with
   // its code interpreter tool instead of assuming (as it did in #48) that it
   // lacks write access.
+  let effectivePrompt = effectivePromptWithContext;
   if (repo) {
     effectivePrompt = [
-      effectivePrompt,
+      effectivePromptWithContext,
       '',
       '<github_access>',
       `Your code interpreter's git and gh CLIs are already authenticated for the repository ${repo} — git clone/commit/push and gh pr create all work with no token setup needed.`,

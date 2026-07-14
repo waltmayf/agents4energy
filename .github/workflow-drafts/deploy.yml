@@ -1,6 +1,14 @@
-# Single CDK deployment using ampx sandbox --once.
-# Stack name: $BRANCH-$PROJECT (e.g. main-agentcore-cli-agent)
-# No Amplify app/branch CDK resource needed — ampx sandbox manages its own state.
+# Single-command deploy: everything is built by `scripts/build.sh`.
+# That script runs one `ampx sandbox --once`, which synthesizes the whole
+# stack — Cognito/AppSync/Lambda/DynamoDB plus the AgentCore harness, memory,
+# and gateway (all owned in-stack by web/amplify/backend.ts) plus S3/CloudFront
+# hosting — then builds the Next.js app and publishes it to S3 + CloudFront.
+#
+# There is no separate `agentcore deploy`, no `configure-agentcore-auth.js`,
+# no `inject-agentcore-env.js`, and no `extract-deployment-info.js` step:
+# backend.ts re-derives the harness JWT authorizer from its own Cognito pool
+# and exports hosting ARNs via addOutput({ custom: {...} }). See
+# docs/architecture.md and scripts/build.sh.
 name: Deploy
 
 on:
@@ -49,26 +57,6 @@ jobs:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Sanitize branch name
-        run: |
-          PROJECT=$(node -p "require('./package.json').name")
-          BRANCH=$(echo '${{ github.ref_name }}' | tr '/' '-' | tr '[:upper:]' '[:lower:]')
-          # ampx sandbox --identifier requires [a-zA-Z0-9-] and under 15 chars — truncate
-          # a separate slug for it, mirroring scripts/build.sh's BRANCH_SLUG. STACK_NAME
-          # and the S3/CloudFront paths keep the full BRANCH since they have no such limit.
-          BRANCH_SLUG=$(echo "$BRANCH" | cut -c1-14)
-          echo "BRANCH=$BRANCH" >> "$GITHUB_ENV"
-          echo "BRANCH_SLUG=$BRANCH_SLUG" >> "$GITHUB_ENV"
-          echo "PROJECT=$PROJECT" >> "$GITHUB_ENV"
-          echo "STACK_NAME=$BRANCH-$PROJECT" >> "$GITHUB_ENV"
-
-      - run: pnpm install --frozen-lockfile
-
-      - name: Build CDK app
-        run: pnpm --filter agentcore-cdk-app build
-
-      # ── Phase 1: Amplify backend (Cognito, AppSync, Lambda, DynamoDB) ─────────
-
       - name: Write AWS credentials file (act only — ampx CLI needs ~/.aws)
         if: ${{ env.ACT }}
         run: |
@@ -79,18 +67,18 @@ jobs:
             printf 'aws_session_token=%s\n' "$AWS_SESSION_TOKEN" >> ~/.aws/credentials
           printf '[default]\nregion=%s\n' "${AWS_REGION:-us-east-1}" > ~/.aws/config
 
-      - name: Deploy Amplify backend
-        working-directory: web
-        # The GITHUB_* / JIRA_* vars below are deploy-time inputs read by
-        # web/amplify/backend.ts (see docs/webhook-stepfunction-integration.md
-        # and docs/github-integration.md). Without them the webhook receiver /
-        # post-comment Lambdas deploy with empty secret ARNs and the
-        # @webhook-agent pipeline fails at invoke time (receiver can't verify
-        # the HMAC signature; post-comment can't mint a GitHub App token).
-        # Set these as repo/environment Actions variables (non-secret ARNs/IDs);
-        # all are optional — unset ones just leave that path disabled, they
-        # never fail synth/deploy.
+      - run: pnpm install --frozen-lockfile
+
+      # Build + deploy everything in one script (ampx sandbox → Next.js → S3/CloudFront).
+      # DEPLOY_BRANCH overrides build.sh's `git rev-parse` (the Actions checkout is
+      # detached, so HEAD has no branch name). The GITHUB_* / JIRA_* vars are
+      # deploy-time inputs read by web/amplify/backend.ts (webhook receiver +
+      # post-comment Lambdas — see docs/webhook-stepfunction-integration.md and
+      # docs/github-integration.md); all optional, unset ones just leave that path
+      # disabled and never fail synth/deploy.
+      - name: Build and deploy (scripts/build.sh)
         env:
+          DEPLOY_BRANCH: ${{ github.ref_name }}
           GITHUB_APP_ID: ${{ vars.AGENT_GITHUB_APP_ID }}
           GITHUB_APP_PRIVATE_KEY_SECRET_ARN: ${{ vars.AGENT_GITHUB_APP_PRIVATE_KEY_SECRET_ARN }}
           GITHUB_WEBHOOK_SECRET_ARN: ${{ vars.AGENT_GITHUB_WEBHOOK_SECRET_ARN }}
@@ -98,86 +86,4 @@ jobs:
           JIRA_API_TOKEN_SECRET_ARN: ${{ vars.AGENT_JIRA_API_TOKEN_SECRET_ARN }}
           JIRA_BASE_URL: ${{ vars.AGENT_JIRA_BASE_URL }}
           JIRA_API_EMAIL: ${{ vars.AGENT_JIRA_API_EMAIL }}
-        run: |
-          echo "::group::ampx sandbox --once"
-          pnpm exec ampx sandbox --once --identifier "$BRANCH_SLUG"
-          echo "::endgroup::"
-
-      # ── Phase 2: Configure AgentCore JWT auth from Amplify outputs ───────────
-
-      - name: Configure AgentCore auth
-        run: |
-          echo "::group::Configure JWT auth"
-          node scripts/configure-agentcore-auth.js
-          echo "::endgroup::"
-
-      # ── Phase 3: Hosting (S3 + CloudFront) ───────────────────────────────────
-
-      - name: Deploy hosting stack
-        run: |
-          echo "::group::CloudFormation deploy"
-          STATUS=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
-            --query 'Stacks[0].StackStatus' --output text 2>/dev/null) || STATUS="DOES_NOT_EXIST"
-
-          if [ "$STATUS" = "ROLLBACK_COMPLETE" ]; then
-            echo "Stack in ROLLBACK_COMPLETE — deleting"
-            aws cloudformation delete-stack --stack-name "$STACK_NAME"
-            aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME"
-          fi
-
-          cd agent/default/agentcore/cdk
-          ./node_modules/.bin/cdk deploy "$STACK_NAME" \
-            --require-approval never \
-            --outputs-file hosting-outputs.json \
-            --context stackName="$STACK_NAME"
-
-          # Flatten nested stack key
-          node -e "
-            const raw = require('./hosting-outputs.json');
-            const key = Object.keys(raw)[0];
-            require('fs').writeFileSync('hosting-outputs.json', JSON.stringify(raw[key], null, 2));
-          "
-          echo "::endgroup::"
-
-      - name: Export hosting outputs
-        run: |
-          OUT=agent/default/agentcore/cdk/hosting-outputs.json
-          echo "BUCKET=$(node -p "require('./$OUT').BucketName")"    >> "$GITHUB_ENV"
-          echo "DIST_ID=$(node -p "require('./$OUT').DistributionId")" >> "$GITHUB_ENV"
-          echo "DOMAIN=$(node -p "require('./$OUT').Domain")"         >> "$GITHUB_ENV"
-
-      # ── Phase 4: AgentCore runtime + gateway ─────────────────────────────────
-
-      - name: Deploy AgentCore harness + gateway
-        run: |
-          echo "::group::agentcore deploy"
-          cd agent/default
-          npx @aws/agentcore deploy --target default
-          echo "::endgroup::"
-
-      - name: Inject AgentCore env vars for Amplify build
-        run: node scripts/inject-agentcore-env.js
-
-      - name: Extract deployment info and wire AppSync
-        run: |
-          echo "::group::Wire AppSync resolver"
-          node scripts/extract-deployment-info.js
-          echo "::endgroup::"
-
-      # ── Phase 5: Build and publish static website ─────────────────────────────
-
-      - name: Build web app
-        env:
-          NODE_OPTIONS: --max-old-space-size=6144
-        run: |
-          echo "::group::Next.js build"
-          pnpm --filter web build
-          echo "::endgroup::"
-
-      - name: Deploy to S3 + invalidate CloudFront
-        run: |
-          aws s3 sync web/out/ "s3://$BUCKET/$BRANCH/" --delete
-          AWS_PAGER="" aws cloudfront create-invalidation \
-            --distribution-id "$DIST_ID" --paths "/$BRANCH/*" \
-            --query 'Invalidation.Id' --output text
-          echo "Deployed: https://$DOMAIN/$BRANCH/"
+        run: ./scripts/build.sh

@@ -412,6 +412,8 @@ const webhookInvokeAgentLambda = backend.agentWebhookInvokeAgent.resources.lambd
 // its own execution-role credentials against the harness ARN.
 backend.agentWebhookInvokeAgent.addEnvironment('HARNESS_ARN', AGENTCORE_HARNESS_ARN);
 backend.agentWebhookPostComment.addEnvironment('ACCOUNT_ID', backend.stack.account);
+backend.agentWebhookPostComment.addEnvironment('HOSTING_DOMAIN', hosting.distributionDomainName);
+backend.agentWebhookPostComment.addEnvironment('BRANCH_SLUG', backendName ?? '');
 
 const secretArns = [GITHUB_WEBHOOK_SECRET_ARN, JIRA_WEBHOOK_SECRET_ARN].filter(Boolean);
 if (secretArns.length) {
