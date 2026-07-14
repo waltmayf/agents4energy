@@ -13,7 +13,7 @@ export interface AgentWebhookStackProps {
   /** Lambda that posts the initial (Live Tail link) and final comments. */
   postCommentLambda: lambda.IFunction;
   /**
-   * Lambda that seeds git credentials in the harness session (via
+   * Lambda that seeds git/gh credentials in the harness session (via
    * InvokeAgentRuntimeCommand) and returns the annotated prompt. The harness
    * invoke itself is a native `bedrockagentcore:invokeHarness` Step Functions
    * task, not this Lambda — see the class doc and issue #56.
@@ -45,7 +45,7 @@ export interface AgentWebhookStackProps {
  *     → Step Function:
  *         1. agent-webhook-post-comment (stage=initial) — posts the CloudWatch Live
  *            Tail link comment, mints a GitHub token, adds agent-working (label runs)
- *         2. agent-webhook-invoke-agent (git-auth prep) — seeds git credentials in
+ *         2. agent-webhook-invoke-agent (git-auth prep) — seeds git/gh credentials in
  *            the harness session via InvokeAgentRuntimeCommand, returns the prompt
  *         3. InvokeHarness — NATIVE `bedrockagentcore:invokeHarness` task; returns
  *            the decoded final assistant message ($.Output.Message.Content[0].Text)
@@ -90,9 +90,9 @@ export class AgentWebhookStack extends Construct {
       resultPath: '$.initialComment',
     });
 
-    // Step 2 — git-auth prep (Lambda). Seeds git credentials in the harness
-    // session and returns the <github_access>-annotated prompt as
-    // $.prepared.effectivePrompt. NOT the harness invoke — that's the native
+    // Step 2 — git-auth prep (Lambda). Seeds git/gh credentials in the harness
+    // session and returns the <issue_context>/<github_access>-annotated prompt
+    // as $.prepared.effectivePrompt. NOT the harness invoke — that's the native
     // task below.
     const prepareGitAuth = new tasks.LambdaInvoke(this, 'PrepareGitAuth', {
       lambdaFunction: props.prepareGitAuthLambda,
@@ -104,6 +104,7 @@ export class AgentWebhookStack extends Construct {
         issueNumber: sfn.JsonPath.numberAt('$.issueNumber'),
         issueKey: sfn.JsonPath.stringAt('$.issueKey'),
         githubToken: sfn.JsonPath.stringAt('$.initialComment.githubToken'),
+        issueContext: sfn.JsonPath.stringAt('$.initialComment.issueContext'),
         logGroupName: sfn.JsonPath.stringAt('$.initialComment.logGroupName'),
         logStreamName: sfn.JsonPath.stringAt('$.initialComment.logStreamName'),
       }),
