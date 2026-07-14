@@ -7,7 +7,8 @@ const GITHUB_APP_ID = process.env.GITHUB_APP_ID ?? '';
 const GITHUB_APP_PRIVATE_KEY_SECRET_ARN = process.env.GITHUB_APP_PRIVATE_KEY_SECRET_ARN ?? '';
 const JIRA_BASE_URL = process.env.JIRA_BASE_URL ?? '';
 const JIRA_API_EMAIL = process.env.JIRA_API_EMAIL ?? '';
-const JIRA_API_TOKEN_SECRET_ARN = process.env.JIRA_API_TOKEN_SECRET_ARN ?? '';
+const HOSTING_DOMAIN = process.env.HOSTING_DOMAIN ?? '';
+const BRANCH_SLUG = process.env.BRANCH_SLUG ?? '';
 
 // Labels the Step Function manages around a label-triggered run (issue #56):
 // `agent-working` while the agent runs, `agent-error` if it fails.
@@ -193,8 +194,15 @@ export const handler = async (input: PostCommentInput): Promise<PostCommentOutpu
       ? buildLiveTailUrl(REGION, accountId, groupName, streamName)
       : null;
 
-    const body = liveTailUrl
-      ? `🤖 Working on it — [watch live via CloudWatch Logs Live Tail](${liveTailUrl})`
+    let chatUrl: string | null = null;
+    if (HOSTING_DOMAIN && BRANCH_SLUG) {
+      chatUrl = `https://${HOSTING_DOMAIN}/${BRANCH_SLUG}/chat?sessionId=${input.runId}`;
+    }
+    const links = [];
+    if (chatUrl) links.push(`[watch live in the chat UI](${chatUrl})`);
+    if (liveTailUrl) links.push(`[watch live via CloudWatch Logs Live Tail](${liveTailUrl})`);
+    const body = links.length
+      ? `🤖 Working on it — ${links.join(' · ')}`
       : `🤖 Working on it (run \`${input.runId}\`)…`;
 
     let githubToken: string | undefined;
