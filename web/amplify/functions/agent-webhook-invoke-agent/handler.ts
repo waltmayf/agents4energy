@@ -187,11 +187,6 @@ async function authenticateGitInHarnessSession(opts: {
   return execInHarness({ sessionId, command, timeoutSeconds: 90 });
 }
 
-// Step 1 of the (git-only) preparation: authenticate git/gh in the harness
-// session and annotate the prompt. Returns the prompt for the native
-// invokeHarness task.
-export const handler = async (input: PrepareInput): Promise<PrepareOutput> => {
-  const { runId, source, prompt, repo, issueContext, githubToken, agentsSystemPrompt, logGroupName, logStreamName } = input;
 async function githubApiGet<T>(path: string, token: string): Promise<T> {
   const res = await fetch(`https://api.github.com${path}`, {
     headers: {
@@ -259,11 +254,6 @@ async function buildGithubContextBlock(repo: string, issueNumber: number, token:
     );
   }
 
-  // Prepend AGENTS.md system prompt if provided.
-  if (agentsSystemPrompt) {
-    effectivePrompt = [agentsSystemPrompt, effectivePrompt].join('\n\n');
-  }
-
   if (comments.length > 0) {
     lines.push('', `Comment thread (${comments.length}${comments.length === MAX_COMMENTS ? '+' : ''}):`);
     for (const c of comments) {
@@ -279,12 +269,17 @@ async function buildGithubContextBlock(repo: string, issueNumber: number, token:
 // session and annotate the prompt. Returns the prompt for the native
 // invokeHarness task.
 export const handler = async (input: PrepareInput): Promise<PrepareOutput> => {
-  const { runId, source, prompt, repo, issueNumber, githubToken, logGroupName, logStreamName } = input;
+  const { runId, source, prompt, repo, issueNumber, githubToken, agentsSystemPrompt, logGroupName, logStreamName } = input;
+
+  // Prepend the repo's AGENTS.md (if the receiver fetched one) as a system-style
+  // preamble so every annotation below builds on top of it.
+  const withAgentsPrompt = (p: string): string =>
+    agentsSystemPrompt ? [agentsSystemPrompt, p].join('\n\n') : p;
 
   if (source !== 'github' || !githubToken) {
     // Jira (or a GitHub run with no token): nothing to authenticate, pass the
     // prompt through unchanged for the native invoke.
-    return { effectivePrompt: prompt };
+    return { effectivePrompt: withAgentsPrompt(prompt) };
   }
 
   // Pull the full current issue/PR context (issue #73) before the agent's turn —
@@ -337,5 +332,5 @@ export const handler = async (input: PrepareInput): Promise<PrepareOutput> => {
     ].join('\n');
   }
 
-  return { effectivePrompt, gitAuth };
+  return { effectivePrompt: withAgentsPrompt(effectivePrompt), gitAuth };
 };

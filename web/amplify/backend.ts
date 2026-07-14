@@ -23,13 +23,7 @@ import { AgentCoreApplication, type HarnessSpec } from './constructs/agentCoreAp
 import { E2eTestUser } from './constructs/e2eTestUser/resource';
 import { AgentWebhookStack } from './constructs/agentWebhookStack';
 
-import { 
-  aws_bedrock as bedrock,
-  aws_bedrockagentcore as agentcore,
 import { StringParameter } from 'aws-cdk-lib/aws-ssm';
-
-  aws_iam as iam
-} from 'aws-cdk-lib'
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -47,13 +41,14 @@ const __dirname = dirname(__filename);
 const agentcoreRoot = resolve(__dirname, '../../agent/default/agentcore');
 const projectSpec = JSON.parse(readFileSync(resolve(agentcoreRoot, 'agentcore.json'), 'utf8'));
 
-// MyHarness — see agent/default/app/MyHarness/ (system-prompt.md is still read
-// from disk since it's prose, not config; everything else is inlined here as
-// literal CfnHarness sub-properties, passed straight through by
-// AgentCoreApplication with no field-mapping).
-const myHarnessSystemPrompt = `
-You are a coding agent. Users will assign coding tasks to you
-`
+// MyHarness — see agent/default/app/MyHarness/. The system prompt is prose, not
+// config, so it lives in system-prompt.md and is read from disk here; everything
+// else is inlined below as literal CfnHarness sub-properties, passed straight
+// through by AgentCoreApplication with no field-mapping.
+const myHarnessSystemPrompt = readFileSync(
+  resolve(agentcoreRoot, '../app/MyHarness/system-prompt.md'),
+  'utf8',
+).trim();
 
 const harnessSpecs: HarnessSpec[] = [
   {
@@ -271,35 +266,35 @@ const AGENTCORE_REGION = Stack.of(agentStack).region;
 // Parameter names include the stack name (which encodes repo and sanitized branch) to
 // keep values isolated per sandbox.
 const ssmBasePath = `/agentcore/${Stack.of(agentStack).stackName}`;
-new StringParameter(this, 'SsmAgentcoreMemoryId', {
+new StringParameter(agentStack, 'SsmAgentcoreMemoryId', {
   parameterName: `${ssmBasePath}/memory_id`,
   stringValue: AGENTCORE_MEMORY_ID,
 });
-new StringParameter(this, 'SsmAgentcoreMemoryArn', {
+new StringParameter(agentStack, 'SsmAgentcoreMemoryArn', {
   parameterName: `${ssmBasePath}/memory_arn`,
   stringValue: AGENTCORE_MEMORY_ARN,
 });
-new StringParameter(this, 'SsmAgentcoreGatewayId', {
+new StringParameter(agentStack, 'SsmAgentcoreGatewayId', {
   parameterName: `${ssmBasePath}/gateway_id`,
   stringValue: AGENTCORE_GATEWAY_ID,
 });
-new StringParameter(this, 'SsmAgentcoreGatewayArn', {
+new StringParameter(agentStack, 'SsmAgentcoreGatewayArn', {
   parameterName: `${ssmBasePath}/gateway_arn`,
   stringValue: AGENTCORE_GATEWAY_ARN,
 });
-new StringParameter(this, 'SsmAgentcoreGatewayEndpoint', {
+new StringParameter(agentStack, 'SsmAgentcoreGatewayEndpoint', {
   parameterName: `${ssmBasePath}/gateway_endpoint`,
   stringValue: AGENTCORE_GATEWAY_ENDPOINT,
 });
-new StringParameter(this, 'SsmAgentcoreHarnessArn', {
+new StringParameter(agentStack, 'SsmAgentcoreHarnessArn', {
   parameterName: `${ssmBasePath}/harness_arn`,
   stringValue: AGENTCORE_HARNESS_ARN,
 });
-new StringParameter(this, 'SsmAgentcoreHarnessRoleArn', {
+new StringParameter(agentStack, 'SsmAgentcoreHarnessRoleArn', {
   parameterName: `${ssmBasePath}/harness_role_arn`,
   stringValue: AGENTCORE_HARNESS_ROLE_ARN,
 });
-new StringParameter(this, 'SsmAgentcoreRegion', {
+new StringParameter(agentStack, 'SsmAgentcoreRegion', {
   parameterName: `${ssmBasePath}/region`,
   stringValue: AGENTCORE_REGION,
 });
