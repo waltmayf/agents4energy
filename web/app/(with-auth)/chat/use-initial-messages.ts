@@ -51,40 +51,44 @@ export async function fetchSessionMessages(sessionId: string): Promise<SessionDa
     .filter((e): e is NonNullable<typeof e> => e != null)
     .sort((a, b) => a.timestamp.localeCompare(b.timestamp))
     .map((e, i) => {
-      // Attempt to parse JSON-encoded message content from AgentCore memory.
-      let parsed: any = null;
-      try {
-        parsed = JSON.parse(e.text);
-      } catch (_) {
-        // Not JSON, fall back to raw text.
-      }
-      const parts: any[] = [];
-      let combinedText = '';
-      if (parsed && parsed.message && parsed.message.content) {
-        for (const item of parsed.message.content) {
-          if (item.toolResult && Array.isArray(item.toolResult.content)) {
-            const texts = item.toolResult.content.map((c: any) => c.text).filter(Boolean);
-            parts.push({ type: 'toolResult' as const, content: texts });
-            combinedText += texts.join('\n') + '\n';
-          } else if (item.reasoningContent && item.reasoningContent.reasoningText && item.reasoningContent.reasoningText.text) {
-            const txt = item.reasoningContent.reasoningText.text;
-            parts.push({ type: 'text' as const, text: txt });
-            combinedText += txt + '\n';
-          } else if (item.text) {
-            parts.push({ type: 'text' as const, text: item.text });
-            combinedText += item.text + '\n';
+      // Parse the stored text which may be a JSON representation of a multi‑part
+      // message (e.g., containing toolResult, reasoningContent, etc.).
+      let parts: any[] = [];
+      let plainText = '';
+      if (e.text) {
+        try {
+          const parsed = JSON.parse(e.text);
+          const msg = parsed?.message ?? parsed;
+          const contentArray = msg?.content ?? [];
+          for (const item of contentArray) {
+            if (item.text) {
+              parts.push({ type: 'text' as const, text: item.text });
+              plainText += item.text + ' ';
+            } else if (item.toolResult) {
+              const toolParts = item.toolResult.content ?? [];
+              parts.push({ type: 'toolResult' as const, content: toolParts });
+              const toolText = toolParts.map((c: any) => c.text).filter(Boolean).join(' ');
+              if (toolText) plainText += toolText + ' ';
+            } else if (item.reasoningContent?.reasoningText?.text) {
+              const txt = item.reasoningContent.reasoningText.text;
+              parts.push({ type: 'text' as const, text: txt });
+              plainText += txt + ' ';
+            } else if (item.toolUse) {
+              // toolUse does not have displayable text.
+            }
           }
+        } catch {
+          // Not JSON – treat as plain text.
+          plainText = e.text;
+          parts = [{ type: 'text' as const, text: e.text }];
         }
-      } else {
-        parts.push({ type: 'text' as const, text: e.text });
-        combinedText = e.text;
       }
-      combinedText = combinedText.trimEnd();
+      plainText = plainText.trim();
       return {
         id: e.eventId ?? `msg-${i}`,
         role: (e.role === 'assistant' || e.role === 'user' ? e.role : 'assistant') as UIMessage['role'],
-        content: combinedText,
-        parts,
+        content: plainText,
+        parts: parts.length ? parts : [{ type: 'text' as const, text: plainText }],
         createdAt: e.timestamp ? new Date(e.timestamp) : new Date(),
       };
     });
