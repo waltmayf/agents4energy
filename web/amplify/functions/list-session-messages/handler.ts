@@ -98,16 +98,32 @@ export const handler = async (
 
       // The harness SDK stores the full message as a JSON string in the text field.
       // Try to parse it and extract the actual message text; fall back to raw text.
+      // The harness SDK stores the full message as a JSON string in the text field.
+      // Try to parse it and extract all textual content, handling toolResult, reasoningContent, etc.
       let text = content?.text ?? '';
       if (text) {
         try {
           const parsed = JSON.parse(text);
           const msg = parsed?.message ?? parsed;
-          const contentArr: { text?: string }[] = msg?.content ?? [];
-          const extracted = contentArr.map((c) => c.text ?? '').filter(Boolean).join(' ');
+          const contentArr: any[] = msg?.content ?? [];
+          const extractText = (item: any): string => {
+            if (!item || typeof item !== 'object') return '';
+            if (item.text) return item.text;
+            if (item.toolResult?.content) {
+              return item.toolResult.content.map(extractText).join(' ');
+            }
+            if (item.reasoningContent?.reasoningText?.text) {
+              return item.reasoningContent.reasoningText.text;
+            }
+            if (Array.isArray(item.content)) {
+              return item.content.map(extractText).join(' ');
+            }
+            return '';
+          };
+          const extracted = contentArr.map(extractText).filter(Boolean).join(' ');
           if (extracted) text = extracted;
         } catch {
-          // not JSON — use raw text as-is
+          // not JSON — keep raw text
         }
       }
 
