@@ -118,6 +118,8 @@ Both secrets are Secrets Manager ARNs supplied as deploy-time inputs (`GITHUB_WE
 
 ## CloudWatch Logs Live Tail link
 
+The initial comment also includes a **live chat session link** to the deployed UI (`/chat?sessionId=<runId>`), allowing users to watch the agent's progress directly in the web interface.
+
 Ported directly from `.github/workflows/claude.yml`'s "Post CloudWatch log links" step (see [`web/amplify/functions/_shared/liveTail.ts`](../web/amplify/functions/_shared/liveTail.ts)):
 
 - One log group per source repo/project: `/agent-webhook/<repo-or-project-slug>`
