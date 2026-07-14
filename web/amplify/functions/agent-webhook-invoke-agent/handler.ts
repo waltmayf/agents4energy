@@ -1,6 +1,5 @@
 import {
   BedrockAgentCoreClient,
-  InvokeHarnessCommand,
   InvokeAgentRuntimeCommandCommand,
 } from '@aws-sdk/client-bedrock-agentcore';
 import { appendLog } from '../_shared/liveTail';
@@ -8,14 +7,19 @@ import { appendLog } from '../_shared/liveTail';
 const REGION = process.env.AWS_REGION ?? 'us-east-1';
 const HARNESS_ARN = process.env.HARNESS_ARN ?? '';
 
-// The harness authorizes with AWS_IAM, so the SDK client signs every request
-// with this Lambda's execution-role credentials (SigV4) — no Cognito JWT. The
-// SDK also owns connection timeouts + retries and decodes the event stream
-// into typed objects, so the hand-rolled binary decoder (and the long-stream
-// `TypeError: terminated` it hit, #57) are both gone.
+// This step no longer invokes the harness — that is now a native Step Functions
+// `bedrockagentcore:invokeHarness` task (see docs/webhook-stepfunction-integration.md
+// and issue #56). What remains here is the one piece the native integration
+// cannot do: run a shell command in the harness's runtime session to seed git
+// (and gh) credentials *before* the agent turn, and hand the annotated prompt
+// back to the state machine. The command's stdout/stderr are written to the
+// run's CloudWatch Logs stream so a failed clone/push is debuggable there.
+//
+// The harness authorizes with AWS_IAM, so the SDK client signs the exec request
+// (InvokeAgentRuntimeCommand) with this Lambda's execution-role credentials.
 const agentCore = new BedrockAgentCoreClient({ region: REGION });
 
-interface InvokeAgentInput {
+interface PrepareInput {
   runId: string;
   source: 'github' | 'jira';
   prompt: string;
@@ -31,8 +35,12 @@ interface InvokeAgentInput {
   logStreamName?: string;
 }
 
-interface InvokeAgentOutput {
-  response: string;
+interface PrepareOutput {
+  // The prompt to send to the native invokeHarness task — annotated with an
+  // <issue_context> block and (for GitHub runs) a <github_access> block.
+  effectivePrompt: string;
+  // Git/gh-auth exec results, surfaced for debugging (also written to the log stream).
+  gitAuth?: { exitCode: number; stdout: string; stderr: string };
 }
 
 async function log(groupName: string | undefined, streamName: string | undefined, message: string): Promise<void> {
@@ -40,20 +48,19 @@ async function log(groupName: string | undefined, streamName: string | undefined
   try {
     await appendLog(groupName, streamName, message);
   } catch {
-    // Logging is best-effort — never fail the agent invocation because a log write failed.
+    // Logging is best-effort — never fail the run because a log write failed.
   }
 }
 
 // Runs a shell command in the harness's runtime session via the harness-exec
-// API (InvokeAgentRuntimeCommand → POST /runtimes/{harnessArn}/commands),
-// keyed by the same runtimeSessionId the subsequent InvokeHarness call uses so
+// API (InvokeAgentRuntimeCommand → POST /runtimes/{harnessArn}/commands), keyed
+// by the same runtimeSessionId the subsequent native invokeHarness task uses so
 // both land in the same container. Two things carried over from #52/#53:
-//   1. `agentRuntimeArn` here takes the **harness** ARN, not the backing
-//      runtime ARN. Calling the runtime ARN directly returns HTTP 400
-//      "managed by a harness and cannot be invoked directly".
-//   2. The harness now authorizes with AWS_IAM, so this is SigV4-signed via the
-//      SDK client above (the earlier CUSTOM_JWT setup required a Cognito Bearer
-//      token and a hand-rolled fetch; that's gone).
+//   1. `agentRuntimeArn` here takes the **harness** ARN, not the backing runtime
+//      ARN. Calling the runtime ARN directly returns HTTP 400 "managed by a
+//      harness and cannot be invoked directly".
+//   2. The harness authorizes with AWS_IAM, so this is SigV4-signed via the SDK
+//      client above.
 // The SDK yields typed `chunk` events carrying contentDelta (stdout/stderr) and
 // a final contentStop (exitCode).
 async function execInHarness(opts: {
@@ -123,7 +130,7 @@ const GH_VERSION = '2.96.0';
 async function authenticateGitInHarnessSession(opts: {
   sessionId: string;
   githubToken: string;
-}): Promise<void> {
+}): Promise<{ exitCode: number; stdout: string; stderr: string }> {
   const { sessionId, githubToken } = opts;
 
   // JSON.stringify safely quotes the token for the shell (printf '%s' "<tok>")
@@ -145,52 +152,18 @@ async function authenticateGitInHarnessSession(opts: {
     'fi',
     `printf '%s' ${JSON.stringify(githubToken)} | gh auth login --hostname github.com --with-token`,
     'gh auth setup-git',
+    // Emit a non-secret confirmation line so the debug log shows the step ran.
+    'echo "git/gh credential setup configured for github.com"',
   ].join('\n');
 
-  const { exitCode, stderr } = await execInHarness({ sessionId, command, timeoutSeconds: 90 });
-  if (exitCode !== 0) {
-    throw new Error(`Harness exec for git/gh auth exited with code ${exitCode}: ${stderr.trim()}`);
-  }
+  return execInHarness({ sessionId, command, timeoutSeconds: 90 });
 }
 
-// Invoke the AgentCore Harness via the SDK's InvokeHarnessCommand (SigV4-signed
-// against the harness ARN — the same target the browser transport and the
-// invoke-agent Lambda use). The SDK returns a typed event stream; accumulate
-// its contentBlockDelta text into the full response, and surface validation /
-// server exception events instead of silently returning empty text.
-async function invokeHarness(opts: {
-  sessionId: string;
-  prompt: string;
-}): Promise<string> {
-  const { sessionId, prompt } = opts;
-
-  if (!HARNESS_ARN) throw new Error('HARNESS_ARN not configured');
-
-  const response = await agentCore.send(new InvokeHarnessCommand({
-    harnessArn: HARNESS_ARN,
-    runtimeSessionId: sessionId,
-    messages: [{ role: 'user', content: [{ text: prompt }] }],
-  }));
-
-  const chunks: string[] = [];
-
-  for await (const event of response.stream ?? []) {
-    // A bad model id / malformed request surfaces here as a validation or
-    // internal-server exception event — throw it rather than returning
-    // "(no response)", which is what previously masked such failures.
-    if (event.validationException || event.internalServerException || event.runtimeClientError) {
-      const ex = event.validationException ?? event.internalServerException ?? event.runtimeClientError;
-      throw new Error(`Harness stream exception: ${ex?.message ?? JSON.stringify(ex)}`);
-    }
-    const text = event.contentBlockDelta?.delta?.text;
-    if (text) chunks.push(text);
-  }
-
-  return chunks.join('');
-}
-
-export const handler = async (input: InvokeAgentInput): Promise<InvokeAgentOutput> => {
-  const { runId, source, prompt, repo, githubToken, issueContext, logGroupName, logStreamName } = input;
+// Step 1 of the (git-only) preparation: authenticate git/gh in the harness
+// session and annotate the prompt. Returns the prompt for the native
+// invokeHarness task.
+export const handler = async (input: PrepareInput): Promise<PrepareOutput> => {
+  const { runId, source, prompt, repo, issueContext, githubToken, logGroupName, logStreamName } = input;
 
   let effectivePrompt = prompt;
 
@@ -207,51 +180,42 @@ export const handler = async (input: InvokeAgentInput): Promise<InvokeAgentOutpu
     ].join('\n');
   }
 
-  if (source === 'github' && githubToken) {
-    await log(logGroupName, logStreamName, `[${runId}] authenticating git in harness session`);
-    await authenticateGitInHarnessSession({ sessionId: runId, githubToken });
-
-    // The exec call above authenticated both `git` and `gh` for the target
-    // repo in this session's shell — tell the agent that so it clones/pushes/
-    // opens PRs with its code interpreter tool instead of assuming (as it did
-    // in #48) that it lacks write access, or falling back to a compare-URL
-    // (the pre-#54 workaround, no longer needed now that `gh` is installed).
-    if (repo) {
-      effectivePrompt = [
-        effectivePrompt,
-        '',
-        '<github_access>',
-        `Your code interpreter's git and gh CLIs are already authenticated for the repository ${repo} — git clone/commit/push and gh pr create all work with no token setup needed.`,
-        `Clone with: git clone https://github.com/${repo}.git`,
-        'Commit and push your branch normally (e.g. git push -u origin <your-branch>).',
-        `Open the pull request directly with: gh pr create --repo ${repo} --base main --head <your-branch> --title "<title>" --body "<body>"`,
-        'Include the resulting PR URL (printed by `gh pr create`) in your reply.',
-        '</github_access>',
-      ].join('\n');
-    }
+  if (source !== 'github' || !githubToken) {
+    // Jira (or a GitHub run with no token): nothing to authenticate, pass the
+    // prompt through unchanged for the native invoke.
+    return { effectivePrompt };
   }
 
-  await log(logGroupName, logStreamName, `[${runId}] invoking harness (source=${source})`);
+  await log(logGroupName, logStreamName, `[${runId}] authenticating git/gh in harness session`);
+  const gitAuth = await authenticateGitInHarnessSession({ sessionId: runId, githubToken });
 
-  // The harness invoke is a single blocking event-stream read (fully consumed
-  // below before returning), so emit a heartbeat every 20s while waiting. This
-  // is the best "live" signal available without streaming step-by-step events
-  // into this run's log stream — see docs/webhook-stepfunction-integration.md.
-  const heartbeat = setInterval(() => {
-    void log(logGroupName, logStreamName, `[${runId}] still running…`);
-  }, 20_000);
+  // Surface the exec output for debugging: to the run's CloudWatch stream (what
+  // the Live Tail link shows) and to this Lambda's own log group.
+  console.log(`git/gh-auth exitCode=${gitAuth.exitCode}\nstdout:\n${gitAuth.stdout}\nstderr:\n${gitAuth.stderr}`);
+  await log(logGroupName, logStreamName,
+    `[${runId}] git/gh auth exitCode=${gitAuth.exitCode}${gitAuth.stdout ? ` stdout=${gitAuth.stdout.trim()}` : ''}${gitAuth.stderr ? ` stderr=${gitAuth.stderr.trim()}` : ''}`);
 
-  try {
-    const response = await invokeHarness({ sessionId: runId, prompt: effectivePrompt });
-    const finalText = response || '(no response)';
-
-    await log(logGroupName, logStreamName, `[${runId}] harness responded (${finalText.length} chars)`);
-    return { response: finalText };
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    await log(logGroupName, logStreamName, `[${runId}] harness invocation failed: ${message}`);
-    throw err;
-  } finally {
-    clearInterval(heartbeat);
+  if (gitAuth.exitCode !== 0) {
+    throw new Error(`Harness exec for git/gh auth exited with code ${gitAuth.exitCode}: ${gitAuth.stderr.trim() || gitAuth.stdout.trim()}`);
   }
+
+  // The exec above authenticated both `git` and `gh` for the target repo in
+  // this session's shell — tell the agent so it clones/pushes/opens PRs with
+  // its code interpreter tool instead of assuming (as it did in #48) that it
+  // lacks write access.
+  if (repo) {
+    effectivePrompt = [
+      effectivePrompt,
+      '',
+      '<github_access>',
+      `Your code interpreter's git and gh CLIs are already authenticated for the repository ${repo} — git clone/commit/push and gh pr create all work with no token setup needed.`,
+      `Clone with: git clone https://github.com/${repo}.git`,
+      'Commit and push your branch normally (e.g. git push -u origin <your-branch>).',
+      `Open the pull request directly with: gh pr create --repo ${repo} --base main --head <your-branch> --title "<title>" --body "<body>"`,
+      'Include the resulting PR URL (printed by `gh pr create`) in your reply.',
+      '</github_access>',
+    ].join('\n');
+  }
+
+  return { effectivePrompt, gitAuth };
 };

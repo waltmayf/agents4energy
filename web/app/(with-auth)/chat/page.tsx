@@ -223,16 +223,14 @@ function ChatView({
   const polledMessages = useSessionMessagePolling(sessionIdRef.current, messages);
   const mergedMessages = useMemo(() => {
     const map = new Map<string, UIMessage>();
-    // Polled messages first, then live messages – live messages (streaming) take precedence if IDs clash
+    // Polled messages first, then live messages – live messages (streaming) take
+    // precedence if IDs clash. AI SDK v5 UIMessages carry no timestamp, so we
+    // rely on this insertion order (memory returns messages already in order,
+    // live messages follow) rather than sorting on a non-existent createdAt.
     [...polledMessages, ...messages].forEach((m) => {
       map.set(m.id, m);
     });
-    // Sort chronologically
-    return Array.from(map.values()).sort((a, b) => {
-      const aTime = a.createdAt?.valueOf() ?? 0;
-      const bTime = b.createdAt?.valueOf() ?? 0;
-      return aTime - bTime;
-    });
+    return Array.from(map.values());
   }, [polledMessages, messages]);
 
   const isStreaming = status === 'submitted' || status === 'streaming';
