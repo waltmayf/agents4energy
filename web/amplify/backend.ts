@@ -62,7 +62,7 @@ const harnessSpecs: HarnessSpec[] = [
     systemPrompt: myHarnessSystemPrompt,
     tools: [
       { type: 'agentcore_browser', name: 'browser', config: { agentCoreBrowser: {} } },
-      { type: 'agentcore_code_interpreter', name: 'code-interpreter', config: { agentCoreCodeInterpreter: {} } },
+      // { type: 'agentcore_code_interpreter', name: 'code-interpreter', config: { agentCoreCodeInterpreter: {} } },
     ],
     memoryName: 'MyHarnessMemory',
     truncation: {
