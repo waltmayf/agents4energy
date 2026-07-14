@@ -250,14 +250,21 @@ function ChatView({
               .filter((p): p is { type: 'text'; text: string } => p.type === 'text')
               .map((p) => p.text)
               .join('');
+            // Extract toolResult content if present
+            const toolContent = message.parts
+              .filter((p): p is { type: 'toolResult'; content?: { text: string }[] } => p.type === 'toolResult')
+              .flatMap((p) => p.content?.map((c) => c.text) ?? [])
+              .join('\n');
 
             return (
               <Message key={message.id} from={message.role} data-testid={`message-${message.role}`}>
                 <MessageContent>
                   {message.role === 'assistant' ? (
-                    <MessageResponse isAnimating={isStreaming}>{text}</MessageResponse>
+                    <MessageResponse isAnimating={isStreaming}>
+                      {text || (toolContent && <pre>{toolContent}</pre>) || ''}
+                    </MessageResponse>
                   ) : (
-                    text
+                    text || (toolContent && <pre>{toolContent}</pre>)
                   )}
                 </MessageContent>
               </Message>
