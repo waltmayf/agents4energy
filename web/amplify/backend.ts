@@ -265,38 +265,51 @@ const AGENTCORE_REGION = Stack.of(agentStack).region;
 // Store AgentCore runtime identifiers in SSM Parameter Store to avoid cross-stack exports.
 // Parameter names include the stack name (which encodes repo and sanitized branch) to
 // keep values isolated per sandbox.
+// simpleName: false on every parameter — the path is `/agentcore/<stackName>/…`
+// and `stackName` is an unresolved CDK token here, so CDK can't infer from the
+// name string that these are path-style ("/"-prefixed) rather than simple
+// names. Without it synth fails with "Unable to determine ARN separator for SSM
+// parameter since the parameter name is an unresolved token."
 const ssmBasePath = `/agentcore/${Stack.of(agentStack).stackName}`;
 new StringParameter(agentStack, 'SsmAgentcoreMemoryId', {
   parameterName: `${ssmBasePath}/memory_id`,
   stringValue: AGENTCORE_MEMORY_ID,
+  simpleName: false,
 });
 new StringParameter(agentStack, 'SsmAgentcoreMemoryArn', {
   parameterName: `${ssmBasePath}/memory_arn`,
   stringValue: AGENTCORE_MEMORY_ARN,
+  simpleName: false,
 });
 new StringParameter(agentStack, 'SsmAgentcoreGatewayId', {
   parameterName: `${ssmBasePath}/gateway_id`,
   stringValue: AGENTCORE_GATEWAY_ID,
+  simpleName: false,
 });
 new StringParameter(agentStack, 'SsmAgentcoreGatewayArn', {
   parameterName: `${ssmBasePath}/gateway_arn`,
   stringValue: AGENTCORE_GATEWAY_ARN,
+  simpleName: false,
 });
 new StringParameter(agentStack, 'SsmAgentcoreGatewayEndpoint', {
   parameterName: `${ssmBasePath}/gateway_endpoint`,
   stringValue: AGENTCORE_GATEWAY_ENDPOINT,
+  simpleName: false,
 });
 new StringParameter(agentStack, 'SsmAgentcoreHarnessArn', {
   parameterName: `${ssmBasePath}/harness_arn`,
   stringValue: AGENTCORE_HARNESS_ARN,
+  simpleName: false,
 });
 new StringParameter(agentStack, 'SsmAgentcoreHarnessRoleArn', {
   parameterName: `${ssmBasePath}/harness_role_arn`,
   stringValue: AGENTCORE_HARNESS_ROLE_ARN,
+  simpleName: false,
 });
 new StringParameter(agentStack, 'SsmAgentcoreRegion', {
   parameterName: `${ssmBasePath}/region`,
   stringValue: AGENTCORE_REGION,
+  simpleName: false,
 });
 
 // Grant the pool's authenticated role permission to invoke the harness.
