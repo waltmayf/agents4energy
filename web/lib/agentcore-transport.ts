@@ -1,4 +1,8 @@
 import { fetchAuthSession } from 'aws-amplify/auth';
+import { fetchCredential, isExpiredOrExpiringSoon } from '@/lib/mcp-auth';
+import { generateClient } from 'aws-amplify/data';
+import type { Schema } from '@/amplify/data/resource';
+
 import {
   BedrockAgentCoreClient,
   InvokeHarnessCommand,
@@ -24,6 +28,8 @@ function makeClient(): BedrockAgentCoreClient {
     credentials: async () => {
       const session = await fetchAuthSession();
       const creds = session.credentials;
+  const dataClient = generateClient<Schema>({ authMode: 'userPool' });
+
       if (!creds) throw new Error('No AWS credentials — sign in first.');
       return {
         accessKeyId: creds.accessKeyId,
@@ -97,8 +103,37 @@ export class HarnessChatTransport implements ChatTransport<UIMessage> {
 
             const sessionId = getSessionId() ?? crypto.randomUUID();
 
-            const tools: HarnessTool[] | undefined = agentConfig.mcpServers?.length
-              ? agentConfig.mcpServers.map((s) => ({
+            // Retrieve any stored OAuth credentials for MCP servers and inject Authorization header
+            let mcpServers = agentConfig.mcpServers ?? [];
+            if (mcpServers.length) {
+              // Fetch all MCP servers to map URL -> ID
+              const serverRes = await dataClient.models.McpServer.list({ limit: 1000 } as any) as any;
+              const urlToId = new Map<string, string>();
+              (serverRes.data ?? []).forEach((s: any) => {
+                if (s.url) urlToId.set(s.url, s.id);
+              });
+
+              // For each server, attempt to fetch credential and add Authorization header if valid
+              mcpServers = await Promise.all(mcpServers.map(async (s) => {
+                const serverId = urlToId.get(s.url);
+                if (serverId) {
+                  const cred = await fetchCredential(serverId);
+                  if (cred && !isExpiredOrExpiringSoon(cred)) {
+                    return {
+                      ...s,
+                      headers: {
+                        ...(s.headers || {}),
+                        Authorization: `Bearer ${cred.accessToken}`,
+                      },
+                    };
+                  }
+                }
+                return s;
+              }));
+            }
+
+            const tools: HarnessTool[] | undefined = mcpServers.length
+              ? mcpServers.map((s) => ({
                   type: 'remote_mcp',
                   name: s.name,
                   config: {
@@ -109,6 +144,8 @@ export class HarnessChatTransport implements ChatTransport<UIMessage> {
                   },
                 }))
               : undefined;
+
+
 
             // Use the InvokeHarness API's first-class override fields so the harness
             // handles system prompt and model selection properly (no message injection).
