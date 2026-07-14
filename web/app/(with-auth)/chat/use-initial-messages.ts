@@ -50,13 +50,48 @@ export async function fetchSessionMessages(sessionId: string): Promise<SessionDa
   const messages = allEvents
     .filter((e): e is NonNullable<typeof e> => e != null)
     .sort((a, b) => a.timestamp.localeCompare(b.timestamp))
-    .map((e, i) => ({
-      id: e.eventId ?? `msg-${i}`,
-      role: (e.role === 'assistant' || e.role === 'user' ? e.role : 'assistant') as UIMessage['role'],
-      content: e.text,
-      parts: [{ type: 'text' as const, text: e.text }],
-      createdAt: e.timestamp ? new Date(e.timestamp) : new Date(),
-    }));
+    .map((e, i) => {
+      // Parse the stored text which may be a JSON representation of a multi‑part
+      // message (e.g., containing toolResult, reasoningContent, etc.).
+      let parts: any[] = [];
+      let plainText = '';
+      if (e.text) {
+        try {
+          const parsed = JSON.parse(e.text);
+          const msg = parsed?.message ?? parsed;
+          const contentArray = msg?.content ?? [];
+          for (const item of contentArray) {
+            if (item.text) {
+              parts.push({ type: 'text' as const, text: item.text });
+              plainText += item.text + ' ';
+            } else if (item.toolResult) {
+              const toolParts = item.toolResult.content ?? [];
+              parts.push({ type: 'toolResult' as const, content: toolParts });
+              const toolText = toolParts.map((c: any) => c.text).filter(Boolean).join(' ');
+              if (toolText) plainText += toolText + ' ';
+            } else if (item.reasoningContent?.reasoningText?.text) {
+              const txt = item.reasoningContent.reasoningText.text;
+              parts.push({ type: 'text' as const, text: txt });
+              plainText += txt + ' ';
+            } else if (item.toolUse) {
+              // toolUse does not have displayable text.
+            }
+          }
+        } catch {
+          // Not JSON – treat as plain text.
+          plainText = e.text;
+          parts = [{ type: 'text' as const, text: e.text }];
+        }
+      }
+      plainText = plainText.trim();
+      return {
+        id: e.eventId ?? `msg-${i}`,
+        role: (e.role === 'assistant' || e.role === 'user' ? e.role : 'assistant') as UIMessage['role'],
+        content: plainText,
+        parts: parts.length ? parts : [{ type: 'text' as const, text: plainText }],
+        createdAt: e.timestamp ? new Date(e.timestamp) : new Date(),
+      };
+    });
 
   return { messages, summary, summaryTimestamp, summaryRecordId };
 }

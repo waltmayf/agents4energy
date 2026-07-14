@@ -253,7 +253,13 @@ function ChatView({
             // Extract toolResult content if present
             const toolContent = message.parts
               .filter((p) => (p as { type: string }).type === 'toolResult')
-              .flatMap((p: any) => p.content?.map((c: any) => c.text) ?? [])
+              .flatMap((p: any) => {
+                // p.content may be an array of strings (our new format) or objects with a text field.
+                if (Array.isArray(p.content)) {
+                  return p.content.map((c: any) => (typeof c === 'string' ? c : c.text)).filter(Boolean);
+                }
+                return [];
+              })
               .join('\n');
 
             return (
