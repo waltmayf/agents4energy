@@ -27,6 +27,7 @@ interface PrepareInput {
   issueNumber: number | null;
   issueKey: string | null;
   githubToken?: string | null;
+  agentsSystemPrompt?: string | null;
   logGroupName?: string;
   logStreamName?: string;
 }
@@ -186,6 +187,11 @@ async function authenticateGitInHarnessSession(opts: {
   return execInHarness({ sessionId, command, timeoutSeconds: 90 });
 }
 
+// Step 1 of the (git-only) preparation: authenticate git/gh in the harness
+// session and annotate the prompt. Returns the prompt for the native
+// invokeHarness task.
+export const handler = async (input: PrepareInput): Promise<PrepareOutput> => {
+  const { runId, source, prompt, repo, issueContext, githubToken, agentsSystemPrompt, logGroupName, logStreamName } = input;
 async function githubApiGet<T>(path: string, token: string): Promise<T> {
   const res = await fetch(`https://api.github.com${path}`, {
     headers: {
@@ -251,6 +257,11 @@ async function buildGithubContextBlock(repo: string, issueNumber: number, token:
       `Changed files: ${pr.changed_files} (+${pr.additions} / -${pr.deletions})`,
       ...files.map((f) => `  ${f.status}: ${f.filename} (+${f.additions} / -${f.deletions})`),
     );
+  }
+
+  // Prepend AGENTS.md system prompt if provided.
+  if (agentsSystemPrompt) {
+    effectivePrompt = [agentsSystemPrompt, effectivePrompt].join('\n\n');
   }
 
   if (comments.length > 0) {
