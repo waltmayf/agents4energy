@@ -26,6 +26,8 @@ import { AgentWebhookStack } from './constructs/agentWebhookStack';
 import { 
   aws_bedrock as bedrock,
   aws_bedrockagentcore as agentcore,
+import { StringParameter } from 'aws-cdk-lib/aws-ssm';
+
   aws_iam as iam
 } from 'aws-cdk-lib'
 
@@ -264,6 +266,44 @@ const AGENTCORE_REGION = Stack.of(agentStack).region;
 
 // MyHarness now authorizes with AWS_IAM, so the browser signs InvokeHarness
 // requests with Cognito Identity Pool credentials (see web/lib/agentcore-transport.ts).
+
+// Store AgentCore runtime identifiers in SSM Parameter Store to avoid cross-stack exports.
+// Parameter names include the stack name (which encodes repo and sanitized branch) to
+// keep values isolated per sandbox.
+const ssmBasePath = `/agentcore/${Stack.of(agentStack).stackName}`;
+new StringParameter(this, 'SsmAgentcoreMemoryId', {
+  parameterName: `${ssmBasePath}/memory_id`,
+  stringValue: AGENTCORE_MEMORY_ID,
+});
+new StringParameter(this, 'SsmAgentcoreMemoryArn', {
+  parameterName: `${ssmBasePath}/memory_arn`,
+  stringValue: AGENTCORE_MEMORY_ARN,
+});
+new StringParameter(this, 'SsmAgentcoreGatewayId', {
+  parameterName: `${ssmBasePath}/gateway_id`,
+  stringValue: AGENTCORE_GATEWAY_ID,
+});
+new StringParameter(this, 'SsmAgentcoreGatewayArn', {
+  parameterName: `${ssmBasePath}/gateway_arn`,
+  stringValue: AGENTCORE_GATEWAY_ARN,
+});
+new StringParameter(this, 'SsmAgentcoreGatewayEndpoint', {
+  parameterName: `${ssmBasePath}/gateway_endpoint`,
+  stringValue: AGENTCORE_GATEWAY_ENDPOINT,
+});
+new StringParameter(this, 'SsmAgentcoreHarnessArn', {
+  parameterName: `${ssmBasePath}/harness_arn`,
+  stringValue: AGENTCORE_HARNESS_ARN,
+});
+new StringParameter(this, 'SsmAgentcoreHarnessRoleArn', {
+  parameterName: `${ssmBasePath}/harness_role_arn`,
+  stringValue: AGENTCORE_HARNESS_ROLE_ARN,
+});
+new StringParameter(this, 'SsmAgentcoreRegion', {
+  parameterName: `${ssmBasePath}/region`,
+  stringValue: AGENTCORE_REGION,
+});
+
 // Grant the pool's authenticated role permission to invoke the harness.
 //
 // Attach via a standalone Policy rather than `role.addToPrincipalPolicy(...)`:
