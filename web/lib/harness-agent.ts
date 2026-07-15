@@ -298,9 +298,11 @@ export class HarnessAgent extends AbstractAgent {
 }
 
 /**
- * Fetch all post-summary events for a session (paging through the query) and map
- * them to AG-UI messages. The Converse→AG-UI parse happens exactly once, in
- * converse-to-agui.ts.
+ * Fetch all stored events for a session (paging through the query) and map them
+ * to AG-UI messages. Returns the full conversation, including turns that predate
+ * a summarization boundary, so the transcript opens on the original user prompt
+ * rather than a mid-turn fragment. The Converse→AG-UI parse happens exactly
+ * once, in converse-to-agui.ts.
  */
 export async function loadHistory(sessionId: string): Promise<Message[]> {
   const all: StoredEvent[] = [];

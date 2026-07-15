@@ -114,16 +114,18 @@ export const handler = async (
     ),
   ]);
 
-  const summaryTs = summaryResult?.summaryTimestamp
-    ? new Date(summaryResult.summaryTimestamp)
-    : null;
-
   const events: ConversationalEvent[] = [];
 
+  // Return the FULL conversation, including turns that predate the last
+  // SUMMARIZATION record. We used to drop pre-summary events (they're captured
+  // in the summary), but that truncated the transcript at the summary boundary:
+  // the first surviving event was often a mid-turn toolResult whose toolUse had
+  // been filtered out, so the chat opened on a dangling tool card / "thinking"
+  // reasoning block instead of the original user prompt. The summary is still
+  // returned below for any consumer that wants a condensed view; rendering the
+  // real messages is what keeps the transcript coherent on reload. Events live
+  // in AgentCore memory for the configured retention window (30 days).
   for (const e of eventsOutput.events ?? []) {
-    // Skip events that predate the last summary — they're already captured in it.
-    if (summaryTs && e.eventTimestamp && e.eventTimestamp <= summaryTs) continue;
-
     for (const payload of e.payload ?? []) {
       if (!payload.conversational) continue;
       const { role, content } = payload.conversational;
