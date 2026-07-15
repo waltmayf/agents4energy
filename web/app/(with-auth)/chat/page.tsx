@@ -22,6 +22,7 @@ import {
 } from '@/components/ui/select';
 import { WrenchIcon, Loader2Icon } from 'lucide-react';
 import { listMcpToolsForServer } from '@/lib/list-mcp-tools';
+import { ToolCallRenderer } from './tool-call-renderer';
 
 type McpTool = {
   name: string;
@@ -194,6 +195,9 @@ function ChatView({
 
   return (
     <CopilotKitProvider selfManagedAgents={agentsMap}>
+      {/* Registers a wildcard tool-call renderer so tool activity (name/args/result)
+          renders as a collapsible card instead of an empty bubble. Side-effect only. */}
+      <ToolCallRenderer />
       <div className="flex flex-col h-full min-h-0">
         <div className="flex-1 min-h-0">
           <CopilotChat

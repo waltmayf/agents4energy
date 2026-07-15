@@ -45,6 +45,29 @@ function idFor(base: string, suffix: string | number): string {
   return `${base}:${suffix}`;
 }
 
+/**
+ * Split a text block into inline <reasoning>…</reasoning> segments and the
+ * remaining answer text. gpt-oss-120b emits chain-of-thought this way instead
+ * of as a separate reasoningContent block. Handles multiple/unclosed tags.
+ */
+function splitInlineReasoning(text: string): { reasoning: string[]; answer: string } {
+  if (!/<reasoning>/i.test(text)) return { reasoning: [], answer: text };
+  const reasoning: string[] = [];
+  const answer = text
+    .replace(/<reasoning>([\s\S]*?)<\/reasoning>/gi, (_m, inner) => {
+      const t = String(inner).trim();
+      if (t) reasoning.push(t);
+      return '';
+    })
+    .replace(/<reasoning>([\s\S]*)$/i, (_m, inner) => {
+      const t = String(inner).trim();
+      if (t) reasoning.push(t);
+      return '';
+    })
+    .trim();
+  return { reasoning, answer };
+}
+
 function parseBlocks(ev: StoredEvent): ContentBlock[] | null {
   if (!ev.contentJson) return null;
   try {
@@ -75,7 +98,15 @@ export function eventToMessages(ev: StoredEvent, index: number): Message[] {
 
   for (const block of blocks) {
     if (typeof block?.text === 'string' && block.text) {
-      textChunks.push(block.text);
+      // Some models (e.g. gpt-oss-120b) emit chain-of-thought inline as
+      // <reasoning>…</reasoning> inside a text block rather than as a
+      // reasoningContent block. Split those out so they render as thoughts,
+      // not as assistant prose.
+      const { reasoning, answer } = splitInlineReasoning(block.text);
+      for (const r of reasoning) {
+        out.push({ id: idFor(base, `reasoning-${seq++}`), role: 'reasoning', content: r } as Message);
+      }
+      if (answer) textChunks.push(answer);
     } else if (block?.reasoningContent?.reasoningText?.text) {
       // Reasoning renders as its own message so CopilotChat can style it.
       out.push({
