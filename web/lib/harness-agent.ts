@@ -283,7 +283,12 @@ export async function loadHistory(sessionId: string): Promise<Message[]> {
     nextToken = result.data?.nextToken;
   } while (nextToken);
 
-  // Events come back per page in memory order; the query already filters to
-  // post-summary turns. Map straight to AG-UI messages.
-  return eventsToAguiMessages(all);
+  // Events may be returned in descending order per page. Sort them chronologically
+  // (oldest first) before converting to AG-UI messages to ensure correct display order.
+  const sorted = all.sort((a, b) => {
+    const at = new Date(a.timestamp).getTime();
+    const bt = new Date(b.timestamp).getTime();
+    return at - bt;
+  });
+  return eventsToAguiMessages(sorted);
 }
