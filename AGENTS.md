@@ -30,23 +30,67 @@ When you start working on an issue, inspect the code base to check if the descri
 - Ensure the PR title is concise and follows the repo convention.
 - Add relevant labels via the GitHub UI or automation.
 
-### Web Searching
+### Web Searching with the Browser Tool
 
-When you need external information, you can use the web browser tool:
-- Formulate a clear query.
-- Summarize the relevant findings in your response.
-- Cite sources with URLs.
-- Prefer official documentation or reputable sources.
-- Avoid copying large blocks of text; extract the needed info.
+The repository includes a **browser tool** (powered by Playwright) that lets agents programmatically search the internet and extract information.
 
-**Tip:** If the information is time‑sensitive or not publicly available, consider asking the user for clarification before proceeding.
+**Typical workflow**
 
-When you need external information, you can use the web browser tool:
-- Formulate a clear query.
-- Summarize the relevant findings in your response.
-- Cite sources with URLs.
-- Prefer official documentation or reputable sources.
-- Avoid copying large blocks of text; extract the needed info.
+1. **Start a session** – `init_session` creates a named session (e.g., `searchsession`). The session persists cookies, local storage, and navigation history.
+2. **Navigate** – `navigate` loads a URL. Use a search engine (Bing, DuckDuckGo, Google) with a query parameter, e.g. `https://www.bing.com/search?q=latest+AI+advancements+July+2026`.
+3. **Wait for content** – For heavily‑JS pages you may need to wait for a selector to appear before extracting data (`wait_for_selector` or a short `sleep`).
+4. **Extract data**  
+   * `get_html` – returns the full HTML source of the current page. Good for regex‑based parsing.  
+   * `get_text` – returns the visible text for a CSS selector (or the whole page if no selector is supplied). Use selectors like `li.b_algo h2` (Bing result titles) or `article h1` on news sites.
+5. **Interact if needed** – You can `click`, `type`, or `press` keys to follow links, fill forms, or paginate.
+6. **Close the session** – `close_session` releases resources (optional; sessions are cleaned up automatically after a timeout).
+
+**Tips & gotchas**
+
+- Keep the session name at least 10 characters (the tool enforces this).  
+- Use specific selectors to avoid pulling navigation menus or ads.  
+- If a page is rendered after a network request, add a small delay (`sleep 1`) before extracting.  
+- The tool returns raw strings; you may need to post‑process (e.g., split lines, regex) to get clean URLs or titles.  
+- Remember that the browser runs headless; some sites may block automated traffic – fallback to a different search engine if you encounter a CAPTCHA.
+
+**Example (pseudo‑code for an agent)**
+
+```text
+init_session name=websearch
+navigate url=https://www.bing.com/search?q=latest+AI+advancements+July+2026
+get_text selector=li.b_algo h2   # titles of the top results
+```
+
+The extracted titles can then be summarised or used to build direct links to the articles.
+
+---
+
+### GitHub Issues & Pull Request Best Practices
+
+When working on a feature or bug:
+
+1. **Create an issue** – Write a concise title, a clear description, steps to reproduce (if applicable), and add appropriate labels (e.g., `bug`, `enhancement`, `agentcore`).
+2. **Link related work** – Mention other issues with `Related to #<num>` to create bi‑directional links.
+3. **Branch naming** – Use `feature/<short‑description>` or `bugfix/<short‑description>`; for this task we used `test/web-browser-harness-70`.
+4. **Commit messages** – Start with a verb, reference the issue (`#70`) and keep the body short. Example: `Add browser‑harness test script (#70)`.
+5. **Open a PR** – Use the GitHub CLI:
+
+   ```bash
+   gh pr create --repo waltmayf/agents4energy \
+                --base main \
+                --head <branch> \
+                --title "Test Web Browser Harness" \
+                --body "Adds a simple script to test the web browser harness using Playwright. This script can be run to fetch page titles.\n\nCloses #70"
+   ```
+
+   The `Closes #70` line ensures the issue is automatically closed when the PR merges.
+6. **PR checklist** – Verify that:
+   - Tests pass (`pnpm test:e2e` if applicable).
+   - Docs are updated (e.g., `AGENTS.md`).
+   - Labels are applied (`agentcore`, `documentation`).
+7. **Review & merge** – After approval, squash‑merge to keep a clean history.
+
+Following these conventions keeps the repository tidy and lets GitHub automatically close issues tied to PRs.
 
 
 When you start working on an issue, inspect the code base to check if they description and comments in the issue are stale.
