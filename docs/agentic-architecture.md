@@ -126,6 +126,10 @@ The chat UI restores history through the AG-UI agent, not a bespoke render path.
 
 > The `contentJson` parse happens exactly once, in the Lambda. Clients map straight from Converse blocks to their render model rather than re-parsing ambiguous flattened strings — this replaced an earlier path that parsed twice (Lambda + client) and invented a non-standard `toolResult` message part.
 
+`converse-to-agui.ts` also splits inline `<reasoning>…</reasoning>` tags out of assistant text blocks into their own `reasoning` messages (`splitInlineReasoning()`) — some models (e.g. `openai.gpt-oss-120b`) emit chain-of-thought this way instead of as a `reasoningContent` block, and without this split it renders as visible prose in the assistant bubble.
+
+Tool activity (name, arguments, result) renders through CopilotKit's wildcard tool-call renderer, registered by `<ToolCallRenderer />` (`web/app/(with-auth)/chat/tool-call-renderer.tsx`, mounted inside `<CopilotKitProvider>` in `chat/page.tsx`) via `useDefaultRenderTool`. Without a registered renderer, `useRenderToolCall()` returns `null` for every tool call and CopilotKit's `AssistantMessage` renders nothing for it — standalone `role: "tool"` result messages are never rendered directly as bubbles; they're only consumed as the paired result of the matching assistant `toolCall` (matched by `toolCallId`) inside the renderer.
+
 The separate `/chat-handler` page (the server-side AG-UI runtime flow — see [ag-ui-handler-pattern.md](ag-ui-handler-pattern.md)) still consumes the flattened `text` field via `use-initial-messages.ts`.
 
 ---
