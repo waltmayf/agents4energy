@@ -27,7 +27,7 @@ export function verifyJiraSharedSecret(providedSecret: string | undefined, expec
   return timingSafeEqual(expectedBuf, actualBuf);
 }
 
-const MENTION_RE = /@webhook-agent\b/i;
+const MENTION_RE = /@agentcore\b/i;
 
 // Returns the prompt text following the trigger mention, or null if the
 // mention isn't present. A distinct mention phrase (rather than reusing

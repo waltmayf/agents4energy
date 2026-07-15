@@ -10,7 +10,7 @@ const JIRA_WEBHOOK_SECRET_ARN = process.env.JIRA_WEBHOOK_SECRET_ARN ?? '';
 const STATE_MACHINE_ARN = process.env.STATE_MACHINE_ARN ?? '';
 
 // Applying this label to a GitHub issue/PR triggers the agent, exactly like an
-// `@webhook-agent` comment does — but the Step Function additionally manages the
+// `@agentcore` comment does — but the Step Function additionally manages the
 // `agent-working` / `agent-error` labels around the run (see issue #56 and
 // docs/webhook-stepfunction-integration.md "Label triggers").
 const TRIGGER_LABEL = 'agentcore';
@@ -77,7 +77,7 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
 
   if (isGithub) {
     const githubEvent = headers['x-github-event'];
-    // Two GitHub triggers: an `@webhook-agent` mention in a new comment, or the
+    // Two GitHub triggers: an `@agentcore` mention in a new comment, or the
     // `agentcore` label applied to an issue/PR. Everything else is ignored.
     if (githubEvent !== 'issue_comment' && githubEvent !== 'issues' && githubEvent !== 'pull_request') {
       return json(200, { skipped: `unsupported github event: ${githubEvent}` });
@@ -133,7 +133,7 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
       return json(202, { started: runId });
     }
 
-    // ── Comment-mention trigger: `@webhook-agent <prompt>` ──────────────────
+    // ── Comment-mention trigger: `@agentcore <prompt>` ──────────────────
     const payload: GithubIssueCommentPayload = JSON.parse(rawBody);
     if (payload.action !== 'created') return json(200, { skipped: `action=${payload.action}` });
 
