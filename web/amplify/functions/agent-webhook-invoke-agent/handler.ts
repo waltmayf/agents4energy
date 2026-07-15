@@ -201,6 +201,10 @@ async function authenticateGitInHarnessSession(opts: {
     `  ln -sf "/usr/local/lib/node-v${NODE_VERSION}/bin/npx" /usr/local/bin/npx`,
     '  rm -f /tmp/node.tar.gz',
     'fi',
+    // Install pnpm if missing
+    "if ! command -v pnpm >/dev/null 2>&1; then",
+    "  npm i -g pnpm@latest",
+    "fi",
     `printf '%s' ${JSON.stringify(githubToken)} | gh auth login --hostname github.com --with-token`,
     'gh auth setup-git',
     // Emit a non-secret confirmation line so the debug log shows the step ran.
