@@ -184,23 +184,6 @@ function ChatView({
     })),
   };
 
-  // Poll AgentCore memory for new messages (read‑only webhook sessions)
-  const polledMessages = useSessionMessagePolling(sessionIdRef.current, messages);
-  const mergedMessages = useMemo(() => {
-    const map = new Map<string, UIMessage>();
-    // Combine polled and live messages, letting live messages overwrite duplicates.
-    [...polledMessages, ...messages].forEach((m) => {
-      map.set(m.id, m);
-    });
-    const combined = Array.from(map.values());
-    // Sort by createdAt if present to ensure correct chronological order.
-    combined.sort((a, b) => {
-      const aTime = (a as any).createdAt ? new Date((a as any).createdAt) : new Date();
-      const bTime = (b as any).createdAt ? new Date((b as any).createdAt) : new Date();
-      return aTime.getTime() - bTime.getTime();
-    });
-    return combined;
-  }, [polledMessages, messages]);
   // One HarnessAgent per session. threadId === AgentCore session id, so
   // CopilotChat resumes history via connect() and streams live turns via run().
   const harnessAgent = useMemo(
