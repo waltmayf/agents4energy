@@ -20,6 +20,12 @@ import { Observable, type Subscriber } from 'rxjs';
 
 import outputs from '../amplify_outputs.json';
 import { eventsToAguiMessages, type StoredEvent } from './converse-to-agui';
+import {
+  createHarnessStreamState,
+  translateHarnessStreamEvent,
+  finalizeHarnessStream,
+  type HarnessStreamEvent,
+} from './harness-stream-to-agui';
 
 const custom = (outputs as { custom?: { agentcore_harness_arn?: string; agentcore_region?: string } }).custom;
 export const HARNESS_ARN = custom?.agentcore_harness_arn as string;
@@ -180,31 +186,29 @@ export class HarnessAgent extends AbstractAgent {
             { abortSignal: abort.signal },
           );
 
-          const messageId = crypto.randomUUID();
-          let started = false;
-
+          // Translate the harness Converse stream (text + toolUse + toolResult)
+          // into AG-UI events. Tool activity is handled here too — otherwise it
+          // only shows up after a reload rebuilds it from memory.
+          const streamState = createHarnessStreamState();
           for await (const event of response.stream ?? []) {
             if (cancelled) break;
             if (event.validationException || event.internalServerException || event.runtimeClientError) {
               const ex = event.validationException ?? event.internalServerException ?? event.runtimeClientError;
               throw new Error(ex?.message ?? 'Harness stream exception');
             }
-            const delta = event.contentBlockDelta?.delta?.text;
-            if (delta) {
-              if (!started) {
-                subscriber.next({
-                  type: EventType.TEXT_MESSAGE_START,
-                  messageId,
-                  role: 'assistant',
-                } as BaseEvent);
-                started = true;
-              }
-              subscriber.next({ type: EventType.TEXT_MESSAGE_CONTENT, messageId, delta } as BaseEvent);
+            for (const aguiEvent of translateHarnessStreamEvent(
+              event as HarnessStreamEvent,
+              streamState,
+              () => crypto.randomUUID(),
+            )) {
+              subscriber.next(aguiEvent);
             }
           }
 
-          if (started) {
-            subscriber.next({ type: EventType.TEXT_MESSAGE_END, messageId } as BaseEvent);
+          if (!cancelled) {
+            for (const aguiEvent of finalizeHarnessStream(streamState)) {
+              subscriber.next(aguiEvent);
+            }
           }
           subscriber.next({ type: EventType.RUN_FINISHED, threadId: sessionId, runId } as BaseEvent);
           subscriber.complete();
@@ -225,6 +229,38 @@ export class HarnessAgent extends AbstractAgent {
         abort.abort();
       };
     });
+  }
+
+  /**
+   * Poll-friendly history refresh. Loads the session's persisted history and,
+   * when it contains more messages than are currently shown, replaces the
+   * transcript via setMessages — which fires onMessagesChanged on CopilotChat's
+   * subscriber and re-renders live, no page reload.
+   *
+   * This is what makes externally-written turns appear as they arrive: a webhook
+   * run (or another tab) writes to the same AgentCore session; connect() only
+   * runs on (re)mount, so without polling those messages surface only on reload.
+   *
+   * Guards keep it safe to run on an interval:
+   *  - never applies while a live local turn is streaming (isRunning), so it
+   *    can't clobber optimistic/streamed messages not yet persisted to memory.
+   *  - only grows the transcript (applies when the fetched set is larger), so a
+   *    persistence lag that momentarily returns fewer events can't wipe the
+   *    messages the user is currently looking at.
+   *
+   * Returns the number of messages shown afterwards, for idle-backoff bookkeeping.
+   */
+  async refreshHistory(): Promise<number> {
+    if (this.isRunning) return this.messages.length;
+    const sessionId = this.threadId;
+    if (!sessionId) return this.messages.length;
+
+    const history = await loadHistory(sessionId);
+    // Re-check isRunning: a local turn may have started during the async fetch.
+    if (!this.isRunning && history.length > this.messages.length) {
+      this.setMessages(history);
+    }
+    return this.messages.length;
   }
 
   /**

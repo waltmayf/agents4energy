@@ -122,15 +122,15 @@ The harness reads relevant memory automatically before each inference call and w
 
 The Amplify Lambda `list-session-messages` queries `ListEvents` on the memory ARN for a given session ID and parses each stored harness payload **once** into two fields per event: `text` (flattened plain text, for simple consumers) and `contentJson` (the full Bedrock Converse `ContentBlock[]` as a JSON string — text, `toolUse`, `toolResult`, `reasoningContent`).
 
-The chat UI restores history through the AG-UI agent, not a bespoke render path. When `<CopilotChat>` mounts with an explicit `threadId` (the AgentCore session id), it calls `HarnessAgent.connect()`, which fetches those events, maps `contentJson` to role-discriminated AG-UI `Message[]` via `web/lib/converse-to-agui.ts` (assistant text + `toolCalls`, `tool` result messages, `reasoning` messages), and emits a single `MESSAGES_SNAPSHOT`. CopilotKit applies the snapshot to populate the transcript. Because the thread id *is* the AgentCore session id, live streaming and history share one identifier — no polling/merge step.
+The chat UI restores history through the AG-UI agent, not a bespoke render path. When `<CopilotChat>` mounts with an explicit `threadId` (the AgentCore session id), it calls `HarnessAgent.connect()`, which fetches those events, maps `contentJson` to role-discriminated AG-UI `Message[]` via `web/lib/converse-to-agui.ts` (assistant text + `toolCalls`, `tool` result messages, `reasoning` messages), and emits a single `MESSAGES_SNAPSHOT`. CopilotKit applies the snapshot to populate the transcript. Because the thread id *is* the AgentCore session id, live streaming and history share one identifier.
+
+`connect()` only runs when the thread (re)mounts, so turns written to the session **after** load — e.g. by a webhook harness run on the same session, or a second tab — would otherwise appear only on reload. `web/app/(with-auth)/chat/use-session-message-polling.ts` closes that gap: it polls `HarnessAgent.refreshHistory()`, which re-fetches history and, when it has grown, calls the agent's `setMessages()` to update the transcript live (CopilotKit re-renders off the resulting `onMessagesChanged`). Polling pauses on a hidden tab, backs off to a slow interval once a session goes quiet, no-ops while a local turn is streaming, and only grows the transcript — so it never clobbers optimistic/streamed messages. This is what makes the webhook deep link (`/chat?sessionId=<runId>`) show the agent working in near-real-time (issue #63).
 
 > The `contentJson` parse happens exactly once, in the Lambda. Clients map straight from Converse blocks to their render model rather than re-parsing ambiguous flattened strings — this replaced an earlier path that parsed twice (Lambda + client) and invented a non-standard `toolResult` message part.
 
 `converse-to-agui.ts` also splits inline `<reasoning>…</reasoning>` tags out of assistant text blocks into their own `reasoning` messages (`splitInlineReasoning()`) — some models (e.g. `openai.gpt-oss-120b`) emit chain-of-thought this way instead of as a `reasoningContent` block, and without this split it renders as visible prose in the assistant bubble.
 
 Tool activity (name, arguments, result) renders through CopilotKit's wildcard tool-call renderer, registered by `<ToolCallRenderer />` (`web/app/(with-auth)/chat/tool-call-renderer.tsx`, mounted inside `<CopilotKitProvider>` in `chat/page.tsx`) via `useDefaultRenderTool`. Without a registered renderer, `useRenderToolCall()` returns `null` for every tool call and CopilotKit's `AssistantMessage` renders nothing for it — standalone `role: "tool"` result messages are never rendered directly as bubbles; they're only consumed as the paired result of the matching assistant `toolCall` (matched by `toolCallId`) inside the renderer.
-
-The separate `/chat-handler` page (the server-side AG-UI runtime flow — see [ag-ui-handler-pattern.md](ag-ui-handler-pattern.md)) still consumes the flattened `text` field via `use-initial-messages.ts`.
 
 ---
 
@@ -264,4 +264,17 @@ converse-to-agui.ts: contentJson (Converse ContentBlock[]) → AG-UI Message[]
        │
        ▼
 emit MESSAGES_SNAPSHOT → CopilotKit populates transcript
+```
+
+### Live updates (after load)
+
+```
+use-session-message-polling.ts (interval, paused when tab hidden)
+       │
+       ▼
+HarnessAgent.refreshHistory()  — skipped while a local turn streams
+  loadHistory() → listSessionMessages query (same path as connect)
+       │
+       ▼ (only if fetched message count grew)
+setMessages(history) → onMessagesChanged → CopilotKit re-renders live
 ```

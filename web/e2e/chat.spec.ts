@@ -42,6 +42,47 @@ test.describe('Chat page (AG-UI / CopilotKit)', () => {
     });
   });
 
+  test('new messages written to the session appear live without a reload', async ({ page, context }) => {
+    // Establish a turn in this tab so the session exists in AgentCore memory.
+    const textarea = page.getByTestId('copilot-chat-textarea');
+    await textarea.fill('Output only this 5-character code, nothing else: A B C 1 2 (remove the spaces)');
+    await textarea.press('Enter');
+    await expect(page.getByTestId('copilot-assistant-message').last()).toContainText('ABC12', {
+      timeout: 60_000,
+    });
+
+    // The XYZ99 sentinel must not already be present in this tab.
+    const sessionUrl = page.url();
+    expect(sessionUrl).toMatch(/[?&]sessionId=/);
+    await expect(page.getByText('XYZ99')).toHaveCount(0);
+
+    // Simulate an external writer (e.g. a webhook harness run) on the SAME
+    // session by opening it in a second tab and sending a distinct turn. This
+    // writes new turns to the shared AgentCore session without touching the
+    // first tab.
+    const writer = await context.newPage();
+    await writer.goto(sessionUrl);
+    await expect(writer.getByRole('button', { name: 'Sign in' })).not.toBeVisible();
+    const writerBox = writer.getByTestId('copilot-chat-textarea');
+    await writerBox.fill('Output only this 5-character code, nothing else: X Y Z 9 9 (remove the spaces)');
+    await writerBox.press('Enter');
+    await expect(writer.getByTestId('copilot-assistant-message').last()).toContainText('XYZ99', {
+      timeout: 60_000,
+    });
+    await writer.close();
+
+    // The first tab must pick up the externally-written XYZ99 turn via polling —
+    // WITHOUT any navigation or reload. This is the regression guard: history
+    // only reloads on (re)mount, so the sentinel surfacing here proves polling
+    // re-fetches AgentCore memory and pushes it into the live transcript. The
+    // generous timeout absorbs memory-persistence lag plus the poll interval.
+    // (Asserted anywhere in the transcript, not on `.last()`, because stored
+    // history can come back out of send-order — see the note below.)
+    await expect(page.getByTestId('copilot-assistant-message').filter({ hasText: 'XYZ99' })).toHaveCount(1, {
+      timeout: 60_000,
+    });
+  });
+
   test('conversation history is restored on reload', async ({ page }) => {
     const textarea = page.getByTestId('copilot-chat-textarea');
     await textarea.fill('Output only this 5-character code, nothing else: Z X Q 4 2 (remove the spaces)');

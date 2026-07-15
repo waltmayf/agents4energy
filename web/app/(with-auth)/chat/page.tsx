@@ -2,6 +2,7 @@
 import { CopilotKitProvider, CopilotChat } from '@copilotkit/react-core/v2';
 import { HarnessAgent, type HarnessAgentConfig } from '@/lib/harness-agent';
 import { useChatSession } from './use-chat-session';
+import { useSessionMessagePolling } from './use-session-message-polling';
 import { useAgents } from './use-agents';
 import { useMemo, useRef, useState, useCallback } from 'react';
 import type { AgentOption, McpServerInfo } from './use-agents';
@@ -192,6 +193,10 @@ function ChatView({
   );
 
   const agentsMap = useMemo(() => ({ default: harnessAgent }), [harnessAgent]);
+
+  // Poll AgentCore memory so turns written elsewhere (e.g. a webhook run on the
+  // same session) render live, without a page reload. See issue #63.
+  useSessionMessagePolling(harnessAgent);
 
   return (
     <CopilotKitProvider selfManagedAgents={agentsMap}>

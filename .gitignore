@@ -3,6 +3,7 @@
 tmp
 .claude
 .mcp.json
+CLAUDE.private.md
 
 # dependencies
 node_modules
