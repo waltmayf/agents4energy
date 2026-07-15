@@ -133,6 +133,15 @@ async function execInHarness(opts: {
 // Pinned so a `gh` release doesn't change behavior under us; bump deliberately.
 const GH_VERSION = '2.96.0';
 
+// Node.js is needed for the agent to do development work (install deps, run
+// builds/tests). Like `gh`, it isn't in the harness image (Amazon Linux 2023)
+// and is installed on every run from the official pre-built tarball, extracted
+// with Python's stdlib `tarfile` (`tar` isn't present in the image either). The
+// `.tar.gz` build is used rather than the default `.tar.xz` so extraction never
+// depends on the container having liblzma. Pinned to the current LTS; bump
+// deliberately.
+const NODE_VERSION = '22.17.0';
+
 // Authenticate `git` and `gh` for HTTPS pushes / PR creation in the harness
 // session, before the agent's turn, using the GitHub App installation token
 // minted by agent-webhook-post-comment.
@@ -178,10 +187,24 @@ async function authenticateGitInHarnessSession(opts: {
     '  chmod +x /usr/local/bin/gh',
     `  rm -rf /tmp/gh.tar.gz "/tmp/gh_${GH_VERSION}_linux_\${GH_ARCH}"`,
     'fi',
+    // Node.js — needed for the agent's development work (npm/pnpm install, build,
+    // test). Node's arch names are arm64/x64; the tarball unpacks to a versioned
+    // dir whose bin/ is symlinked onto PATH so `node`/`npm`/`npx` resolve.
+    'if ! command -v node >/dev/null 2>&1; then',
+    '  NODE_ARCH=$(case "$(uname -m)" in aarch64) echo arm64 ;; x86_64) echo x64 ;; *) uname -m ;; esac)',
+    `  curl -fsSL -o /tmp/node.tar.gz "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-\${NODE_ARCH}.tar.gz"`,
+    `  python3 -c "import tarfile; tarfile.open('/tmp/node.tar.gz').extractall('/tmp')"`,
+    `  rm -rf "/usr/local/lib/node-v${NODE_VERSION}"`,
+    `  mv "/tmp/node-v${NODE_VERSION}-linux-\${NODE_ARCH}" "/usr/local/lib/node-v${NODE_VERSION}"`,
+    `  ln -sf "/usr/local/lib/node-v${NODE_VERSION}/bin/node" /usr/local/bin/node`,
+    `  ln -sf "/usr/local/lib/node-v${NODE_VERSION}/bin/npm" /usr/local/bin/npm`,
+    `  ln -sf "/usr/local/lib/node-v${NODE_VERSION}/bin/npx" /usr/local/bin/npx`,
+    '  rm -f /tmp/node.tar.gz',
+    'fi',
     `printf '%s' ${JSON.stringify(githubToken)} | gh auth login --hostname github.com --with-token`,
     'gh auth setup-git',
     // Emit a non-secret confirmation line so the debug log shows the step ran.
-    'echo "git/gh credential setup configured for github.com"',
+    'echo "git/gh credential setup configured for github.com; node $(node --version) available"',
   ].join('\n');
 
   return execInHarness({ sessionId, command, timeoutSeconds: 90 });
