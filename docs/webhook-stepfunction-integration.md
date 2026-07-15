@@ -173,6 +173,10 @@ The receiver Lambda builds the initial `prompt` from whatever the triggering web
 
 This is best-effort: a GitHub API failure here is logged (to the run's CloudWatch stream and this Lambda's own log group) and swallowed — the run continues with the receiver's original title+body prompt rather than failing the whole execution over a context-enrichment call.
 
+### Rendering the injected blocks in the chat UI (issue #120)
+
+The AGENTS.md system prompt (wrapped in `<agents_md>`) and the `<github_context>`/`<github_access>` blocks above all land inside the harness invoke's single `Role: user` turn — Bedrock's Converse API requires the first turn to be `user`, so the model-facing role can't change. The chat transcript (`/chat`) still renders them readably: `web/lib/split-injected-blocks.ts` splits these three tagged blocks out of the stored message text, and `web/app/(with-auth)/chat/webhook-user-message.tsx` (wired in as `<CopilotChat>`'s `messageView.userMessage` slot) renders each split block with the assistant bubble's Markdown pipeline (`MessageResponse`/Streamdown), leaving only the actual human/webhook request text in the plain user bubble. Non-webhook messages have none of these tags, so the split is a no-op and they render exactly as before.
+
 ### Git access: harness exec (same session as the agent)
 
 The harness runtime has its own shell but no `_prepare_workspace()` like the `AgUiHandler` runtime has. To give a GitHub run's agent write access, the git-auth Lambda (`agent-webhook-invoke-agent`, step 2) runs a setup command in the harness's runtime session via the **harness-exec API** — the SDK's `InvokeAgentRuntimeCommand` (`POST /runtimes/{harnessArn}/commands`) — **before** the native `invokeHarness` task, reusing the same `runtimeSessionId` (the Step Function's `runId`) for both so they land in the same container. (Verified empirically: a marker file written by an exec call is readable by the agent's code-interpreter tool in the same session.)

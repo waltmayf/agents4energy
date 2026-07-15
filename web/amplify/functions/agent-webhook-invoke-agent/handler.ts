@@ -297,7 +297,12 @@ async function buildGithubContextBlock(repo: string, issueNumber: number, token:
 // invokeHarness task.
 export const handler = async (input: PrepareInput): Promise<PrepareOutput> => {
   const { runId, source, prompt, repo, issueNumber, githubToken, agentsSystemPrompt, logGroupName, logStreamName } = input;
-  const promptWithAgentsMd = agentsSystemPrompt ? [agentsSystemPrompt, prompt].join('\n\n') : prompt;
+  // Wrapped in <agents_md> (matching <github_context>/<github_access> below) so
+  // the chat UI can split it out of the first user turn and render it with
+  // assistant-message Markdown styling instead of as a plain-text wall (#120).
+  const promptWithAgentsMd = agentsSystemPrompt
+    ? [`<agents_md>\n${agentsSystemPrompt}\n</agents_md>`, prompt].join('\n\n')
+    : prompt;
 
   if (source !== 'github' || !githubToken) {
     // Jira (or a GitHub run with no token): nothing to authenticate, pass the

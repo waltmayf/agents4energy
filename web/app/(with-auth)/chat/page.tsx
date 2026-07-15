@@ -24,6 +24,7 @@ import {
 import { WrenchIcon, Loader2Icon } from 'lucide-react';
 import { listMcpToolsForServer } from '@/lib/list-mcp-tools';
 import { ToolCallRenderer } from './tool-call-renderer';
+import { WebhookAwareUserMessage } from './webhook-user-message';
 
 type McpTool = {
   name: string;
@@ -208,6 +209,7 @@ function ChatView({
           <CopilotChat
             agentId="default"
             threadId={sessionId}
+            messageView={{ userMessage: WebhookAwareUserMessage }}
             labels={{
               chatInputPlaceholder: 'Type a message…',
             }}
