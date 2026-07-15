@@ -19,11 +19,27 @@ When you start working on an issue, inspect the code base to check if the descri
 **Best practices for PRs:**
 - Use the GitHub CLI (`gh pr create`) to open a pull request.
 - In the PR body, include a closing reference like `Closes #<issue>` to automatically close the related issue when the PR merges.
+- Example PR body:
+  ```
+  Implement feature X.
+  
+  Closes #87
+  ```
+
 - Reference related issues using `Relates to #<issue>` if appropriate.
 - Ensure the PR title is concise and follows the repo convention.
 - Add relevant labels via the GitHub UI or automation.
 
 ### Web Searching
+
+When you need external information, you can use the web browser tool:
+- Formulate a clear query.
+- Summarize the relevant findings in your response.
+- Cite sources with URLs.
+- Prefer official documentation or reputable sources.
+- Avoid copying large blocks of text; extract the needed info.
+
+**Tip:** If the information is time‑sensitive or not publicly available, consider asking the user for clarification before proceeding.
 
 When you need external information, you can use the web browser tool:
 - Formulate a clear query.
