@@ -25,6 +25,8 @@ export interface StoredEvent {
   text?: string | null;
   /** JSON string of the Converse ContentBlock[] for this message. */
   contentJson?: string | null;
+  /** ISO timestamp of the event (used to sort history chronologically). */
+  timestamp?: string | null;
 }
 
 /** A loosely-typed Bedrock Converse content block (text / toolUse / toolResult / reasoning). */

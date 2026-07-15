@@ -321,10 +321,11 @@ export async function loadHistory(sessionId: string): Promise<Message[]> {
 
   // Events may be returned in descending order per page. Sort them chronologically
   // (oldest first) before converting to AG-UI messages to ensure correct display order.
-  const sorted = all.sort((a, b) => {
-    const at = new Date(a.timestamp).getTime();
-    const bt = new Date(b.timestamp).getTime();
-    return at - bt;
-  });
+  // A missing/unparseable timestamp sorts to the front (treated as oldest).
+  const ts = (e: StoredEvent): number => {
+    const t = e.timestamp ? new Date(e.timestamp).getTime() : 0;
+    return Number.isNaN(t) ? 0 : t;
+  };
+  const sorted = all.sort((a, b) => ts(a) - ts(b));
   return eventsToAguiMessages(sorted);
 }
