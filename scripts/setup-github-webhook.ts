@@ -34,7 +34,7 @@
  *   A deploy that provisioned the webhook stack (agent_webhook_url present in
  *     amplify_outputs.json).
  *
- * Mention the agent with `@webhook-agent <request>` on an issue/PR comment to
+ * Mention the agent with `@agentcore <request>` on an issue/PR comment to
  * trigger it.
  */
 
@@ -168,7 +168,7 @@ const configFields = [
   '-f', 'config[insecure_ssl]=0',
 ];
 
-// issue_comment → `@webhook-agent` mention; issues/pull_request → `agentcore`
+// issue_comment → `@agentcore` mention; issues/pull_request → `agentcore`
 // label trigger (issue #56). All three route to the same receiver Lambda.
 const eventFields = [
   '-f', 'events[]=issue_comment',
@@ -216,7 +216,7 @@ ${'─'.repeat(72)}
 Webhook configured for ${repo}.
 
 Trigger the API Gateway → Step Function → AgentCore Harness pipeline by either:
-  • commenting "@webhook-agent <your request>" on any issue or PR, or
+  • commenting "@agentcore <your request>" on any issue or PR, or
   • applying the "agentcore" label to an issue or PR.
 See docs/webhook-stepfunction-integration.md.
 ${'─'.repeat(72)}

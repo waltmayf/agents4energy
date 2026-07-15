@@ -17,7 +17,7 @@ GitHub issue_comment webhook          Jira comment_created webhook
                     ▼
       agent-webhook-receiver Lambda
         • verifies the signature/secret (per source)
-        • detects EITHER: the "@webhook-agent" comment mention (issue_comment),
+        • detects EITHER: the "@agentcore" comment mention (issue_comment),
           OR the "agentcore" label applied to an issue/PR (issues/pull_request)
         • loop prevention: ignores Bot / *[bot] senders (GitHub)
         • StartExecution (fire-and-forget — returns 202 immediately,
@@ -64,7 +64,7 @@ GitHub issue_comment webhook          Jira comment_created webhook
 
 ## Label triggers (issue #56)
 
-Alongside the `@webhook-agent` comment mention, applying the **`agentcore`** label to a GitHub issue or PR starts the same pipeline. The receiver handles GitHub `issues` and `pull_request` webhook events with `action == "labeled"` and `label.name == "agentcore"`; the prompt is built from the issue/PR title and body. Label-applied-by-bot events are ignored (same loop-prevention as comments).
+Alongside the `@agentcore` comment mention, applying the **`agentcore`** label to a GitHub issue or PR starts the same pipeline. The receiver handles GitHub `issues` and `pull_request` webhook events with `action == "labeled"` and `label.name == "agentcore"`; the prompt is built from the issue/PR title and body. Label-applied-by-bot events are ignored (same loop-prevention as comments).
 
 The receiver stamps each execution's input with `trigger: "label" | "comment"`. Only `label` runs get the label bookkeeping the issue asked for:
 
@@ -103,7 +103,7 @@ The Actions-based flow (`.github/workflows/agent-mention.yml`) already has a cor
 1. **Jira has no Actions-runner equivalent** — there's no CI system already wired to Jira comments, so a webhook receiver is the only option there.
 2. **A live CloudWatch Logs Live Tail link** is a materially different "watch it work" UX than the AppSync `/chat-handler` live-chat link the Actions flow posts, and this issue asked for it specifically.
 
-To avoid both paths firing on the same GitHub comment, they use **distinct trigger phrases**: Actions matches `@agent[-<slug>]`, this pipeline matches `@webhook-agent`. Retiring the Actions flow in favor of this one — once Jira parity isn't the only reason for it to exist — is a follow-up decision, not made here.
+To avoid both paths firing on the same GitHub comment, they use **distinct trigger phrases**: Actions matches `@agent[-<slug>]`, this pipeline matches `@agentcore`. Retiring the Actions flow in favor of this one — once Jira parity isn't the only reason for it to exist — is a follow-up decision, not made here.
 
 ## Signature verification
 
@@ -229,8 +229,8 @@ Re-running it just updates the existing hook in place (matched by payload URL) �
 
 - **Jira**: Settings → System → WebHooks → Create a WebHook. URL = `<agent_webhook_url>?source=jira&secret=<value stored at JIRA_WEBHOOK_SECRET_ARN>`, event = "Comment created".
 
-Mention the agent with `@webhook-agent <your request>` in a GitHub issue/PR comment or a Jira issue comment. Or, on GitHub, apply the **`agentcore`** label to an issue/PR (see "Label triggers" above).
+Mention the agent with `@agentcore <your request>` in a GitHub issue/PR comment or a Jira issue comment. Or, on GitHub, apply the **`agentcore`** label to an issue/PR (see "Label triggers" above).
 
 ## Loop prevention
 
-GitHub: the receiver ignores comments from `sender.type === 'Bot'` or logins ending in `[bot]` — same check as `scripts/github-agent-invoke.ts`. Jira has no bot-sender concept in its webhook payload; since the final-comment poster doesn't itself match `@webhook-agent`, there's no reply loop regardless.
+GitHub: the receiver ignores comments from `sender.type === 'Bot'` or logins ending in `[bot]` — same check as `scripts/github-agent-invoke.ts`. Jira has no bot-sender concept in its webhook payload; since the final-comment poster doesn't itself match `@agentcore`, there's no reply loop regardless.
