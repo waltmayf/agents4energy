@@ -207,16 +207,15 @@ export const handler = async (input: PostCommentInput): Promise<PostCommentOutpu
   }
 
   // Final stage — post the agent's response as a follow-up comment.
-  // Success path: join the text blocks of the native invokeHarness result's
+  // Success path: use only the last text block of the native invokeHarness result's
   // Message.Content (the integration omits tool-use/reasoning blocks, so this
   // can be empty). Failure path: responseText carries the error cause.
-  const joinedContent = (input.responseContent ?? [])
+  const lastBlockText = (input.responseContent ?? [])
+    .filter((block) => block?.Text)
     .map((block) => block?.Text ?? '')
-    .filter(Boolean)
-    .join('\n')
-    .trim();
+    .pop();
   const responseText = input.responseText
-    ?? (joinedContent || '_The agent finished but produced no text response (it may have ended on a tool action). See the CloudWatch logs linked above._');
+    ?? (lastBlockText?.trim() || '_The agent finished but produced no text response (it may have ended on a tool action). See the CloudWatch logs linked above._');
   if (input.source === 'github') {
     if (!input.repo || input.issueNumber === undefined) throw new Error('repo/issueNumber required for github source');
     const { token } = await postGithubComment(input.repo, input.issueNumber, responseText);
