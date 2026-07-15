@@ -1,5 +1,7 @@
 # AgentCore Wire Protocol Investigation
 
+> **Update (superseded in part):** The chat UI no longer uses the Vercel AI SDK or a `ChatTransport`. The binary-event-stream finding below still holds — the harness only emits `vnd.amazon.eventstream` — but the client-side adapter that consumes it is now `web/lib/harness-agent.ts` (`HarnessAgent`, an AG-UI `AbstractAgent` rendered by CopilotKit), not `agentcore-transport.ts`. The translation moved from "binary stream → AI SDK `UIMessageChunk`" to "binary stream → AG-UI events." See [agentic-architecture.md](agentic-architecture.md).
+
 ## Question
 
 Can the AgentCore harness be configured to emit a client-facing wire format (e.g. OpenAI-compatible SSE) that the Vercel AI SDK understands natively, eliminating the custom `ChatTransport` in `web/lib/agentcore-transport.ts`?

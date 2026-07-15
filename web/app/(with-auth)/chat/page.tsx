@@ -1,35 +1,9 @@
 'use client';
-import { useChat } from '@ai-sdk/react';
-import { useSessionMessagePolling } from './use-session-message-polling';
-import { HarnessChatTransport } from '@/lib/agentcore-transport';
+import { CopilotKitProvider, CopilotChat } from '@copilotkit/react-core/v2';
+import { HarnessAgent, type HarnessAgentConfig } from '@/lib/harness-agent';
 import { useChatSession } from './use-chat-session';
-import { useInitialMessages } from './use-initial-messages';
 import { useAgents } from './use-agents';
 import { useMemo, useRef, useState, useCallback } from 'react';
-import type { UIMessage } from 'ai';
-import {
-  Conversation,
-  ConversationContent,
-  ConversationEmptyState,
-  ConversationScrollButton,
-} from '@/components/ai-elements/conversation';
-import {
-  Message,
-  MessageContent,
-  MessageResponse,
-} from '@/components/ai-elements/message';
-import {
-  PromptInput,
-  PromptInputTextarea,
-  PromptInputFooter,
-  PromptInputTools,
-  PromptInputSubmit,
-  PromptInputSelect,
-  PromptInputSelectTrigger,
-  PromptInputSelectContent,
-  PromptInputSelectItem,
-} from '@/components/ai-elements/prompt-input';
-import { Shimmer } from '@/components/ai-elements/shimmer';
 import type { AgentOption, McpServerInfo } from './use-agents';
 import { Button } from '@/components/ui/button';
 import {
@@ -39,8 +13,16 @@ import {
   DialogTitle,
   DialogFooter,
 } from '@/components/ui/dialog';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import { WrenchIcon, Loader2Icon } from 'lucide-react';
 import { listMcpToolsForServer } from '@/lib/list-mcp-tools';
+import { ToolCallRenderer } from './tool-call-renderer';
 
 type McpTool = {
   name: string;
@@ -170,54 +152,37 @@ function AgentToolsDialog({
 }
 
 function ChatView({
-  sessionIdRef,
-  initialMessages,
+  sessionId,
   selectedAgent,
   agents,
   agentId,
   onAgentChange,
 }: {
-  sessionIdRef: React.RefObject<string | null>;
-  initialMessages: UIMessage[];
+  sessionId: string;
   selectedAgent: AgentOption | undefined;
   agents: AgentOption[];
   agentId: string | null;
   onAgentChange: (id: string | null) => void;
 }) {
-  const agentConfigRef = useRef({ selectedAgent });
-  agentConfigRef.current = { selectedAgent };
   const [toolsDialogOpen, setToolsDialogOpen] = useState(false);
 
-  const transport = useMemo(
-    () =>
-      new HarnessChatTransport({
-        getSessionId: () => sessionIdRef.current,
-        getAgentConfig: () => {
-          const { selectedAgent } = agentConfigRef.current;
-          return {
-            agentId: selectedAgent?.id ?? null,
-            systemPromptText: selectedAgent?.systemPromptText ?? null,
-            modelId: selectedAgent?.modelId ?? null,
-            mcpServers: selectedAgent?.mcpServers.map((s) => ({
-              name: s.name,
-              url: s.url,
-              headers: Object.fromEntries(
-                (s.headers ?? [])
-                  .filter((h): h is { key: string; value: string } => !!h.key && !!h.value)
-                  .map((h) => [h.key, h.value]),
-              ),
-            })),
-          };
-        },
-      }),
-    [sessionIdRef],
-  );
-
-  const { messages, sendMessage, status, stop, error } = useChat({
-    transport,
-    messages: initialMessages,
-    onError: (err) => console.error('[useChat] error:', err),
-  });
+  // Keep the latest selected agent readable from the agent's config callback
+  // without recreating the HarnessAgent (which would drop the connection).
+  const agentConfigRef = useRef<HarnessAgentConfig>({});
+  agentConfigRef.current = {
+    agentId: selectedAgent?.id ?? null,
+    systemPromptText: selectedAgent?.systemPromptText ?? null,
+    modelId: selectedAgent?.modelId ?? null,
+    mcpServers: selectedAgent?.mcpServers.map((s) => ({
+      name: s.name,
+      url: s.url,
+      headers: Object.fromEntries(
+        (s.headers ?? [])
+          .filter((h): h is { key: string; value: string } => !!h.key && !!h.value)
+          .map((h) => [h.key, h.value]),
+      ),
+    })),
+  };
 
   // Poll AgentCore memory for new messages (read‑only webhook sessions)
   const polledMessages = useSessionMessagePolling(sessionIdRef.current, messages);
@@ -236,141 +201,92 @@ function ChatView({
     });
     return combined;
   }, [polledMessages, messages]);
+  // One HarnessAgent per session. threadId === AgentCore session id, so
+  // CopilotChat resumes history via connect() and streams live turns via run().
+  const harnessAgent = useMemo(
+    () => new HarnessAgent({ threadId: sessionId, getConfig: () => agentConfigRef.current }),
+    [sessionId],
+  );
 
-  const isStreaming = status === 'submitted' || status === 'streaming';
+  const agentsMap = useMemo(() => ({ default: harnessAgent }), [harnessAgent]);
 
   return (
-    <>
-      <Conversation className="flex-1">
-        <ConversationContent>
-          {mergedMessages.length === 0 && (
-            <ConversationEmptyState
-              title="No messages yet"
-              description={selectedAgent ? `Chatting with ${selectedAgent.name}` : 'Start a conversation to get started'}
-            />
-          )}
-          {mergedMessages.map((message) => {
-            const text = message.parts
-              .filter((p): p is { type: 'text'; text: string } => p.type === 'text')
-              .map((p) => p.text)
-              .join('');
-            // Extract toolResult content if present
-            const toolContent = message.parts
-              .filter((p) => (p as { type: string }).type === 'toolResult')
-              .flatMap((p: any) => {
-                // p.content may be an array of strings (our new format) or objects with a text field.
-                if (Array.isArray(p.content)) {
-                  return p.content.map((c: any) => (typeof c === 'string' ? c : c.text)).filter(Boolean);
-                }
-                return [];
-              })
-              .join('\n');
-
-            return (
-              <Message key={message.id} from={message.role} data-testid={`message-${message.role}`}>
-                <MessageContent>
-                  {message.role === 'assistant' ? (
-                    <MessageResponse isAnimating={isStreaming}>
-                      {text || toolContent || ''}
-                    </MessageResponse>
-                  ) : (
-                    text || (toolContent && <pre>{toolContent}</pre>)
-                  )}
-                </MessageContent>
-              </Message>
-            );
-          })}
-
-          {status === 'submitted' && (
-            <Message from="assistant">
-              <MessageContent>
-                <Shimmer>Thinking…</Shimmer>
-              </MessageContent>
-            </Message>
-          )}
-        </ConversationContent>
-        <ConversationScrollButton />
-      </Conversation>
-
-      {error && (
-        <div className="rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">
-          <span className="font-medium">Error: </span>{error.message}
+    <CopilotKitProvider selfManagedAgents={agentsMap}>
+      {/* Registers a wildcard tool-call renderer so tool activity (name/args/result)
+          renders as a collapsible card instead of an empty bubble. Side-effect only. */}
+      <ToolCallRenderer />
+      <div className="flex flex-col h-full min-h-0">
+        <div className="flex-1 min-h-0">
+          <CopilotChat
+            agentId="default"
+            threadId={sessionId}
+            labels={{
+              chatInputPlaceholder: 'Type a message…',
+            }}
+          />
         </div>
-      )}
 
-      <PromptInput onSubmit={({ text }) => sendMessage({ text })}>
-        <PromptInputTextarea
-          placeholder="Type a message…"
-          disabled={isStreaming}
-          autoFocus
-        />
-        <PromptInputFooter>
-          <PromptInputTools />
-          <div className="flex items-center gap-1">
-            {agents.length > 0 && (
-              <PromptInputSelect
-                value={agentId ?? ''}
-                onValueChange={(val: unknown) => onAgentChange(val === '' ? null : String(val))}
+        <div className="flex items-center justify-end gap-1 border-t px-3 py-2">
+          {agents.length > 0 && (
+            <Select
+              value={agentId ?? '__default__'}
+              onValueChange={(val) => onAgentChange(val === '__default__' ? null : val)}
+            >
+              <SelectTrigger className="h-8 w-auto min-w-40">
+                <SelectValue>{selectedAgent?.name ?? 'Default agent'}</SelectValue>
+              </SelectTrigger>
+              <SelectContent align="end">
+                <SelectItem value="__default__">Default agent</SelectItem>
+                {agents.map((a) => (
+                  <SelectItem key={a.id} value={a.id}>
+                    {a.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
+          {selectedAgent && (
+            <>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                title="View agent tools"
+                onClick={() => setToolsDialogOpen(true)}
               >
-                <PromptInputSelectTrigger>
-                  {selectedAgent?.name ?? 'Default agent'}
-                </PromptInputSelectTrigger>
-                <PromptInputSelectContent align="end">
-                  <PromptInputSelectItem value="">Default agent</PromptInputSelectItem>
-                  {agents.map((a) => (
-                    <PromptInputSelectItem key={a.id} value={a.id}>
-                      {a.name}
-                    </PromptInputSelectItem>
-                  ))}
-                </PromptInputSelectContent>
-              </PromptInputSelect>
-            )}
-            {selectedAgent && (
-              <>
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  title="View agent tools"
-                  onClick={() => setToolsDialogOpen(true)}
-                >
-                  <WrenchIcon />
-                  <span className="sr-only">View agent tools</span>
-                </Button>
-                <AgentToolsDialog
-                  agent={selectedAgent}
-                  open={toolsDialogOpen}
-                  onOpenChange={setToolsDialogOpen}
-                />
-              </>
-            )}
-            <PromptInputSubmit status={status} onStop={stop} />
-          </div>
-        </PromptInputFooter>
-      </PromptInput>
-    </>
+                <WrenchIcon />
+                <span className="sr-only">View agent tools</span>
+              </Button>
+              <AgentToolsDialog
+                agent={selectedAgent}
+                open={toolsDialogOpen}
+                onOpenChange={setToolsDialogOpen}
+              />
+            </>
+          )}
+        </div>
+      </div>
+    </CopilotKitProvider>
   );
 }
 
 const Chat = function Page() {
-  const { ready, sessionId, sessionIdRef, agentId, setAgentId } = useChatSession();
-  const initialMessagesState = useInitialMessages(ready ? sessionId : null);
+  const { ready, sessionId, agentId, setAgentId } = useChatSession();
   const agentsState = useAgents();
 
   const agents = agentsState.status === 'ready' ? agentsState.agents : [];
   const selectedAgent = agents.find((a) => a.id === agentId);
 
-  if (!ready || initialMessagesState.status === 'loading') return null;
+  if (!ready || !sessionId) return null;
 
   return (
     <ChatView
-      sessionIdRef={sessionIdRef}
-      initialMessages={initialMessagesState.messages}
+      sessionId={sessionId}
       selectedAgent={selectedAgent}
       agents={agents}
       agentId={agentId}
       onAgentChange={setAgentId}
     />
   );
-}
+};
 
 export default Chat;

@@ -68,13 +68,13 @@ The harness runs as a hosted container on AgentCore infrastructure. Its ARN is e
 
 ### 1. Authentication
 
-The harness authorizes with **AWS_IAM**, so callers invoke it with a SigV4-signed `InvokeHarnessCommand` rather than a Bearer JWT. In the browser, `web/lib/agentcore-transport.ts` constructs a `BedrockAgentCoreClient` whose credential provider calls `fetchAuthSession()` from `aws-amplify/auth` and returns the session's temporary **Cognito Identity Pool credentials** (`accessKeyId`/`secretAccessKey`/`sessionToken`). The SDK signs each request with those credentials; the Identity Pool's authenticated role is granted `bedrock-agentcore:InvokeHarness` on the harness ARN in `web/amplify/backend.ts`.
+The harness authorizes with **AWS_IAM**, so callers invoke it with a SigV4-signed `InvokeHarnessCommand` rather than a Bearer JWT. In the browser, `web/lib/harness-agent.ts` constructs a `BedrockAgentCoreClient` whose credential provider calls `fetchAuthSession()` from `aws-amplify/auth` and returns the session's temporary **Cognito Identity Pool credentials** (`accessKeyId`/`secretAccessKey`/`sessionToken`). The SDK signs each request with those credentials; the Identity Pool's authenticated role is granted `bedrock-agentcore:InvokeHarness` on the harness ARN in `web/amplify/backend.ts`.
 
 Server-side callers sign with their own IAM identity: the `invoke-agent` and `agent-webhook-invoke-agent` Lambdas use their execution-role credentials (each role granted `InvokeHarness`), and `scripts/invoke.ts` exchanges the test user's Cognito login for Identity Pool credentials via `fromCognitoIdentityPool`.
 
 ### 2. Request construction
 
-`web/lib/agentcore-transport.ts` implements the AI SDK `ChatTransport` interface. On each message send it builds the invoke body:
+`web/lib/harness-agent.ts` defines `HarnessAgent`, a client-side [AG-UI](https://github.com/ag-ui-protocol/ag-ui) agent (`AbstractAgent` subclass from `@ag-ui/client`) that the chat UI renders with CopilotKit's `<CopilotChat>`. On each message send (`HarnessAgent.run()`) it builds the invoke body:
 
 ```typescript
 {
@@ -101,7 +101,7 @@ The harness returns a binary AWS event stream (Smithy protocol). The SDK client 
 - `messageStop` — end of turn, includes `stopReason`
 - `metadata` — token usage and latency metrics
 
-The transport translates `contentBlockDelta` events into AI SDK `UIMessageChunk` objects, which React renders incrementally via `useChat`.
+`HarnessAgent.run()` translates `contentBlockDelta` events into AG-UI events (`TEXT_MESSAGE_START` → `TEXT_MESSAGE_CONTENT` deltas → `TEXT_MESSAGE_END`, bracketed by `RUN_STARTED`/`RUN_FINISHED`). `<CopilotChat>` consumes those events and renders the assistant turn incrementally — no AI SDK involved.
 
 ---
 
@@ -120,7 +120,17 @@ The harness reads relevant memory automatically before each inference call and w
 
 ### Viewing past sessions
 
-The Amplify Lambda `list-session-messages` queries `ListEvents` on the memory ARN for a given session ID, parses the JSON payloads, and returns them as structured messages. The chat UI calls this on load to restore prior context.
+The Amplify Lambda `list-session-messages` queries `ListEvents` on the memory ARN for a given session ID and parses each stored harness payload **once** into two fields per event: `text` (flattened plain text, for simple consumers) and `contentJson` (the full Bedrock Converse `ContentBlock[]` as a JSON string — text, `toolUse`, `toolResult`, `reasoningContent`).
+
+The chat UI restores history through the AG-UI agent, not a bespoke render path. When `<CopilotChat>` mounts with an explicit `threadId` (the AgentCore session id), it calls `HarnessAgent.connect()`, which fetches those events, maps `contentJson` to role-discriminated AG-UI `Message[]` via `web/lib/converse-to-agui.ts` (assistant text + `toolCalls`, `tool` result messages, `reasoning` messages), and emits a single `MESSAGES_SNAPSHOT`. CopilotKit applies the snapshot to populate the transcript. Because the thread id *is* the AgentCore session id, live streaming and history share one identifier — no polling/merge step.
+
+> The `contentJson` parse happens exactly once, in the Lambda. Clients map straight from Converse blocks to their render model rather than re-parsing ambiguous flattened strings — this replaced an earlier path that parsed twice (Lambda + client) and invented a non-standard `toolResult` message part.
+
+`converse-to-agui.ts` also splits inline `<reasoning>…</reasoning>` tags out of assistant text blocks into their own `reasoning` messages (`splitInlineReasoning()`) — some models (e.g. `openai.gpt-oss-120b`) emit chain-of-thought this way instead of as a `reasoningContent` block, and without this split it renders as visible prose in the assistant bubble.
+
+Tool activity (name, arguments, result) renders through CopilotKit's wildcard tool-call renderer, registered by `<ToolCallRenderer />` (`web/app/(with-auth)/chat/tool-call-renderer.tsx`, mounted inside `<CopilotKitProvider>` in `chat/page.tsx`) via `useDefaultRenderTool`. Without a registered renderer, `useRenderToolCall()` returns `null` for every tool call and CopilotKit's `AssistantMessage` renders nothing for it — standalone `role: "tool"` result messages are never rendered directly as bubbles; they're only consumed as the paired result of the matching assistant `toolCall` (matched by `toolCallId`) inside the renderer.
+
+The separate `/chat-handler` page (the server-side AG-UI runtime flow — see [ag-ui-handler-pattern.md](ag-ui-handler-pattern.md)) still consumes the flattened `text` field via `use-initial-messages.ts`.
 
 ---
 
@@ -199,10 +209,10 @@ User types message
        │
        ▼
 ChatView (React)
-  useChat(transport)
+  <CopilotChat> → HarnessAgent (AG-UI AbstractAgent)
        │
        ▼
-HarnessChatTransport
+HarnessAgent.run()
   fetchAuthSession() → Cognito Identity Pool credentials
   BedrockAgentCoreClient.send(InvokeHarnessCommand{ messages, systemPrompt, model, tools })
        │
@@ -231,8 +241,27 @@ Streaming binary event stream response
        │
        ▼
 SDK event-stream decode (response.stream)
-  contentBlockDelta → UIMessageChunk
+  contentBlockDelta → AG-UI TEXT_MESSAGE_CONTENT
        │
        ▼
-React renders streamed text
+<CopilotChat> renders streamed text
+```
+
+### History restore (on session load)
+
+```
+<CopilotChat> mounts with threadId = AgentCore session id
+       │
+       ▼
+HarnessAgent.connect()
+  listSessionMessages query → Lambda (ListEvents, includePayloads)
+    parse harness payload ONCE → { text, contentJson }
+       │
+       ▼
+converse-to-agui.ts: contentJson (Converse ContentBlock[]) → AG-UI Message[]
+  text → assistant/user content · toolUse → toolCalls
+  toolResult → tool message · reasoningContent → reasoning message
+       │
+       ▼
+emit MESSAGES_SNAPSHOT → CopilotKit populates transcript
 ```

@@ -6,7 +6,15 @@ export const agentcoreMemorySchema = a.schema({
   ConversationalEvent: a.customType({
     eventId: a.string().required(),
     role: a.string().required(),
+    // Flattened plain text of the message (concatenated text blocks). Kept for
+    // simple consumers (e.g. /chat-handler) that only render text.
     text: a.string().required(),
+    // JSON string of the full Bedrock Converse `ContentBlock[]` for this message
+    // (text / toolUse / toolResult / reasoningContent). Parsed ONCE here from the
+    // harness's stored payload so clients can map it straight to their render
+    // model (e.g. AG-UI Message[]) without re-parsing ambiguous text. Null when
+    // the payload wasn't structured JSON.
+    contentJson: a.string(),
     timestamp: a.string().required(),
   }),
 
