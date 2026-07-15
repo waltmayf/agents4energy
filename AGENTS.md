@@ -9,8 +9,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ### AWS CLI
 If you would like to run an aws cli command you don't have access to, put the command in your response and ask the user to run it.
 
-### Updating GitHub workflows
-You can't direclty push changes to `.github/workflows/`, so instead update `.github/workflow-drafts/` and ask the user to copy the workflow to the other folder.
+### GitHub Pull Requests
+Always type check your changes before pushing updates by running `npx tsc --noEmit`.
 
 ### GitHub Issues
 
