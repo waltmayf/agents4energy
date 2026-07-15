@@ -242,7 +242,15 @@ const agentCoreApp = new AgentCoreApplication(agentStack, 'AgentCoreApplication'
 // tokens and via `describe-stacks` Outputs, never `Fn.importValue`), so strip
 // the `exportName` from all of them. The plain Output value is still emitted —
 // `aws cloudformation describe-stacks` surfaces it — just no longer collidable.
-for (const child of agentCoreApp.node.findAll()) {
+//
+// Walk the *stack's* node tree, not `agentCoreApp`'s subtree: AgentCoreMcp
+// attaches its Gateway `…-Arn`/`…-Id`/`…-Url` CfnOutputs to `stack` (see
+// AgentCoreMcp.js), so they live OUTSIDE the AgentCoreApplication construct.
+// A previous `agentCoreApp.node.findAll()` sweep caught the Memory outputs but
+// silently missed the Gateway ones — leaving the exact export
+// (`TokenTOKEN<n>-Gateway-default-gateway-Arn`) that collided across sandboxes
+// and rolled back every `main` deploy.
+for (const child of agentStack.node.findAll()) {
   if (child instanceof CfnOutput) {
     child.exportName = undefined;
   }
