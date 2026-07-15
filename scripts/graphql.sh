@@ -48,7 +48,10 @@ if [[ -z "${AWS_ACCESS_KEY_ID:-}" || -z "${AWS_SECRET_ACCESS_KEY:-}" ]]; then
 fi
 
 QUERY="${1:?Usage: $0 '<query>' [variables_json]}"
-VARIABLES="${2:-{}}"
+# Default to an empty JSON object. Note the braces are quoted separately: an
+# inline `${2:-{}}` is mis-parsed (default becomes `{` plus a stray `}`), which
+# corrupts the variables JSON.
+VARIABLES="${2:-"{}"}"
 
 PAYLOAD=$(jq -n --arg q "$QUERY" --argjson v "$VARIABLES" '{"query":$q,"variables":$v}')
 

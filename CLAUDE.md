@@ -9,6 +9,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ### AWS CLI
 If you would like to run an aws cli command you don't have access to, put the command in your response and ask the user to run it.
 
+### Querying the AppSync API (GraphQL runner)
+Use `./scripts/graphql.sh` to run ad-hoc queries/mutations against the deployed AppSync API. It signs requests with AWS SigV4 (IAM auth) using your local AWS credentials, and reads the endpoint + region from `web/amplify_outputs.json` — so it targets whatever backend that file points at.
+
+```bash
+# Query with inline arguments
+./scripts/graphql.sh 'query { listChatSessions { items { id name createdAt } } }'
+
+# Query with GraphQL variables (pass a JSON object as the 2nd arg)
+./scripts/graphql.sh \
+  'query M($s: String!, $a: String!) { listSessionMessages(sessionId: $s, actorId: $a) { events { eventId role text contentJson timestamp } nextToken } }' \
+  '{"s":"<session-id>","a":"default"}'
+```
+
+Handy for investigating chat sessions: `listSessionMessages` returns the raw stored events (`role`, `text`, `contentJson`, `timestamp`) exactly as the frontend loads them. The `actorId` for harness sessions is always `"default"`. Results are paginated — follow `nextToken` to get older turns. To reproduce how the UI renders a session, feed the events (sorted ascending by `timestamp`) through `web/lib/converse-to-agui.ts`.
+
 ### Updating GitHub workflows
 You can't direclty push changes to `.github/workflows/`, so instead update `.github/workflow-drafts/` and ask the user to copy the workflow to the other folder.
 
