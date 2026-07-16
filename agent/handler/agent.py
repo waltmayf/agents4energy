@@ -143,6 +143,7 @@ def shell(command: str, cwd: str = "/") -> str:
 
     Returns:
         Combined stdout and stderr output, with exit code appended if non-zero.
+        The output is truncated to a safe size to avoid exceeding model context limits.
     """
     result = subprocess.run(
         command,
@@ -155,6 +156,12 @@ def shell(command: str, cwd: str = "/") -> str:
     output = (result.stdout + result.stderr).strip()
     if result.returncode != 0:
         output += f"\n[exit code {result.returncode}]"
+    # Truncate overly long output to avoid model context overflow.
+    MAX_OUTPUT_CHARS = 100_000  # safe limit well below the model's token window
+    if len(output) > MAX_OUTPUT_CHARS:
+        head = output[:50_000]
+        tail = output[-50_000:]
+        output = f"{head}\n...<output truncated>...\n{tail}"
     return output or "(no output)"
 
 
