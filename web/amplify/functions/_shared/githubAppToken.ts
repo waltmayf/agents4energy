@@ -4,6 +4,41 @@ import { SignJWT, importPKCS8 } from 'jose';
 const REGION = process.env.AWS_REGION ?? 'us-east-1';
 const secretsManager = new SecretsManagerClient({ region: REGION });
 
+// Transient GitHub API statuses worth retrying (throttling + 5xx). A 4xx like
+// 401/404 ("App not installed") is a real, non-transient error and is NOT retried.
+const TRANSIENT_STATUSES = new Set([429, 500, 502, 503, 504]);
+const MAX_ATTEMPTS = 4;
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// fetch that retries transient GitHub failures (5xx/429 and network errors) with
+// exponential backoff (issue #154): a brief GitHub blip during the App-token
+// dance was aborting whole webhook runs with a confusing `agent-error`. Bounded
+// so genuine failures still surface promptly. `delayMs` is injectable for tests.
+export async function fetchWithRetry(
+  input: string,
+  init?: RequestInit,
+  opts: { maxAttempts?: number; delayMs?: (attempt: number) => number } = {},
+): Promise<Response> {
+  const maxAttempts = opts.maxAttempts ?? MAX_ATTEMPTS;
+  const delayMs = opts.delayMs ?? ((attempt) => Math.min(2000, 250 * 2 ** (attempt - 1)));
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const res = await fetch(input, init);
+      if (!TRANSIENT_STATUSES.has(res.status) || attempt === maxAttempts) return res;
+    } catch (err) {
+      // Network-level error (DNS/connection reset/etc.) — also transient.
+      lastErr = err;
+      if (attempt === maxAttempts) throw err;
+    }
+    await sleep(delayMs(attempt));
+  }
+  // Unreachable in practice (the loop returns/throws on the last attempt), but
+  // satisfies the type checker.
+  throw lastErr ?? new Error('fetchWithRetry: exhausted attempts');
+}
+
 // Cached across warm invocations — the PEM never changes between requests.
 let cachedPrivateKeyPem: string | null = null;
 
@@ -33,7 +68,7 @@ async function buildAppJwt(appId: string, secretArn: string): Promise<string> {
 }
 
 async function findInstallationId(appJwt: string, repo: string): Promise<number> {
-  const res = await fetch(`https://api.github.com/repos/${repo}/installation`, {
+  const res = await fetchWithRetry(`https://api.github.com/repos/${repo}/installation`, {
     headers: {
       Authorization: `Bearer ${appJwt}`,
       Accept: 'application/vnd.github+json',
@@ -53,7 +88,7 @@ async function createInstallationToken(
   repo: string,
 ): Promise<{ token: string; expiresAt: string }> {
   const [, repoName] = repo.split('/');
-  const res = await fetch(
+  const res = await fetchWithRetry(
     `https://api.github.com/app/installations/${installationId}/access_tokens`,
     {
       method: 'POST',
