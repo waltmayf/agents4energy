@@ -96,11 +96,27 @@ test.describe('agent webhook Step Function', () => {
 
     expect(status, `execution ${executionArn} did not succeed (output: ${output ?? 'none'})`).toBe('SUCCEEDED');
 
+    const parsed = output ? JSON.parse(output) : {};
+
+    // A SUCCEEDED status is NOT sufficient: the pipeline catches git-auth-prep
+    // and InvokeHarness failures and routes them to a post-failure-comment state
+    // that itself succeeds, so a caught failure still reports the execution as
+    // SUCCEEDED. Distinguish the real success path (harness turn ran, producing
+    // $.agentResult) from the caught-failure path ($.error present, no
+    // $.agentResult) — otherwise a broken harness silently "passes".
+    expect(
+      parsed?.error,
+      `pipeline hit its failure path (git-auth or InvokeHarness threw): ${JSON.stringify(parsed?.error)?.slice(0, 600)}`,
+    ).toBeUndefined();
+    expect(
+      parsed?.agentResult?.Output?.Message,
+      'no $.agentResult — the native InvokeHarness task did not run to completion',
+    ).toBeTruthy();
+
     // The final decoded assistant text lives at $.agentResult.Output.Message.Content.
     // Assert the harness produced content and that no raw Harmony markup leaked
     // through — post-comment sanitizes it, and the invoke result feeding it
     // should read as clean natural language.
-    const parsed = output ? JSON.parse(output) : {};
     const contentBlocks: Array<{ Text?: string }> =
       parsed?.agentResult?.Output?.Message?.Content ?? [];
     const finalText = contentBlocks.map((b) => b?.Text ?? '').join('\n');
