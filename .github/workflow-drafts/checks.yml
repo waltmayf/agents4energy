@@ -36,12 +36,24 @@ jobs:
 
       - uses: pnpm/action-setup@v4
 
+      # Node 22, not 20: web's `test:unit` runs `node --test
+      # --experimental-strip-types`, which needs Node 22.6+ (Node 20 errors with
+      # "bad option: --experimental-strip-types").
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
+
+      # A few source files `import outputs from '../amplify_outputs.json'`. That
+      # file is generated at deploy time and gitignored, so it's absent in a
+      # fresh checkout — tsc then fails with "Cannot find module
+      # '../amplify_outputs.json'". Write a minimal valid-JSON placeholder so the
+      # import resolves; `resolveJsonModule` only needs the file to exist and
+      # parse for type inference (the values are irrelevant to type-checking).
+      - name: Stub amplify_outputs.json (generated at deploy, absent in CI)
+        run: '[ -f web/amplify_outputs.json ] || echo "{}" > web/amplify_outputs.json'
 
       # Type-check the web workspace (root has no tsconfig; all TS lives under web/).
       # This is the check that would have blocked PR #134.
