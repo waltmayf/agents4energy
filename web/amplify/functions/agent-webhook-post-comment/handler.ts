@@ -2,6 +2,7 @@ import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-sec
 import { mintInstallationToken } from '../_shared/githubAppToken';
 import { logGroupName, logStreamName, ensureLogStream, buildLiveTailUrl } from '../_shared/liveTail';
 import { sanitizeHarmony } from '../../../lib/harmony-sanitize';
+import { friendlyHarnessError } from '../../../lib/harness-error-message';
 
 const REGION = process.env.AWS_REGION ?? 'us-east-1';
 const GITHUB_APP_ID = process.env.GITHUB_APP_ID ?? '';
@@ -218,12 +219,19 @@ export const handler = async (input: PostCommentInput): Promise<PostCommentOutpu
     .filter((block) => block?.Text)
     .map((block) => block?.Text ?? '')
     .pop();
+  // On the failure path (input.responseText carries the raw error cause), turn a
+  // recognized harness failure — chiefly context-window overflow (#140) — into a
+  // concise, actionable message rather than posting the raw Bedrock exception.
+  // Falls back to the raw cause for unrecognized errors.
+  const failureText = input.responseText
+    ? (friendlyHarnessError(input.responseText) ?? input.responseText)
+    : undefined;
   // Strip any leaked Harmony special tokens (<|channel|>/<|message|>/…) the
   // gpt-oss-120b harness can emit into the plain-text block (issue #105) before
   // posting. Applied to both the success text and the failure cause so neither
   // path posts raw model markup. sanitizeHarmony is a no-op on clean text.
   const responseText = sanitizeHarmony(
-    input.responseText
+    failureText
       ?? (lastBlockText?.trim() || '_The agent finished but produced no text response (it may have ended on a tool action). See the CloudWatch logs linked above._'),
   );
   if (input.source === 'github') {
