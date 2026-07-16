@@ -16,7 +16,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Derive branch from git or DEPLOY_BRANCH env var
 BRANCH="${DEPLOY_BRANCH:-$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD)}"
 # Normalise: replace slashes with dashes, lowercase, truncate to 14 chars (ampx --identifier limit is 15)
-# Exported so scripts/extract-deployment-info.js can publish the e2e config under the same slug.
+# Exported so CDK now publishes the e2e config under the same slug.
 export BRANCH_SLUG="$(echo "$BRANCH" | tr '/' '-' | tr '[:upper:]' '[:lower:]' | cut -c1-14)"
 
 echo "Branch:      $BRANCH"

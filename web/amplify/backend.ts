@@ -338,6 +338,30 @@ new StringParameter(agentStack, 'SsmAgentcoreRegion', {
   simpleName: false,
 });
 
+
+// Publish Playwright e2e configuration to SSM (CDK-managed).
+// The path mirrors scripts/fetch-e2e-config.ts expectations.
+if (process.env.GITHUB_REPOSITORY) {
+  const repoSlugRaw = process.env.GITHUB_REPOSITORY;
+  const repoSlug = repoSlugRaw.toLowerCase().replace(/[^a-z0-9-/]+/g, '-');
+  if (repoSlug && backendName) {
+    const e2eConfig = {
+      appUrl: `https://${hosting.distributionDomainName}/${backendName}/`,
+      userPoolId: userPoolId,
+      userPoolClientId: backend.auth.resources.userPoolClient.userPoolClientId,
+      region: AGENTCORE_REGION,
+      testUserEmailSsmPath: E2E_TEST_USER_EMAIL_SSM_PATH,
+      testUserPasswordSsmPath: E2E_TEST_USER_PASSWORD_SSM_PATH,
+      agentWebhookStateMachineArn: agentWebhookStack.stateMachineArn,
+    };
+    new StringParameter(agentStack, 'E2eConfig', {
+      parameterName: `/outputs/${repoSlug}/${backendName}/e2e-config`,
+      stringValue: JSON.stringify(e2eConfig),
+      simpleName: false,
+    });
+  }
+}
+
 // Grant the pool's authenticated role permission to invoke the harness.
 //
 // Attach via a standalone Policy rather than `role.addToPrincipalPolicy(...)`:
