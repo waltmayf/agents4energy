@@ -161,13 +161,7 @@ const cognitoDiscoveryUrl = Fn.join('', [
   '/.well-known/openid-configuration',
 ]);
 
-const agUiHandlerRuntime = new AgentCoreRuntimeWithBuild(agentStack, 'AgUiHandler', {
-  protocolConfiguration: 'AGUI',
-  imageAssetDirectory: resolve(__dirname, '../../agent/handler'),
-  cognitoDiscoveryUrl: cognitoDiscoveryUrl,
-  allowedClients: [backend.auth.resources.userPoolClient.userPoolClientId],
-  description: 'AG-UI handler runtime for the agentcore-amplify-fullstack app',
-});
+
 
 // MyHarness authorizes with AWS_IAM (SigV4), not CUSTOM_JWT: omitting
 // `authorizerConfiguration` makes a CfnHarness default to IAM auth. Every
@@ -247,9 +241,26 @@ const agentCoreApp = new AgentCoreApplication(agentStack, 'AgentCoreApplication'
 // `exportName: exportName(stack.stackName, …)`. Because AgentCoreApplication
 // lives in an Amplify *nested* stack, `stack.stackName` is an unresolved CDK
 // token that stringifies to `TokenTOKEN<n>` — a per-synth counter, NOT the
+
+const memoryName = harnessSpecs[0]?.memoryName;
+const harnessName = harnessSpecs[0]?.name;
+const gatewayName = projectSpec.agentCoreGateways?.[0]?.name;
+
+const AGENTCORE_MEMORY_ID = memoryName ? agentCoreApp.memoryId(memoryName) : '';
+const AGENTCORE_MEMORY_ARN = memoryName ? agentCoreApp.memoryArn(memoryName) : '';
+const AGENTCORE_GATEWAY_ID = gatewayName ? agentCoreApp.gatewayId(gatewayName) : '';
+const AGENTCORE_GATEWAY_ARN = gatewayName ? agentCoreApp.gatewayArn(gatewayName) : '';
+const AGENTCORE_GATEWAY_ENDPOINT = gatewayName ? agentCoreApp.gatewayEndpoint(gatewayName) : '';
+const AGENTCORE_HARNESS_ARN = harnessName ? agentCoreApp.harnessArn(harnessName) : '';
+const AGENTCORE_HARNESS_ROLE_ARN = harnessName ? agentCoreApp.harnessRoleArn(harnessName) : '';
+const AGENTCORE_REGION = Stack.of(agentStack).region;
+
 // real (branch-unique) stack name. Two deployments (e.g. `main` and a leftover
 // branch sandbox) that happen to land on the same counter value produce the
 // SAME CloudFormation export name, and CloudFormation rejects the second with
+
+
+
 // "Export … is already exported by stack …", rolling back the whole deploy.
 // This blocked every `main` deploy after these exports were introduced (#52's
 // deploy was the first casualty — its git/gh-auth Lambda code never shipped).
@@ -272,18 +283,6 @@ for (const child of agentStack.node.findAll()) {
   }
 }
 
-const memoryName = harnessSpecs[0]?.memoryName;
-const harnessName = harnessSpecs[0]?.name;
-const gatewayName = projectSpec.agentCoreGateways?.[0]?.name;
-
-const AGENTCORE_MEMORY_ID = memoryName ? agentCoreApp.memoryId(memoryName) : '';
-const AGENTCORE_MEMORY_ARN = memoryName ? agentCoreApp.memoryArn(memoryName) : '';
-const AGENTCORE_GATEWAY_ID = gatewayName ? agentCoreApp.gatewayId(gatewayName) : '';
-const AGENTCORE_GATEWAY_ARN = gatewayName ? agentCoreApp.gatewayArn(gatewayName) : '';
-const AGENTCORE_GATEWAY_ENDPOINT = gatewayName ? agentCoreApp.gatewayEndpoint(gatewayName) : '';
-const AGENTCORE_HARNESS_ARN = harnessName ? agentCoreApp.harnessArn(harnessName) : '';
-const AGENTCORE_HARNESS_ROLE_ARN = harnessName ? agentCoreApp.harnessRoleArn(harnessName) : '';
-const AGENTCORE_REGION = Stack.of(agentStack).region;
 
 // MyHarness now authorizes with AWS_IAM, so the browser signs InvokeHarness
 // requests with Cognito Identity Pool credentials (see web/lib/agentcore-transport.ts).
@@ -585,22 +584,7 @@ if (AGENTCORE_GATEWAY_ARN) {
   });
 }
 
-// Grant the runtime execution role permission to invoke the AgentCore runtime
-// (needed for AppSync → runtime invocations post-deploy wiring)
-agUiHandlerRuntime.executionRole.addToPrincipalPolicy(new PolicyStatement({
-  effect: Effect.ALLOW,
-  actions: ['bedrock:InvokeModel', 'bedrock:InvokeModelWithResponseStream'],
-  resources: ['*'],
-}));
 
-// Grant the runtime execution role read access to the harness memory so the
-// container can seed prior conversation turns into the Strands agent.
-if (AGENTCORE_MEMORY_ARN) {
-  agUiHandlerRuntime.executionRole.addToPrincipalPolicy(new PolicyStatement({
-    actions: ['bedrock-agentcore:ListEvents'],
-    resources: [AGENTCORE_MEMORY_ARN],
-  }));
-}
 
 // ============================================================================
 // AG-UI HANDLER — wire Mutation.invokeHandler to the AgentCore runtime.
@@ -621,6 +605,27 @@ if (AGENTCORE_MEMORY_ARN) {
 // rejects at deploy time.
 const cfnGraphqlApi = backend.data.resources.cfnResources.cfnGraphqlApi;
 const dataStack = Stack.of(cfnGraphqlApi);
+
+const appsyncEndpoint = Fn.join('', [
+  'https://',
+  cfnGraphqlApi.attrApiId,
+  '.appsync-api.',
+  Stack.of(agentStack).region,
+  '.amazonaws.com/graphql',
+]);
+
+const agUiHandlerRuntime = new AgentCoreRuntimeWithBuild(agentStack, 'AgUiHandler', {
+  protocolConfiguration: 'AGUI',
+  imageAssetDirectory: resolve(__dirname, '../../agent/handler'),
+  cognitoDiscoveryUrl: cognitoDiscoveryUrl,
+  allowedClients: [backend.auth.resources.userPoolClient.userPoolClientId],
+  description: 'AG-UI handler runtime for the agentcore-amplify-fullstack app',
+  environment: {
+    APPSYNC_HTTP_ENDPOINT: appsyncEndpoint,
+    AGENTCORE_MEMORY_ID: AGENTCORE_MEMORY_ID,
+  },
+});
+
 cfnGraphqlApi.environmentVariables = { AGUI_RUNTIME_ARN: agUiHandlerRuntime.runtime.attrAgentRuntimeArn };
 
 const appsyncRegion = Stack.of(agentStack).region;
@@ -637,12 +642,18 @@ httpDsRole.addToPrincipalPolicy(new PolicyStatement({
 }));
 
 const agUiHandlerDataSource = new HttpDataSource(dataStack, 'AgUiHandlerDataSource', {
+
+
+
   api: backend.data.resources.graphqlApi,
   endpoint: `https://bedrock-agentcore.${appsyncRegion}.amazonaws.com`,
   authorizationConfig: {
     signingRegion: appsyncRegion,
     signingServiceName: 'bedrock-agentcore',
   },
+
+
+
   serviceRole: httpDsRole,
 });
 
@@ -661,11 +672,32 @@ new Policy(dataStack, 'AgUiHandlerPublishEventPolicy', {
     new PolicyStatement({
       actions: ['appsync:GraphQL'],
       resources: [
+
+
+
         `arn:aws:appsync:${appsyncRegion}:${Stack.of(dataStack).account}:apis/${cfnGraphqlApi.attrApiId}/types/Mutation/fields/publishAgentEvent`,
       ],
     }),
   ],
 });
+
+
+// Grant the runtime execution role permission to invoke the AgentCore runtime
+// (needed for AppSync → runtime invocations post-deploy wiring)
+agUiHandlerRuntime.executionRole.addToPrincipalPolicy(new PolicyStatement({
+  effect: Effect.ALLOW,
+  actions: ['bedrock:InvokeModel', 'bedrock:InvokeModelWithResponseStream'],
+  resources: ['*'],
+}));
+
+// Grant the runtime execution role read access to the harness memory so the
+// container can seed prior conversation turns into the Strands agent.
+if (AGENTCORE_MEMORY_ARN) {
+  agUiHandlerRuntime.executionRole.addToPrincipalPolicy(new PolicyStatement({
+    actions: ['bedrock-agentcore:ListEvents'],
+    resources: [AGENTCORE_MEMORY_ARN],
+  }));
+}
 
 // The `a.handler.custom()` field in aguiHandler.schema.ts synthesizes its CfnResolver
 // directly under the `data` scope (id "Resolver_Mutation_invokeHandler") rather than
