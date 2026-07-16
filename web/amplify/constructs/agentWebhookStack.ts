@@ -147,9 +147,23 @@ export class AgentWebhookStack extends Construct {
           TimeoutSeconds: 840,
         },
         ResultPath: '$.agentResult',
+        // Retry the transient, server-side classes the native invokeHarness task
+        // surfaces — all observed as HTTP 424 and explicitly transient ("Try your
+        // request again" / upstream read timeout), never caller errors (#123,
+        // subsuming #76 InternalServerException and #86 RuntimeClientErrorException).
+        // A single hiccup otherwise goes straight to the failure path and stamps
+        // agent-error on the issue/PR, discarding an otherwise-correct run.
+        // Attempts stay bounded (per #86, RuntimeClientErrorException can in
+        // principle wrap a genuine client-side harness/tool error) so real
+        // failures still surface promptly. Each retry restarts the harness with a
+        // fresh turn — safe, but partial progress is not resumed.
         Retry: [
           {
-            ErrorEquals: ['BedrockAgentCore.ThrottlingException'],
+            ErrorEquals: [
+              'BedrockAgentCore.ThrottlingException',
+              'BedrockAgentCore.InternalServerException',
+              'BedrockAgentCore.RuntimeClientErrorException',
+            ],
             IntervalSeconds: 2,
             MaxAttempts: 3,
             BackoffRate: 2.0,
