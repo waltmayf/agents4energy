@@ -22,6 +22,8 @@ export interface AgentWebhookStackProps {
   authorizerLambda: lambda.IFunction;
   /** Lambda that posts the initial (Live Tail link) and final comments. */
   postCommentLambda: lambda.IFunction;
+  /** Verification lambda (runs type‑check / lint after the harness push). */
+  verifyLambda: lambda.IFunction;
   /**
    * Lambda that seeds git/gh credentials in the harness session (via
    * InvokeAgentRuntimeCommand) and returns the annotated prompt. The harness
@@ -172,6 +174,17 @@ export class AgentWebhookStack extends Construct {
       },
     });
 
+    const verifyStep = new tasks.LambdaInvoke(this, 'VerifyBranch', {
+      lambdaFunction: props.verifyLambda,
+      payload: sfn.TaskInput.fromObject({
+        runId: sfn.JsonPath.stringAt('$.runId'),
+        source: sfn.JsonPath.stringAt('$.source'),
+        repo: sfn.JsonPath.stringAt('$.repo'),
+        issueNumber: sfn.JsonPath.numberAt('$.issueNumber'),
+      }),
+      resultPath: '$.verification',
+    });
+
     const postFinal = new tasks.LambdaInvoke(this, 'PostFinalComment', {
       lambdaFunction: props.postCommentLambda,
       payload: sfn.TaskInput.fromObject({
@@ -221,6 +234,7 @@ export class AgentWebhookStack extends Construct {
     const definition = postInitial
       .next(prepareGitAuth)
       .next(invokeHarness)
+      .next(verifyStep)
       .next(postFinal);
 
     this.stateMachine = new sfn.StateMachine(this, 'StateMachine', {
