@@ -54,3 +54,27 @@ test('collapses whitespace left behind by removals', () => {
 test('empty / falsy input is passed through', () => {
   assert.equal(sanitizeHarmony(''), '');
 });
+
+test('strips the exact leaked bare shell tool-call JSON from issue #31 (#149)', () => {
+  // Verbatim from the #31 final comment — a leaked functions.shell call with NO
+  // Harmony delimiters (prose + raw {"command":...,"timeout":...}).
+  const leaked =
+    'Now commit.{"command":"cd agents4energy && git commit -m \\"Delete AgUiHandler (agent.py) as handler is retired (#31)\\"","timeout":100000}';
+  assert.equal(looksLikeHarmony(leaked), true, 'should be detected as leaked');
+  const out = sanitizeHarmony(leaked);
+  assert.ok(!out.includes('"command"'), `tool-call JSON removed: ${out}`);
+  assert.ok(!out.includes('"timeout"'), 'timeout key removed');
+  assert.ok(!out.includes('{'), 'no JSON object braces remain');
+  assert.equal(out, 'Now commit.', 'keeps the prose lead-in');
+});
+
+test('strips a bare shell tool-call JSON without a timeout key', () => {
+  const out = sanitizeHarmony('Running install now.{"command":"pnpm install"}');
+  assert.equal(out, 'Running install now.');
+});
+
+test('does NOT strip legitimate JSON in a normal answer (no command key)', () => {
+  const clean = 'The config is `{"name": "web", "version": "1.0"}` — see package.json.';
+  assert.equal(looksLikeHarmony(clean), false);
+  assert.equal(sanitizeHarmony(clean), clean);
+});
