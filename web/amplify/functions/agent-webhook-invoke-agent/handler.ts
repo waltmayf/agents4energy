@@ -366,6 +366,7 @@ export const handler = async (input: PrepareInput): Promise<PrepareOutput> => {
       'Commit and push your branch normally (e.g. git push -u origin <your-branch>).',
       `Open the pull request directly with: gh pr create --repo ${repo} --base main --head <your-branch> --title "<title>" --body "<body>"`,
       'Include the resulting PR URL (printed by `gh pr create`) in your reply.',
+      'Before you run `gh pr create`, you MUST verify the change builds: run `pnpm install` then `cd web && npx tsc --noEmit` and make it pass. Fix any errors (a common one is referencing a value before its declaration) and re-run until it is clean. Do not open the PR while the type check fails, and do not claim it passed unless you actually ran it and it did.',
       '</github_access>',
     ].join('\n');
   }

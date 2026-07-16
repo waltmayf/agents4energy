@@ -160,6 +160,17 @@ RUN_WEBHOOK_E2E=1 pnpm test:e2e e2e/webhook-stepfunction.spec.ts
 - The prompt is deliberately read-only (asks the agent to report, not to open a PR), so the test is idempotent. It uses the `comment` trigger, so it also exercises the comment-run label bookkeeping ([#77](https://github.com/waltmayf/agents4energy/issues/77)).
 - No browser/auth is needed — it talks to Step Functions via the AWS SDK, so only AWS credentials with `states:StartExecution`/`states:DescribeExecution` are required.
 
+## PR checks gate
+
+Every pull request runs a fast, credential-free gate (`.github/workflows/checks.yml`, issue #135) that blocks merge when the code doesn't type-check or the unit tests fail:
+
+- `cd web && npx tsc --noEmit`
+- `cd web && pnpm test:unit`
+
+It does **not** deploy or touch AWS — it exists to catch the class of defect that shipped in PR #134 (a non-compiling `backend.ts` that no CI step flagged). Reproduce it locally with those two commands. Lint (`pnpm lint`) is not gated yet — `main` has a pre-existing eslint backlog to clear first.
+
+> Like all workflows here, the source of truth is `.github/workflow-drafts/checks.yml`; a maintainer copies it to `.github/workflows/` (see CLAUDE.md).
+
 ## CI
 
 On CI set `CI=true`. This enables:
