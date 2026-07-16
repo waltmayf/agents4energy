@@ -25,9 +25,21 @@ const HARMONY_TOKENS = [
   '<|return|>',
 ];
 
-/** True if `text` contains any Harmony special token or a stray role/close tag. */
+// A leaked shell tool-call payload — the JSON the model emits to invoke the
+// built-in `functions.shell` tool — that ended up in the plain-text channel
+// instead of a structured tool-use block (issue #149). Seen with NO Harmony
+// delimiters at all, e.g. the final comment on #31 was verbatim:
+//   Now commit.{"command":"cd agents4energy && git commit -m ...","timeout":100000}
+// Matches a `{ ... }` object containing a "command" key and optionally a
+// "timeout" key. Anchored to the JSON object so surrounding prose is preserved.
+const SHELL_TOOL_CALL_JSON = /\{\s*"(?:command|cmd)"\s*:\s*"[^]*?"(?:\s*,\s*"timeout"\s*:\s*\d+)?\s*\}/g;
+
+/** True if `text` contains any Harmony special token, a stray role/close tag, or a leaked shell tool-call JSON. */
 export function looksLikeHarmony(text: string): boolean {
   if (HARMONY_TOKENS.some((t) => text.includes(t))) return true;
+  // A leaked bare tool-call payload (no delimiters) is another tell (#149).
+  SHELL_TOOL_CALL_JSON.lastIndex = 0;
+  if (SHELL_TOOL_CALL_JSON.test(text)) return true;
   // A stray `</assistant` / `<|assistant|>`-style role marker (no proper close)
   // is another tell seen in leaked output.
   return /<\/?\|?(assistant|user|system|developer|tool)\|?>?/i.test(text);
@@ -82,6 +94,10 @@ export function sanitizeHarmony(input: string): string {
   for (const token of HARMONY_TOKENS) {
     text = text.split(token).join('');
   }
+
+  // Strip any leaked shell tool-call JSON payload (#149) — it can appear with no
+  // Harmony delimiters, so it survives the token removal above.
+  text = text.replace(SHELL_TOOL_CALL_JSON, '');
 
   // 3. Tidy whitespace left behind by the removals.
   return text
