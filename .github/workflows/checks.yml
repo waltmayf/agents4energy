@@ -1,0 +1,53 @@
+# Fast, credential-free PR gate (issue #135). Runs on every pull request and
+# blocks merge when the code doesn't type-check or the unit tests fail — the
+# class of defect that shipped in PR #134 (backend.ts failed `npx tsc --noEmit`
+# with "used before declaration" errors, but nothing in CI caught it).
+#
+# Deliberately does NOT deploy or touch AWS: no OIDC, no secrets, just install +
+# type-check + unit tests. Keep it that way so it stays fast and safe to run on
+# untrusted PRs.
+#
+# Lint (`pnpm lint`) is intentionally NOT gated yet: `main` currently has a large
+# backlog of pre-existing eslint errors (incl. eslint scanning generated output),
+# so making it blocking would fail every PR. Clean that up separately, then add
+# `pnpm lint` here as a required step.
+#
+# NOTE: per CLAUDE.md this repo can't push directly to .github/workflows/, so this
+# lives in workflow-drafts/. A maintainer copies it to .github/workflows/checks.yml
+# and (recommended) marks the `checks` job a required status check on `main`.
+name: Checks
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+# Cancel superseded runs for the same PR/branch — only the latest commit matters.
+concurrency:
+  group: checks-${{ github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # Type-check the web workspace (root has no tsconfig; all TS lives under web/).
+      # This is the check that would have blocked PR #134.
+      - name: Type check (web)
+        run: cd web && npx tsc --noEmit
+
+      # Unit tests — node:test suite, no AWS/browser needed.
+      - name: Unit tests (web)
+        run: cd web && pnpm test:unit
