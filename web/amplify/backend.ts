@@ -23,6 +23,7 @@ import { AgentCoreRuntimeWithBuild } from './constructs/agentCoreRuntimeWithBuil
 import { AgentCoreApplication, type HarnessSpec } from './constructs/agentCoreApplication';
 import { E2eTestUser } from './constructs/e2eTestUser/resource';
 import { AgentWebhookStack } from './constructs/agentWebhookStack';
+import { CognitoDiscoveryWaiter } from './constructs/cognitoDiscoveryWaiter/resource';
 
 import { StringParameter } from 'aws-cdk-lib/aws-ssm';
 
@@ -226,6 +227,15 @@ const agentCoreApp = new AgentCoreApplication(agentStack, 'AgentCoreApplication'
       }
     : undefined,
 });
+
+// Ensure the Cognito discovery document is available before the MCP Gateway is created.
+if (agentCoreApp.mcp) {
+  const discoveryWaiter = new CognitoDiscoveryWaiter(agentStack, 'CognitoDiscoveryWaiter', {
+    userPoolId,
+  });
+  // Make the MCP construct depend on the waiter so gateway creation is delayed until the URL is ready.
+  agentCoreApp.mcp.node.addDependency(discoveryWaiter);
+}
 
 // @aws/agentcore-cdk stamps every CfnOutput it creates with an
 // `exportName: exportName(stack.stackName, …)`. Because AgentCoreApplication
