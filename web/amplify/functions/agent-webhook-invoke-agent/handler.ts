@@ -201,14 +201,29 @@ async function authenticateGitInHarnessSession(opts: {
     `  ln -sf "/usr/local/lib/node-v${NODE_VERSION}/bin/npx" /usr/local/bin/npx`,
     '  rm -f /tmp/node.tar.gz',
     'fi',
-    // Install pnpm if missing
-    "if ! command -v pnpm >/dev/null 2>&1; then",
-    "  npm i -g pnpm@latest",
-    "fi",
+    // Install pnpm if missing — the agent uses it to install deps and run the
+    // project's checks (e.g. `pnpm install` then `npx tsc --noEmit`), per the
+    // harness system prompt's verify-before-PR step. `npm i -g` installs into
+    // Node's own prefix (/usr/local/lib/node-v<ver>/bin), which is NOT on PATH
+    // — only /usr/local/bin is — so symlink pnpm there like node/npm/npx above.
+    // Without this, pnpm installs but isn't runnable (observed as "pnpm not on
+    // PATH after install").
+    'if ! command -v pnpm >/dev/null 2>&1; then',
+    '  npm i -g pnpm@latest',
+    `  ln -sf "/usr/local/lib/node-v${NODE_VERSION}/bin/pnpm" /usr/local/bin/pnpm`,
+    `  ln -sf "/usr/local/lib/node-v${NODE_VERSION}/bin/pnpx" /usr/local/bin/pnpx 2>/dev/null || true`,
+    'fi',
+    // Fail the setup loudly if the dev toolchain the agent is told to use isn't
+    // actually runnable — better a clear setup error than a run that silently
+    // can't type-check. `npx --version` confirms npx resolves (npx tsc then
+    // works once the cloned project's typescript devDep is installed).
+    'command -v pnpm >/dev/null 2>&1 || { echo "pnpm not on PATH after install" >&2; exit 1; }',
+    'command -v npx >/dev/null 2>&1 || { echo "npx not on PATH after node install" >&2; exit 1; }',
     `printf '%s' ${JSON.stringify(githubToken)} | gh auth login --hostname github.com --with-token`,
     'gh auth setup-git',
-    // Emit a non-secret confirmation line so the debug log shows the step ran.
-    'echo "git/gh credential setup configured for github.com; node $(node --version) available"',
+    // Emit a non-secret confirmation line so the debug log shows the step ran
+    // and the dev toolchain (node/npx/pnpm) is available for type-checking.
+    'echo "git/gh setup configured for github.com; node $(node --version), npx $(npx --version), pnpm $(pnpm --version) available"',
   ].join('\n');
 
   return execInHarness({ sessionId, command, timeoutSeconds: 90 });

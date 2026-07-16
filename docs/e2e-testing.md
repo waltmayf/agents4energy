@@ -144,6 +144,22 @@ test('agent echoes the user message', async ({ page }) => {
 });
 ```
 
+## Harness webhook pipeline test (live, opt-in)
+
+[`web/e2e/webhook-stepfunction.spec.ts`](../web/e2e/webhook-stepfunction.spec.ts) verifies the AgentCore harness end-to-end (issue [#50](https://github.com/waltmayf/agents4energy/issues/50)). Rather than faking a GitHub webhook delivery, it starts the deployed **Step Function** directly with the same input shape `agent-webhook-receiver` produces, waits for the execution to `SUCCEEDED`, and asserts the final harness text carries no leaked Harmony tokens (`<|channel|>` etc., [#105](https://github.com/waltmayf/agents4energy/issues/105)). Because the run survives to completion, it also exercises the transient-424 retry hardening ([#123](https://github.com/waltmayf/agents4energy/issues/123)).
+
+This test runs a **real harness turn** (minutes of Bedrock time) and **posts real comments** to a GitHub issue, so it's opt-in:
+
+```bash
+cd web
+RUN_WEBHOOK_E2E=1 pnpm test:e2e e2e/webhook-stepfunction.spec.ts
+```
+
+- It's skipped unless `RUN_WEBHOOK_E2E=1`, and also skipped if `agentWebhookStateMachineArn` is missing from `web/e2e-config.json` (redeploy the backend to publish it).
+- Target issue defaults to `waltmayf/agents4energy` #50; override with `WEBHOOK_E2E_REPO` / `WEBHOOK_E2E_ISSUE`.
+- The prompt is deliberately read-only (asks the agent to report, not to open a PR), so the test is idempotent. It uses the `comment` trigger, so it also exercises the comment-run label bookkeeping ([#77](https://github.com/waltmayf/agents4energy/issues/77)).
+- No browser/auth is needed — it talks to Step Functions via the AWS SDK, so only AWS credentials with `states:StartExecution`/`states:DescribeExecution` are required.
+
 ## CI
 
 On CI set `CI=true`. This enables:

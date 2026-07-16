@@ -1,6 +1,7 @@
 import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-secrets-manager';
 import { mintInstallationToken } from '../_shared/githubAppToken';
 import { logGroupName, logStreamName, ensureLogStream, buildLiveTailUrl } from '../_shared/liveTail';
+import { sanitizeHarmony } from '../../../lib/harmony-sanitize';
 
 const REGION = process.env.AWS_REGION ?? 'us-east-1';
 const GITHUB_APP_ID = process.env.GITHUB_APP_ID ?? '';
@@ -30,9 +31,9 @@ interface PostCommentInput {
   // result's Message.Content array (which may be empty).
   responseText?: string;
   responseContent?: Array<{ Text?: string }>;
-  // 'label' when the run was started by the `agentcore` label (vs a comment
-  // mention). Only label-triggered GitHub runs get the agent-working/agent-error
-  // label bookkeeping below.
+  // 'label' when the run was started by the `agentcore` label, 'comment' for an
+  // @-mention comment. Both GitHub triggers get the agent-working/agent-error
+  // label bookkeeping below (issue #77); Jira runs (no repo/issueNumber) skip it.
   trigger?: 'label' | 'comment';
   // Set on the final stage reached via the Step Function's failure Catch, so
   // this stage adds `agent-error` in addition to removing `agent-working`.
@@ -189,9 +190,12 @@ export const handler = async (input: PostCommentInput): Promise<PostCommentOutpu
         console.warn('Failed to fetch AGENTS.md:', e instanceof Error ? e.message : String(e));
       }
 
-      // Label-triggered runs: mark the issue/PR as actively being worked on.
-      // Best-effort — never fail the run over label bookkeeping.
-      if (input.trigger === 'label') {
+      // Mark the issue/PR as actively being worked on. Applied to both label-
+      // and comment-mention triggered GitHub runs (issue #77) so the issue list
+      // shows an at-a-glance "in progress" signal for either entry point, matching
+      // .github/workflows/claude.yml which labels unconditionally. Best-effort —
+      // never fail the run over label bookkeeping.
+      if (input.trigger === 'label' || input.trigger === 'comment') {
         try {
           await addLabel(input.repo, input.issueNumber, minted.token, WORKING_LABEL);
         } catch (err) {
@@ -214,16 +218,24 @@ export const handler = async (input: PostCommentInput): Promise<PostCommentOutpu
     .filter((block) => block?.Text)
     .map((block) => block?.Text ?? '')
     .pop();
-  const responseText = input.responseText
-    ?? (lastBlockText?.trim() || '_The agent finished but produced no text response (it may have ended on a tool action). See the CloudWatch logs linked above._');
+  // Strip any leaked Harmony special tokens (<|channel|>/<|message|>/…) the
+  // gpt-oss-120b harness can emit into the plain-text block (issue #105) before
+  // posting. Applied to both the success text and the failure cause so neither
+  // path posts raw model markup. sanitizeHarmony is a no-op on clean text.
+  const responseText = sanitizeHarmony(
+    input.responseText
+      ?? (lastBlockText?.trim() || '_The agent finished but produced no text response (it may have ended on a tool action). See the CloudWatch logs linked above._'),
+  );
   if (input.source === 'github') {
     if (!input.repo || input.issueNumber === undefined) throw new Error('repo/issueNumber required for github source');
     const { token } = await postGithubComment(input.repo, input.issueNumber, responseText);
 
-    // Label-triggered runs: clear agent-working now that the run is done, and
-    // flag agent-error if this final stage was reached via the failure Catch.
+    // Clear agent-working now that the run is done, and flag agent-error if this
+    // final stage was reached via the failure Catch. Applied to both label- and
+    // comment-mention triggered runs (issue #77) so the working label added at
+    // the initial stage is always cleared and failures are always flagged.
     // Best-effort — a label API hiccup must not fail the whole execution.
-    if (input.trigger === 'label') {
+    if (input.trigger === 'label' || input.trigger === 'comment') {
       try {
         await removeLabel(input.repo, input.issueNumber, token, WORKING_LABEL);
         if (input.isError) {
