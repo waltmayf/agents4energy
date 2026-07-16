@@ -480,6 +480,7 @@ const webhookReceiverLambda = backend.agentWebhookReceiver.resources.lambda as L
 const webhookPostCommentLambda = backend.agentWebhookPostComment.resources.lambda as LambdaFunction;
 const webhookInvokeAgentLambda = backend.agentWebhookInvokeAgent.resources.lambda as LambdaFunction;
 const webhookAuthorizerLambda = backend.agentWebhookAuthorizer.resources.lambda as LambdaFunction;
+const webhookVerifyLambda = backend.agentWebhookVerify.resources.lambda as LambdaFunction;
 
 // The harness INVOKE is now a native `bedrockagentcore:invokeHarness` Step
 // Functions task (see agentWebhookStack + issue #56). This Lambda only performs
@@ -540,6 +541,7 @@ const agentWebhookStack = new AgentWebhookStack(agentWebhookCdkStack, 'AgentWebh
   receiverLambda: webhookReceiverLambda,
   authorizerLambda: webhookAuthorizerLambda,
   postCommentLambda: webhookPostCommentLambda,
+  verifyLambda: webhookVerifyLambda,
   // Git-auth prep only — the harness invoke is the native task in the stack,
   // granted InvokeHarness on the state machine role via harnessArn below.
   prepareGitAuthLambda: webhookInvokeAgentLambda,
