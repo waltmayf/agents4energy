@@ -36,9 +36,12 @@ jobs:
 
       - uses: pnpm/action-setup@v4
 
+      # Node 22, not 20: web's `test:unit` runs `node --test
+      # --experimental-strip-types`, which needs Node 22.6+ (Node 20 errors with
+      # "bad option: --experimental-strip-types").
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
