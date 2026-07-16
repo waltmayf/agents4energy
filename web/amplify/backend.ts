@@ -22,6 +22,7 @@ import { HostingConstruct } from './constructs/hostingConstruct';
 import { AgentCoreRuntimeWithBuild } from './constructs/agentCoreRuntimeWithBuild';
 import { AgentCoreApplication, type HarnessSpec } from './constructs/agentCoreApplication';
 import { E2eTestUser } from './constructs/e2eTestUser/resource';
+import { CognitoDiscoveryWaiter } from './constructs/cognitoDiscoveryWaiter/resource';
 import { AgentWebhookStack } from './constructs/agentWebhookStack';
 
 import { StringParameter } from 'aws-cdk-lib/aws-ssm';
@@ -226,6 +227,21 @@ const agentCoreApp = new AgentCoreApplication(agentStack, 'AgentCoreApplication'
       }
     : undefined,
 });
+
+// The MCP Gateway (created inside AgentCoreApplication) fetches the Cognito
+// discovery document at create time. On a first-ever branch/sandbox deploy the
+// just-created user pool's `.well-known/openid-configuration` endpoint hasn't
+// propagated yet, so the gateway fails to stabilize (HTTP 400, NotStabilized)
+// and rolls back the whole agent stack — this blocked every fresh-branch
+// deploy while `main` (whose pool already exists) succeeded. Gate the AgentCore
+// app on a waiter that polls the discovery URL until it's live. Only needed
+// when a gateway is actually deployed.
+if (agentCoreGatewaysWithUniqueNames) {
+  const discoveryWaiter = new CognitoDiscoveryWaiter(agentStack, 'CognitoDiscoveryWaiter', {
+    discoveryUrl: cognitoDiscoveryUrl,
+  });
+  agentCoreApp.node.addDependency(discoveryWaiter);
+}
 
 // @aws/agentcore-cdk stamps every CfnOutput it creates with an
 // `exportName: exportName(stack.stackName, …)`. Because AgentCoreApplication

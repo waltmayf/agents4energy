@@ -476,6 +476,9 @@ if (amplifyOutputs?.auth && amplifyOutputs?.custom?.hosting_domain) {
       region: amplifyOutputs.auth.aws_region ?? region,
       testUserEmailSsmPath: amplifyOutputs.custom.e2e_test_user_email_ssm_path,
       testUserPasswordSsmPath: amplifyOutputs.custom.e2e_test_user_password_ssm_path,
+      // Harness webhook Step Function — lets e2e/webhook-stepfunction.spec.ts
+      // invoke the pipeline directly (no GitHub delivery) to verify the harness.
+      agentWebhookStateMachineArn: amplifyOutputs.custom.agent_webhook_state_machine_arn,
     };
     const paramPath = resolve(root, 'tmp/e2e-config.json');
     execSync(`mkdir -p ${resolve(root, 'tmp')}`, { encoding: 'utf8' });
