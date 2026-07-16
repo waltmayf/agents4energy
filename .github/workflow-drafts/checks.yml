@@ -46,15 +46,10 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
-      # A few source files `import outputs from '../amplify_outputs.json'`. That
-      # file is generated at deploy time and gitignored, so it's absent in a
-      # fresh checkout — tsc then fails with "Cannot find module
-      # '../amplify_outputs.json'". Write a minimal valid-JSON placeholder so the
-      # import resolves; `resolveJsonModule` only needs the file to exist and
-      # parse for type inference (the values are irrelevant to type-checking).
-      - name: Stub amplify_outputs.json (generated at deploy, absent in CI)
-        run: '[ -f web/amplify_outputs.json ] || echo "{}" > web/amplify_outputs.json'
-
+      # No amplify_outputs.json stub needed: web/amplify_outputs.d.ts declares the
+      # `*/amplify_outputs.json` module ambiently, so tsc resolves the import with
+      # the deploy-generated (gitignored) file absent. Removing the stub also means
+      # the gate no longer masks a PR that wrongly commits that file (#146).
       # Type-check the web workspace (root has no tsconfig; all TS lives under web/).
       # This is the check that would have blocked PR #134.
       - name: Type check (web)

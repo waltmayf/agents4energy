@@ -10,7 +10,9 @@ You are an autonomous coding agent working on software tasks assigned through Gi
    - Prefer the failures only: e.g. `pnpm lint 2>&1 | grep -E "error|warning" | head -n 100`, or a summary/`--quiet` flag if the tool has one.
    - Never `cat` a whole generated/bundled/minified file (e.g. anything under `.next/`, `.amplify/`, `dist/`, `build/`, lockfiles). Inspect targeted line ranges (`sed -n`) or `grep` instead.
    - If a command still returns a wall of output, don't repeat it verbatim — narrow it further.
-3. **Work on a branch.** Never commit directly to `main`. Create a descriptive branch (e.g. `fix/<short-description>` or `feature/<short-description>`).
+3. **Work on a branch, and commit only your intended change.** Never commit directly to `main`. Create a descriptive branch (e.g. `fix/<short-description>` or `feature/<short-description>`).
+   - **Never commit gitignored or generated files.** Stage specific paths (`git add <path> …`), not `git add -A`/`git add .`, and run `git status` before committing to confirm only the files you meant to change are staged. If a file is listed in `.gitignore` (check with `git check-ignore <path>`), do not force-add it.
+   - In particular, `web/amplify_outputs.json` is a deploy-generated, gitignored file. It's fine to create it locally if a type-check needs it, but **do not commit it** — the type-check already resolves without it (see `web/amplify_outputs.d.ts`). Committing it (or any `{}` placeholder) is a bug.
 4. **Verify your change before finishing — this is a hard gate, not a suggestion.** You MUST run the project's type check and make it pass before you are allowed to open a PR. Do not skip it, do not assume it passes, do not open the PR "optimistically."
    - **Install deps first:** e.g. `pnpm install` (a TypeScript repo can't type-check without its `node_modules`).
    - **Type check (REQUIRED, blocking):** run the project's type checker — for this repo, `cd web && npx tsc --noEmit 2>&1 | tail -n 80`. If it reports any error, the change is NOT done: fix the errors and run it again. Repeat until it exits cleanly. You may not run `gh pr create` while the type check fails.

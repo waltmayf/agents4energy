@@ -2,4 +2,8 @@
 node_modules
 .amplify
 amplify_outputs*
+# but DO track the ambient type declaration for the generated JSON (checked in
+# so tsc resolves the import without the deploy-generated file — see the file's
+# header and issue #146). Without this negation, `amplify_outputs*` ignores it too.
+!amplify_outputs.d.ts
 amplifyconfiguration*
