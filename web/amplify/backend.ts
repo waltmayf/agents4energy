@@ -197,6 +197,22 @@ const agentCoreGatewaysWithUniqueNames = projectSpec.agentCoreGateways?.length
   ? projectSpec.agentCoreGateways.map((gateway: { name: string; [key: string]: unknown }) => ({
       ...gateway,
       resourceName: toGatewayResourceName(projectSpec.name, gateway.name, backendNamespace ?? '', backendName ?? ''),
+      // Re-derive the CUSTOM_JWT authorizer from THIS stack's own Cognito user
+      // pool, the same way the harness authorizer is (see harnessSpecs comment
+      // above). agentcore.json pins a discoveryUrl/allowedClients to a specific
+      // pool id from whenever it was generated; on `main` the gateway already
+      // exists so CloudFormation never re-reads them, but every fresh
+      // branch/sandbox creates a NEW gateway pointing at that now-deleted pool,
+      // whose discovery document 404s → "failed to fetch discovery document …
+      // Status Code: 400" → NotStabilized → the whole agent stack rolls back
+      // (#128). Pointing it at the live pool fixes it for good.
+      authorizerType: 'CUSTOM_JWT',
+      authorizerConfiguration: {
+        customJwtAuthorizer: {
+          discoveryUrl: cognitoDiscoveryUrl,
+          allowedClients: [backend.auth.resources.userPoolClient.userPoolClientId],
+        },
+      },
     }))
   : undefined;
 
