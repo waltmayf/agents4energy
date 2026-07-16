@@ -238,7 +238,7 @@ If your response involves code changes, create a new branch off ${defaultBranch}
 
       // Update the status comment (or post a new one) with the live-chat link.
       const liveBody = appUrl
-        ? `🤖 Agent is working… [Watch live](${appUrl}/chat-handler?sessionId=${sessionId})`
+        ? `🤖 Agent is working… [Watch live](${appUrl}/chat?sessionId=${sessionId})`
         : `🤖 Agent is working… (session \`${sessionId}\`)`;
 
       if (statusCommentId) {
