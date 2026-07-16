@@ -29,6 +29,12 @@ test('keeps only the final channel when analysis + final are both present', () =
 });
 
 test('drops analysis/commentary scaffolding when there is no final channel', () => {
+test('removes trailing raw tool-call JSON when no Harmony tokens present', () => {
+  const input = 'Now commit.{"command":"cd repo && git commit -m \"test\"","timeout":100000}';
+  const out = sanitizeHarmony(input);
+  assert.equal(out, 'Now commit.');
+});
+
   const input =
     '<|channel|>analysis<|message|>internal reasoning that should never be shown';
   const out = sanitizeHarmony(input);

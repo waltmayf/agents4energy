@@ -83,6 +83,27 @@ export function sanitizeHarmony(input: string): string {
     text = text.split(token).join('');
   }
 
+  // 2b. Detect and strip a trailing raw tool‑call JSON payload.
+  // Some model outputs leak a plain JSON object (e.g. {"command":"...","timeout":123})
+  // directly after the prose, without any Harmony delimiters. This object is meant
+  // to be interpreted as a tool invocation, not displayed to the user. If such a
+  // JSON blob appears at the very end of the string and parses successfully with
+  // a `command` property, drop it.
+  // The regex captures the last `{…}` block at the end of the text (allowing
+  // whitespace/newlines after it). We then attempt JSON.parse – if it succeeds and
+  // contains a string `command`, we truncate the text before the JSON.
+  const trailingJsonMatch = text.match(/\{[\s\S]*\}\s*$/);
+  if (trailingJsonMatch && typeof trailingJsonMatch.index === 'number') {
+    try {
+      const parsed = JSON.parse(trailingJsonMatch[0]);
+      if (parsed && typeof parsed.command === 'string') {
+        text = text.slice(0, trailingJsonMatch.index);
+      }
+    } catch {
+      // Not valid JSON – leave text untouched.
+    }
+  }
+
   // 3. Tidy whitespace left behind by the removals.
   return text
     .replace(/[ \t]{2,}/g, ' ')
