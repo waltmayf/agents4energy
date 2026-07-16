@@ -149,7 +149,7 @@ export class AgentWebhookStack extends Construct {
         ResultPath: '$.agentResult',
         Retry: [
           {
-            ErrorEquals: ['BedrockAgentCore.ThrottlingException'],
+            ErrorEquals: ['BedrockAgentCore.ThrottlingException','BedrockAgentCore.InternalServerException','BedrockAgentCore.RuntimeClientErrorException'],
             IntervalSeconds: 2,
             MaxAttempts: 3,
             BackoffRate: 2.0,
