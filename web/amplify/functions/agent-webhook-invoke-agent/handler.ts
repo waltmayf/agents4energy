@@ -365,6 +365,7 @@ export const handler = async (input: PrepareInput): Promise<PrepareOutput> => {
       `Clone with: git clone https://github.com/${repo}.git`,
       'Commit and push your branch normally (e.g. git push -u origin <your-branch>).',
       `Open the pull request directly with: gh pr create --repo ${repo} --base main --head <your-branch> --title "<title>" --body "<body>"`,
+'For large multi-file tasks, consider pushing your branch and opening a draft PR after each coherent chunk of changes to preserve progress if the harness run ends early.',
       'If `gh pr create` fails (it can hit a transient GitHub error), retry it 2-3 times with a short pause before giving up.',
       `Then CONFIRM the PR actually exists and capture its real URL: gh pr list --repo ${repo} --head <your-branch> --state open --json url --jq '.[0].url'`,
       'Report ONLY a real PR URL of the form `https://github.com/<owner>/<repo>/pull/<number>`. A `.../pull/new/...` URL is the "create a PR" form and means NO PR was created — never report it as the PR. If you only have that, state plainly that the branch was pushed but PR creation failed.',
