@@ -175,7 +175,7 @@ This is best-effort: a GitHub API failure here is logged (to the run's CloudWatc
 
 ### Git access: harness exec (same session as the agent)
 
-The harness runtime has its own shell but no `_prepare_workspace()` like the `AgUiHandler` runtime has. To give a GitHub run's agent write access, the git-auth Lambda (`agent-webhook-invoke-agent`, step 2) runs a setup command in the harness's runtime session via the **harness-exec API** — the SDK's `InvokeAgentRuntimeCommand` (`POST /runtimes/{harnessArn}/commands`) — **before** the native `invokeHarness` task, reusing the same `runtimeSessionId` (the Step Function's `runId`) for both so they land in the same container. (Verified empirically: a marker file written by an exec call is readable by the agent's code-interpreter tool in the same session.)
+The harness runtime has its own shell but no `_prepare_workspace()` like the `AgUiHandler` runtime has. To give a GitHub run's agent write access, the git-auth Lambda (`agent-webhook-invoke-agent`, step 2) runs a setup command in the harness's runtime session via the **harness-exec API** — the SDK's `InvokeAgentRuntimeCommand` (`POST /runtimes/{harnessArn}/commands`) — **before** the native `invokeHarness` task, reusing the same `runtimeSessionId` (the Step Function's `runId`) for both so they land in the same container. Since the `agentcore_code_interpreter` sandbox was removed (#191), the agent's own shell tool calls run in this same harness runtime session, so whatever the exec seeds (git/gh credentials, installed CLIs) is exactly what the agent sees — there is no separate execution environment.
 
 Two things here matter (both learned across #52/#53):
 

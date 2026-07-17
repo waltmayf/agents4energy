@@ -57,8 +57,12 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Resolve branch slug
+        # RAW_BRANCH comes from untrusted event context (a branch name / dispatch
+        # input can contain shell metacharacters), so it MUST be passed via env and
+        # referenced as "$RAW_BRANCH" — never interpolated into the script body.
+        env:
+          RAW_BRANCH: ${{ github.event.ref || inputs.branch }}
         run: |
-          RAW_BRANCH="${{ github.event.ref || inputs.branch }}"
           # Mirror scripts/build.sh's normalisation exactly, so this resolves to the
           # same --identifier the sandbox was deployed with (ampx limit is 15 chars).
           BRANCH_SLUG=$(echo "$RAW_BRANCH" | tr '/' '-' | tr '[:upper:]' '[:lower:]' | cut -c1-14)
