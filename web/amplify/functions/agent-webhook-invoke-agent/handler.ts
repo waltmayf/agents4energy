@@ -369,7 +369,7 @@ export const handler = async (input: PrepareInput): Promise<PrepareOutput> => {
       `Then CONFIRM the PR actually exists and capture its real URL: gh pr list --repo ${repo} --head <your-branch> --state open --json url --jq '.[0].url'`,
       'Report ONLY a real PR URL of the form `https://github.com/<owner>/<repo>/pull/<number>`. A `.../pull/new/...` URL is the "create a PR" form and means NO PR was created — never report it as the PR. If you only have that, state plainly that the branch was pushed but PR creation failed.',
       'Include the confirmed PR URL in your reply.',
-      'Before you run `gh pr create`, you MUST verify the change builds: run `pnpm install` then `cd web && npx tsc --noEmit` and make it pass. Fix any errors (a common one is referencing a value before its declaration) and re-run until it is clean. Do not open the PR while the type check fails, and do not claim it passed unless you actually ran it and it did.',
+      'Before you run `gh pr create`, you MUST verify the change builds: run `pnpm install` at the REPOSITORY ROOT (this is a pnpm workspace with one root lockfile — the root install is what populates web/node_modules; do NOT run it inside web/), then `cd web && npx tsc --noEmit` and make it pass. Fix any errors (a common one is referencing a value before its declaration) and re-run until it is clean. If tsc reports many missing core modules (react, @aws-amplify/backend, aws-cdk-lib), that means deps were not installed at the root — re-run `pnpm install` at the repo root, it is not a problem with your change. Do not open the PR while the type check fails, and do not claim it passed unless you actually ran it and it did.',
       '</github_access>',
     ].join('\n');
   }
