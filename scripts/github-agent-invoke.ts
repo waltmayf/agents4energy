@@ -13,7 +13,7 @@
  * Required environment variables (set by setup-github-integration.ts):
  *   GITHUB_EVENT_PATH           — path to the event JSON file (built-in Actions env)
  *   GITHUB_TOKEN                — built-in token for posting comments
- *   INVOKE_AGENT_RUNTIME_ARN    — ARN of the AgUiHandler AgentCore runtime
+ *   INVOKE_AGENT_RUNTIME_ARN    — ARN of the MyHarness AgentCore harness
  *   APPSYNC_ENDPOINT            — AppSync GraphQL endpoint URL
  *   APP_URL                     — Base URL of the deployed web app (optional)
  *   AWS_REGION                  — AWS region (default us-east-1)
