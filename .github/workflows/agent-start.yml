@@ -17,9 +17,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Resolve issue details via GraphQL
+        # All GitHub event context is untrusted input and must be passed via env,
+        # never interpolated into the script body (script-injection hardening).
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ISSUE_NODE_ID: ${{ github.event.issue.node_id }}
+          TRIGGERED_BY: ${{ github.actor }}
         run: |
           set -euo pipefail
           gh api graphql \
@@ -38,7 +41,7 @@ jobs:
               }' \
             -F id="$ISSUE_NODE_ID" > issue.json
 
-          jq --arg triggered_by "${{ github.actor }}" '{
+          jq --arg triggered_by "$TRIGGERED_BY" '{
             repo_owner:     .data.node.repository.owner.login,
             repo_name:      .data.node.repository.name,
             repo_url:       .data.node.repository.url,
@@ -63,10 +66,11 @@ jobs:
       - name: Start SDLC pipeline
         env:
           STATE_MACHINE_ARN: ${{ secrets.SDLC_PIPELINE_STATE_MACHINE_ARN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
         run: |
           EXECUTION_ARN=$(aws stepfunctions start-execution \
             --state-machine-arn "$STATE_MACHINE_ARN" \
-            --name "issue-${{ github.event.issue.number }}-$(date +%s)" \
+            --name "issue-${ISSUE_NUMBER}-$(date +%s)" \
             --input file://payload.json \
             --query "executionArn" --output text)
 
@@ -76,7 +80,9 @@ jobs:
       - name: Comment on issue
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
         run: |
-          gh issue comment ${{ github.event.issue.number }} \
-            --repo "${{ github.repository }}" \
+          gh issue comment "$ISSUE_NUMBER" \
+            --repo "$REPO" \
             --body "🤖 **Agent pipeline started.** The coding assistant is working on this issue. A PR will be created when ready."
