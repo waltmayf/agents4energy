@@ -135,15 +135,10 @@ async def ping():
 def shell(command: str, cwd: str = "/") -> str:
     """
     Execute a shell command and return its combined stdout+stderr output.
-    Use this to run git commands, gh CLI, tests, build scripts, or any shell operation.
-
-    Args:
-        command: Shell command to execute (passed to /bin/sh -c).
-        cwd: Working directory (default: /).
-
-    Returns:
-        Combined stdout and stderr output, with exit code appended if non-zero.
+    Added verification for `gh pr create` to ensure a real PR is opened.
     """
+    import shlex, json, re, time
+    # Run the command
     result = subprocess.run(
         command,
         shell=True,
@@ -155,6 +150,54 @@ def shell(command: str, cwd: str = "/") -> str:
     output = (result.stdout + result.stderr).strip()
     if result.returncode != 0:
         output += f"\n[exit code {result.returncode}]"
+    # If this is a gh pr create command, verify the PR exists and retry if needed
+    try:
+        if command.lstrip().startswith("gh pr create"):
+            # Extract the branch name after --head
+            parts = shlex.split(command)
+            branch = None
+            if "--head" in parts:
+                idx = parts.index("--head")
+                if idx + 1 < len(parts):
+                    branch = parts[idx + 1]
+            # Retry loop
+            max_retries = 3
+            for attempt in range(max_retries):
+                if branch:
+                    # Check if a PR exists for this branch
+                    verify = subprocess.run(
+                        ["gh", "pr", "list", "--head", branch, "--json", "url"],
+                        capture_output=True,
+                        text=True,
+                    )
+                    if verify.returncode == 0:
+                        try:
+                            urls = json.loads(verify.stdout)
+                            if urls:
+                                pr_url = urls[0].get("url")
+                                # Replace any placeholder pull/new URL with the real one
+                                output = re.sub(r"https://github\.com/.+/pull/new/[^\s]+", pr_url, output)
+                                return output or "(no output)"
+                        except Exception:
+                            pass
+                # If not found, wait and retry the create command
+                if attempt < max_retries - 1:
+                    time.sleep(1)
+                    # Re-run the original command
+                    result = subprocess.run(
+                        command,
+                        shell=True,
+                        cwd=cwd,
+                        capture_output=True,
+                        text=True,
+                        timeout=120,
+                    )
+                    output = (result.stdout + result.stderr).strip()
+                    if result.returncode != 0:
+                        output += f"\n[exit code {result.returncode}]"
+    except Exception as e:
+        # If anything goes wrong, we still return the original output
+        output += f"\n[verification error: {e}]"
     return output or "(no output)"
 
 
