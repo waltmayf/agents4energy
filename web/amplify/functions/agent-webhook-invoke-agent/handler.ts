@@ -352,20 +352,23 @@ export const handler = async (input: PrepareInput): Promise<PrepareOutput> => {
   }
 
   // The exec above authenticated both `git` and `gh` for the target repo in
-  // this session's shell — tell the agent so it clones/pushes/opens PRs with
-  // its code interpreter tool instead of assuming (as it did in #48) that it
-  // lacks write access.
+  // this session's shell — the same harness runtime session the agent's shell
+  // tool runs in — so tell the agent it can clone/push/open PRs instead of
+  // assuming (as it did in #48) that it lacks write access.
   let effectivePrompt = effectivePromptWithContext;
   if (repo) {
     effectivePrompt = [
       effectivePromptWithContext,
       '',
       '<github_access>',
-      `Your code interpreter's git and gh CLIs are already authenticated for the repository ${repo} — git clone/commit/push and gh pr create all work with no token setup needed.`,
+      `git and gh are already authenticated for the repository ${repo} in your shell — git clone/commit/push and gh pr create all work with no token setup needed.`,
       `Clone with: git clone https://github.com/${repo}.git`,
       'Commit and push your branch normally (e.g. git push -u origin <your-branch>).',
       `Open the pull request directly with: gh pr create --repo ${repo} --base main --head <your-branch> --title "<title>" --body "<body>"`,
-      'Include the resulting PR URL (printed by `gh pr create`) in your reply.',
+      'If `gh pr create` fails (it can hit a transient GitHub error), retry it 2-3 times with a short pause before giving up.',
+      `Then CONFIRM the PR actually exists and capture its real URL: gh pr list --repo ${repo} --head <your-branch> --state open --json url --jq '.[0].url'`,
+      'Report ONLY a real PR URL of the form `https://github.com/<owner>/<repo>/pull/<number>`. A `.../pull/new/...` URL is the "create a PR" form and means NO PR was created — never report it as the PR. If you only have that, state plainly that the branch was pushed but PR creation failed.',
+      'Include the confirmed PR URL in your reply.',
       'Before you run `gh pr create`, you MUST verify the change builds: run `pnpm install` then `cd web && npx tsc --noEmit` and make it pass. Fix any errors (a common one is referencing a value before its declaration) and re-run until it is clean. Do not open the PR while the type check fails, and do not claim it passed unless you actually ran it and it did.',
       '</github_access>',
     ].join('\n');
