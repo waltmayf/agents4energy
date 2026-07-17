@@ -25,7 +25,7 @@ Use `./scripts/graphql.sh` to run ad-hoc queries/mutations against the deployed 
 Handy for investigating chat sessions: `listSessionMessages` returns the raw stored events (`role`, `text`, `contentJson`, `timestamp`) exactly as the frontend loads them. The `actorId` for harness sessions is always `"default"`. Results are paginated — follow `nextToken` to get older turns. To reproduce how the UI renders a session, feed the events (sorted ascending by `timestamp`) through `web/lib/converse-to-agui.ts`.
 
 ### Updating GitHub workflows
-You can't direclty push changes to `.github/workflows/`, so instead update `.github/workflow-drafts/` and ask the user to copy the workflow to the other folder.
+The GitHub-hosted Claude Code Action (running as the GitHub App) can't push changes to `.github/workflows/` — in that context, update `.github/workflow-drafts/` instead and ask the user to copy the workflow to the other folder. The local Claude Code CLI does have write access to `.github/workflows/` and may edit and push those files directly (keep the matching draft in sync).
 
 ### GitHub Issues
 
