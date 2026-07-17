@@ -15,14 +15,14 @@ The `agent/` directory contains two things that are easy to confuse:
 | `agent/default/` | The AgentCore CLI project root. `agentcore.json` here is read at Amplify synth time for memories/gateways — the CLI itself (`agentcore dev`, `agentcore validate`) remains usable for local iteration, but `agentcore deploy` is no longer part of the production pipeline. |
 | `agent/default/agentcore/agentcore.json` | Declarative source of truth for memories and gateways. Harness config is **not** read from here for the Amplify deploy path — see below. |
 | `agent/default/app/MyHarness/system-prompt.md` | The harness's system prompt text, read from disk by `backend.ts`. Everything else about the harness (model, tools, memory link, truncation) is inlined as literal `CfnHarness`-shaped objects directly in `web/amplify/backend.ts` — there is no `harness.json`. |
-| `agent/handler/` | Python source for the Strands agent container (FastAPI + uvicorn). **Not its own deploy unit** — it's referenced directly by `web/amplify/backend.ts` via `AgentCoreRuntimeWithBuild`. |
 
-`web/amplify/backend.ts` builds both resources directly inside the `agentStack` CDK stack:
+`web/amplify/backend.ts` builds the AgentCore resources directly inside the `agentStack` CDK stack:
 
-1. **`AgUiHandler` runtime** — `AgentCoreRuntimeWithBuild` builds `agent/handler/` into a Docker image, pushes to ECR, and creates the AgentCore runtime as a same-stack CDK resource. Used by the `/chat-handler` page via AppSync mutation → HTTP resolver.
-2. **`MyHarness` harness** (plus `MyHarnessMemory` and the MCP gateway) — built by the `AgentCoreApplication` construct (`web/amplify/constructs/agentCoreApplication.ts`) from a `HarnessSpec` inlined literally in `backend.ts` (memory/gateway config still comes from `agentcore.json`). Used by the original `/chat` page via the SigV4 streaming transport.
+- **`MyHarness` harness** (plus `MyHarnessMemory` and the MCP gateway) — built by the `AgentCoreApplication` construct (`web/amplify/constructs/agentCoreApplication.ts`) from a `HarnessSpec` inlined literally in `backend.ts` (memory/gateway config still comes from `agentcore.json`). It is the **sole runtime**, used by the `/chat` page via the SigV4 streaming transport.
 
-Both share `MyHarnessMemory`, so both chat surfaces see the same conversation history. Because everything is same-stack, all ARNs are CDK tokens resolved at synth time — no post-deploy control-plane lookups are needed.
+> The former `AgUiHandler` runtime (`AgentCoreRuntimeWithBuild` building the Python `agent/handler/` container, plus the `/chat-handler` page and `invokeHandler`/`publishAgentEvent`/`onAgentEvent` AppSync wiring) was **retired in #33** — `MyHarness` is now the only runtime. See [ag-ui-handler-pattern.md](ag-ui-handler-pattern.md) for the historical design.
+
+Because everything is same-stack, all ARNs are CDK tokens resolved at synth time — no post-deploy control-plane lookups are needed.
 
 ---
 
@@ -40,7 +40,7 @@ bedrock-agentcore.{region}.amazonaws.com/harnesses/invoke
 MyHarness (AgentCore Harness)
   ├── Model: OpenAI GPT-OSS-120B via Bedrock (chat completions format)
   ├── Memory: MyHarnessMemory (semantic + episodic)
-  ├── Built-in tools: Browser, Code Interpreter
+  ├── Built-in tools: Browser
   └── Remote MCP tools: injected per-request from agent config
 ```
 
@@ -54,7 +54,7 @@ The harness is configured directly in [`web/amplify/backend.ts`](../web/amplify/
 |---------|-------|
 | Model | `openai.gpt-oss-120b` via Bedrock, chat completions API format |
 | Memory | `MyHarnessMemory` (persistent, per-user + per-session) |
-| Built-in tools | `agentcore_browser`, `agentcore_code_interpreter` |
+| Built-in tools | `agentcore_browser` (the `agentcore_code_interpreter` sandbox was removed — see #191; the agent runs shell commands in the harness runtime session instead) |
 | Auth | AWS_IAM — every caller invokes via the SDK's `InvokeHarnessCommand`, SigV4-signed. Omitting `authorizerConfiguration` on the `CfnHarness` selects IAM. Callers are granted `bedrock-agentcore:InvokeHarness` on the harness ARN (`web/amplify/backend.ts`) |
 | Context truncation | Summarization (preserves 10 most-recent messages, summarizes the rest) |
 
@@ -233,7 +233,6 @@ Bedrock: openai.gpt-oss-120b
        ▼
 AgentCore tool execution
   ├── agentcore_browser  (if invoked)
-  ├── agentcore_code_interpreter  (if invoked)
   └── remote_mcp call to external server  (if invoked)
        │
        ▼

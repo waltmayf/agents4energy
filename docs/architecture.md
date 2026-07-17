@@ -6,7 +6,7 @@ This monorepo deploys everything from a single `npx ampx sandbox --once` command
 
 - **`web/`** — Next.js frontend backed by Amplify Gen 2 (Cognito auth, AppSync data)
 - **`hostingStack`** — S3 + CloudFront static website hosting (defined in `backend.ts`)
-- **`agentStack`** — Bedrock AgentCore Runtime (builds + deploys the Python handler from `agent/handler/`), plus the AgentCore Harness, Memory, and Gateway (built via the `AgentCoreApplication` construct — Memory/Gateway from `agent/default/agentcore/agentcore.json`, the Harness inlined literally in `backend.ts`)
+- **`agentStack`** — the AgentCore Harness (`MyHarness`), Memory, and Gateway, built via the `AgentCoreApplication` construct (Memory/Gateway from `agent/default/agentcore/agentcore.json`, the Harness inlined literally in `backend.ts`). `MyHarness` is the sole runtime; the former `AgUiHandler` Python-container runtime was retired in #33.
 
 All of this is deployed together with a single `npx ampx sandbox --once --identifier <branch>` command — there is no separate `agentcore deploy` step in the production pipeline. `amplify_outputs.json` is written by Amplify and includes all ARNs and endpoints needed for the frontend. The `agentcore` CLI (`agentcore dev`, `agentcore validate`, etc.) remains usable for local iteration against the same `agentcore.json` file for memories/gateways — it just isn't part of the deploy path anymore.
 
@@ -25,7 +25,6 @@ Every branch/sandbox deploys to its own S3 prefix and is served at `https://<dom
 │   │   ├── data/resource.ts    # AppSync GraphQL API
 │   │   └── constructs/
 │   │       ├── hostingConstruct.ts          # S3 + CloudFront hosting
-│   │       ├── agentCoreRuntimeWithBuild.ts # Builds Docker image + deploys CfnRuntime
 │   │       └── agentCoreApplication.ts      # Harness (inlined in backend.ts) + Memory/Gateway (from agentcore.json)
 │   └── amplify_outputs.json    # Written by Amplify after each deploy (DO NOT EDIT)
 │
@@ -56,9 +55,7 @@ pnpm run deploy
        │    ├─ Deploys Cognito, AppSync, Lambda functions
        │    ├─ hostingStack: S3 bucket + CloudFront distribution
        │    ├─ agentStack:
-       │    │    ├─ builds agent/handler/ Docker image → ECR, creates Bedrock AgentCore CfnRuntime
-       │    │    ├─ AgentCoreApplication: Harness + Memory + Gateway from agentcore.json
-       │    │    └─ escape-hatches Mutation.invokeHandler to an HTTP resolver targeting the runtime
+       │    │    └─ AgentCoreApplication: Harness (MyHarness) + Memory + Gateway from agentcore.json
        │    └─ writes web/amplify_outputs.json (all ARNs + endpoints)
        │
        ├─ pnpm --filter web build  (Next.js static export)
@@ -83,8 +80,6 @@ Currently exported under `custom`:
 | `hosting_bucket_name` | S3 bucket for static website files |
 | `hosting_distribution_id` | CloudFront distribution ID (for cache invalidation) |
 | `hosting_domain` | CloudFront domain name (e.g. `abc123.cloudfront.net`) |
-| `agui_runtime_arn` | Bedrock AgentCore Runtime ARN for the AG-UI handler |
-| `agui_runtime_role_arn` | Execution role ARN for the AgentCore runtime |
 | `agentcore_region` | Region the AgentCore resources are deployed in |
 | `agentcore_memory_id` / `agentcore_memory_arn` | AgentCore Memory identifiers (`MyHarnessMemory`) |
 | `agentcore_harness_arn` / `agentcore_harness_role_arn` | AgentCore Harness (`MyHarness`) identifiers |
@@ -98,15 +93,15 @@ const hostingStack = backend.createStack('hosting');
 const hosting = new HostingConstruct(hostingStack, 'Hosting');
 
 const agentStack = backend.createStack('agent');
-const agUiHandlerRuntime = new AgentCoreRuntimeWithBuild(agentStack, 'AgUiHandler', {
-  protocolConfiguration: 'AGUI',
-  imageAssetDirectory: path.resolve(__dirname, '../../../agent/handler'),
-  cognitoDiscoveryUrl: '...',   // Cognito OIDC discovery URL
-  allowedClients: [...],         // Cognito User Pool Client IDs
+const agentCoreApp = new AgentCoreApplication(agentStack, 'AgentCoreApplication', {
+  projectName: uniqueProjectName,
+  memories: projectSpec.memories,
+  harnesses: harnessSpecs,        // MyHarness, inlined as CfnHarness-shaped objects
+  mcpSpec: { agentCoreGateways: [...] },
 });
 ```
 
-The `AgentCoreRuntimeWithBuild` construct builds the Docker image from `agent/handler/` (ARM64 cross-compile), pushes it to ECR, and creates a `CfnRuntime` with Cognito JWT authorization. The `HostingConstruct` creates an S3 bucket + CloudFront distribution with SPA routing.
+The `AgentCoreApplication` construct creates the Harness (`MyHarness`), Memory, and MCP Gateway as same-stack CDK resources. The `HostingConstruct` creates an S3 bucket + CloudFront distribution with SPA routing. (`MyHarness` is the sole runtime — the former `AgUiHandler` Python-container runtime and its `AgentCoreRuntimeWithBuild` construct were retired in #33.)
 
 ## Adding New Cross-Project Exports
 
