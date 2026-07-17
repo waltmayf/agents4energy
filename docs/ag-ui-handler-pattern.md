@@ -1,4 +1,6 @@
-# AG-UI Handler Pattern
+# AG-UI Handler Pattern (RETIRED)
+
+> **⚠️ Retired (#33).** The AG-UI Handler runtime described here — the Python `agent/handler/` container (`AgUiHandler`), the `/chat-handler` page, and the `invokeHandler`/`publishAgentEvent`/`onAgentEvent` AppSync wiring — has been **removed from the codebase**. `MyHarness` is now the sole runtime (see [agentic-architecture.md](agentic-architecture.md)). This document is kept only as a record of the historical design.
 
 This document describes the AG-UI over AppSync subscription architecture introduced alongside the existing harness transport.  The `/chat-handler` page uses this pattern; the original `/chat` page and harness transport are unchanged.
 

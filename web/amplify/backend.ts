@@ -11,15 +11,13 @@ import { agentWebhookReceiver } from './functions/agent-webhook-receiver/resourc
 import { agentWebhookPostComment } from './functions/agent-webhook-post-comment/resource';
 import { agentWebhookInvokeAgent } from './functions/agent-webhook-invoke-agent/resource';
 import { agentWebhookAuthorizer } from './functions/agent-webhook-authorizer/resource';
-import { Policy, PolicyStatement, ServicePrincipal, Effect, Role } from 'aws-cdk-lib/aws-iam';
+import { Policy, PolicyStatement, ServicePrincipal } from 'aws-cdk-lib/aws-iam';
 import { Function as LambdaFunction } from 'aws-cdk-lib/aws-lambda';
 import { Fn, Stack, CfnOutput } from 'aws-cdk-lib';
-import { HttpDataSource, CfnResolver } from 'aws-cdk-lib/aws-appsync';
 import { fileURLToPath } from 'url';
 import { resolve, dirname } from 'path';
 import { readFileSync } from 'fs';
 import { HostingConstruct } from './constructs/hostingConstruct';
-import { AgentCoreRuntimeWithBuild } from './constructs/agentCoreRuntimeWithBuild';
 import { AgentCoreApplication, type HarnessSpec } from './constructs/agentCoreApplication';
 import { E2eTestUser } from './constructs/e2eTestUser/resource';
 import { AgentWebhookStack } from './constructs/agentWebhookStack';
@@ -63,7 +61,12 @@ const harnessSpecs: HarnessSpec[] = [
     systemPrompt: myHarnessSystemPrompt,
     tools: [
       { type: 'agentcore_browser', name: 'browser', config: { agentCoreBrowser: {} } },
-      // { type: 'agentcore_code_interpreter', name: 'code-interpreter', config: { agentCoreCodeInterpreter: {} } },
+      // The agentcore_code_interpreter sandbox was intentionally removed (#191):
+      // it ran the model's shell commands in an isolated environment separate
+      // from the harness runtime session that the webhook git-auth step seeds,
+      // causing the split-brain in #190. With it gone, the agent runs shell
+      // commands in the harness runtime session, so seeded git/gh credentials
+      // and installed CLIs are exactly what the agent sees.
     ],
     memoryName: 'MyHarnessMemory',
     truncation: {
@@ -161,14 +164,6 @@ const cognitoDiscoveryUrl = Fn.join('', [
   '/.well-known/openid-configuration',
 ]);
 
-const agUiHandlerRuntime = new AgentCoreRuntimeWithBuild(agentStack, 'AgUiHandler', {
-  protocolConfiguration: 'AGUI',
-  imageAssetDirectory: resolve(__dirname, '../../agent/handler'),
-  cognitoDiscoveryUrl: cognitoDiscoveryUrl,
-  allowedClients: [backend.auth.resources.userPoolClient.userPoolClientId],
-  description: 'AG-UI handler runtime for the agentcore-amplify-fullstack app',
-});
-
 // MyHarness authorizes with AWS_IAM (SigV4), not CUSTOM_JWT: omitting
 // `authorizerConfiguration` makes a CfnHarness default to IAM auth. Every
 // caller (the browser transport, the invoke-agent + webhook Lambdas, and
@@ -184,9 +179,9 @@ const agUiHandlerRuntime = new AgentCoreRuntimeWithBuild(agentStack, 'AgUiHandle
 const harnessSpecsWithAuth: HarnessSpec[] = harnessSpecs;
 
 // Memory/Harness/Gateway from agentcore.json — same-stack CDK tokens, no
-// post-deploy control-plane resolution needed. `AgUiHandler` is excluded
-// from `spec.runtimes` here since AgentCoreRuntimeWithBuild above already
-// owns that CfnRuntime.
+// post-deploy control-plane resolution needed. agentcore.json's `runtimes` is
+// empty: the AgUiHandler runtime was retired (#33) and MyHarness is the sole
+// runtime.
 //
 // `name` in agentcore.json is just the logical/config name — the physical
 // CfnGateway name comes from `resourceName` when set (see Gateway.js in
@@ -585,137 +580,8 @@ if (AGENTCORE_GATEWAY_ARN) {
   });
 }
 
-// Grant the runtime execution role permission to invoke the AgentCore runtime
-// (needed for AppSync → runtime invocations post-deploy wiring)
-agUiHandlerRuntime.executionRole.addToPrincipalPolicy(new PolicyStatement({
-  effect: Effect.ALLOW,
-  actions: ['bedrock:InvokeModel', 'bedrock:InvokeModelWithResponseStream'],
-  resources: ['*'],
-}));
-
-// Grant the runtime execution role read access to the harness memory so the
-// container can seed prior conversation turns into the Strands agent.
-if (AGENTCORE_MEMORY_ARN) {
-  agUiHandlerRuntime.executionRole.addToPrincipalPolicy(new PolicyStatement({
-    actions: ['bedrock-agentcore:ListEvents'],
-    resources: [AGENTCORE_MEMORY_ARN],
-  }));
-}
-
-// ============================================================================
-// AG-UI HANDLER — wire Mutation.invokeHandler to the AgentCore runtime.
-//
-// The schema declares invokeHandler with a NONE_DS stub handler (see
-// aguiHandler.schema.ts) purely so the transformer synthesizes the field.
-// Here we escape-hatch the transformer-generated CfnResolver + CfnDataSource
-// in place so Amplify's CFn stack fully owns the real HTTP resolver — no
-// post-deploy AppSync CLI wiring script needed.
-// ============================================================================
-
-// The data stack's resources (cfnGraphqlApi, resolver, new data source/role below)
-// must all be created in the *same* CDK stack as backend.data — mixing scopes
-// here (e.g. creating AgUiHandlerDataSource in agentStack) makes the data stack
-// depend on the agent stack (via cfnGraphqlApi.environmentVariables) while the
-// agent stack simultaneously depends on the data stack (via backend.data.resources
-// .graphqlApi), producing a circular nested-stack dependency that CloudFormation
-// rejects at deploy time.
+// The GraphQL API's CfnResource, referenced by the appsync_api_id output below.
 const cfnGraphqlApi = backend.data.resources.cfnResources.cfnGraphqlApi;
-const dataStack = Stack.of(cfnGraphqlApi);
-cfnGraphqlApi.environmentVariables = { AGUI_RUNTIME_ARN: agUiHandlerRuntime.runtime.attrAgentRuntimeArn };
-
-const appsyncRegion = Stack.of(agentStack).region;
-const httpDsRole = new Role(dataStack, 'AgUiHandlerDataSourceRole', {
-  assumedBy: new ServicePrincipal('appsync.amazonaws.com'),
-  description: 'Role AppSync assumes to invoke the AgUiHandler AgentCore runtime',
-});
-httpDsRole.addToPrincipalPolicy(new PolicyStatement({
-  actions: ['bedrock-agentcore:InvokeAgentRuntime'],
-  resources: [
-    agUiHandlerRuntime.runtime.attrAgentRuntimeArn,
-    `${agUiHandlerRuntime.runtime.attrAgentRuntimeArn}/runtime-endpoint/*`,
-  ],
-}));
-
-const agUiHandlerDataSource = new HttpDataSource(dataStack, 'AgUiHandlerDataSource', {
-  api: backend.data.resources.graphqlApi,
-  endpoint: `https://bedrock-agentcore.${appsyncRegion}.amazonaws.com`,
-  authorizationConfig: {
-    signingRegion: appsyncRegion,
-    signingServiceName: 'bedrock-agentcore',
-  },
-  serviceRole: httpDsRole,
-});
-
-// Grant the runtime execution role permission to publish AG-UI events back to
-// AppSync — agent.py's publish_event() SigV4-signs a `publishAgentEvent`
-// mutation using the runtime's own (execution role) credentials against the
-// appsync service (see docs/ag-ui-handler-pattern.md). Defined here (dataStack
-// scope, same as httpDsRole above) rather than in agentStack: the field ARN is
-// built from cfnGraphqlApi.attrApiId (a dataStack-native token), and dataStack
-// already depends on agentStack one-directionally (via the runtime ARN used
-// above) — attaching the reverse reference to agentStack's role from agentStack
-// itself would reintroduce the circular nested-stack dependency described above.
-new Policy(dataStack, 'AgUiHandlerPublishEventPolicy', {
-  roles: [agUiHandlerRuntime.executionRole],
-  statements: [
-    new PolicyStatement({
-      actions: ['appsync:GraphQL'],
-      resources: [
-        `arn:aws:appsync:${appsyncRegion}:${Stack.of(dataStack).account}:apis/${cfnGraphqlApi.attrApiId}/types/Mutation/fields/publishAgentEvent`,
-      ],
-    }),
-  ],
-});
-
-// The `a.handler.custom()` field in aguiHandler.schema.ts synthesizes its CfnResolver
-// directly under the `data` scope (id "Resolver_Mutation_invokeHandler") rather than
-// inside the amplifyData nested stack, so it never gets the transformer's
-// "graphqltransformer:resourceName" metadata and isn't reachable via
-// backend.data.resources.cfnResources.cfnResolvers['Mutation.invokeHandler'].
-const invokeHandlerResolver = backend.data.resources.graphqlApi.node.root.node
-  .findAll()
-  .find((child) => child.node.id === 'Resolver_Mutation_invokeHandler') as CfnResolver | undefined;
-if (!invokeHandlerResolver) {
-  throw new Error('Mutation.invokeHandler CfnResolver (Resolver_Mutation_invokeHandler) not found in construct tree.');
-}
-
-invokeHandlerResolver.dataSourceName = agUiHandlerDataSource.name;
-invokeHandlerResolver.kind = 'UNIT';
-// The transformer originally synthesized this as a PIPELINE resolver (for the
-// NONE_DS stub function), which sets pipelineConfig. CloudFormation rejects a
-// UNIT resolver that still carries a pipelineConfig ("Only pipeline resolver
-// can have pipelineconfig"), so it must be explicitly cleared here.
-invokeHandlerResolver.pipelineConfig = undefined;
-invokeHandlerResolver.runtime = { name: 'APPSYNC_JS', runtimeVersion: '1.0.0' };
-invokeHandlerResolver.code = `import { util } from '@aws-appsync/utils';
-export function request(ctx) {
-  return {
-    method: 'POST',
-    resourcePath: \`/runtimes/\${util.urlEncode(ctx.env.AGUI_RUNTIME_ARN)}/invocations?qualifier=DEFAULT\`,
-    params: {
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Amzn-Bedrock-AgentCore-Runtime-Session-Id': ctx.args.sessionId,
-      },
-      body: JSON.stringify({
-        sessionId: ctx.args.sessionId,
-        prompt: ctx.args.prompt,
-        systemPrompt: ctx.args.systemPrompt,
-        modelId: ctx.args.modelId,
-        summary: ctx.args.summary,
-        githubToken: ctx.args.githubToken,
-        githubRepo: ctx.args.githubRepo,
-        githubBranch: ctx.args.githubBranch,
-      }),
-    },
-  };
-}
-export function response(ctx) {
-  if (ctx.error) { util.error(ctx.error.message, ctx.error.type); }
-  const body = JSON.parse(ctx.result.body);
-  return { sessionId: body.sessionId || ctx.args.sessionId };
-}`;
-invokeHandlerResolver.node.addDependency(agUiHandlerDataSource);
 
 // ============================================================================
 // EXPORTS — consumed by the frontend via amplify_outputs.json custom outputs
@@ -730,9 +596,6 @@ backend.addOutput({
     hosting_bucket_name: hosting.bucket.bucketName,
     hosting_distribution_id: hosting.distribution.distributionId,
     hosting_domain: hosting.distributionDomainName,
-    // AgentCore runtime outputs
-    agui_runtime_arn: agUiHandlerRuntime.runtime.attrAgentRuntimeArn,
-    agui_runtime_role_arn: agUiHandlerRuntime.executionRole.roleArn,
     // AgentCore harness/memory/gateway outputs — replaces web/deployment-info.json
     agentcore_region: AGENTCORE_REGION,
     agentcore_memory_id: AGENTCORE_MEMORY_ID,

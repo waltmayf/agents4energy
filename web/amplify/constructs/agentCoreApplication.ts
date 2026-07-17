@@ -83,9 +83,9 @@ export interface AgentCoreApplicationProps {
  * CDK app so their ARNs are same-stack tokens instead of values discovered post-deploy
  * via the `agentcore` CLI's control-plane API. Harness specs are inlined literally by
  * the caller (`backend.ts`) as `CfnHarness`-shaped objects — no `harness.json`/
- * translation layer. Memories/gateways still come from `agentcore.json`. Excludes
- * the `AgUiHandler` runtime (owned by `AgentCoreRuntimeWithBuild` to avoid a
- * duplicate CfnRuntime).
+ * translation layer. Memories/gateways still come from `agentcore.json`. This
+ * app has no CfnRuntime — the AgUiHandler runtime was retired (#33); MyHarness
+ * is the sole runtime.
  */
 export class AgentCoreApplication extends Construct {
   public readonly memories: Map<string, AgentCoreMemoryType> = new Map();
