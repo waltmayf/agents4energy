@@ -69,6 +69,22 @@ app.use(express.json({ limit: '25mb' }));
 // the ~8h session cap) until the job finishes and resumes the SFN task.
 let activeJobs = 0;
 
+// In-flight BACKGROUND jobs, keyed by runId, so a later cancel invocation can
+// abort a superseded run (issue #182). A newer @agentcore-claude comment on the
+// same issue supersedes the one already running; the webhook routes a
+// `{ action: 'cancel', runId }` invocation to THIS run's session
+// (runtimeSessionId === runId), which lands on the same microVM, and we kill the
+// spawned CLI. Each value is `{ child, taskToken, cancelled }` — `child` is null
+// until the CLI is spawned (the job may still be cloning), and `cancelled` lets
+// the onSpawn hook kill a job that was cancelled before its CLI even started.
+const runningJobs = new Map();
+
+// Cause reported (via SendTaskFailure) when a run is cancelled. The SFN Catch
+// turns this into a PostFailureComment; deliberately omits the raw "@" mention
+// so the superseded-run comment can never re-trigger the webhook.
+const SUPERSEDED_CAUSE =
+  'Cancelled: superseded by a newer agentcore-claude comment on the same issue.';
+
 app.get('/ping', (_req, res) => {
   res.status(200).json({
     status: activeJobs > 0 ? 'HealthyBusy' : 'Healthy',
@@ -80,12 +96,47 @@ app.get('/ping', (_req, res) => {
 
 app.post('/invocations', async (req, res) => {
   const payload = req.body ?? {};
+
+  // CANCEL ACTION (issue #182): a control invocation, not a work request. The
+  // webhook sends `{ action: 'cancel', runId }` to the superseded run's session
+  // so it lands on the same microVM as the job to kill. Handle it before the
+  // prompt check (a cancel carries no prompt).
+  if (payload.action === 'cancel') {
+    const cancelRunId = typeof payload.runId === 'string' ? payload.runId : '';
+    const cancelLog = (...args) => console.log('[invocations][cancel]', ...args);
+    cancelLog(`request for runId=${cancelRunId || '(none)'} (tracked=${runningJobs.size})`);
+    const job = cancelRunId ? runningJobs.get(cancelRunId) : undefined;
+    if (!job) {
+      // Nothing to cancel on this microVM — the job already finished, never ran
+      // here, or the session was reclaimed. Not an error: report it and move on.
+      res.status(200).json({ cancelled: false, reason: 'no matching in-flight job' });
+      return;
+    }
+    // Mark cancelled so runManagedJob resolves to a sentinel (→ SendTaskFailure
+    // with the superseded cause) instead of SendTaskSuccess, and so a job still
+    // cloning (child not yet spawned) gets killed the instant its CLI starts.
+    job.cancelled = true;
+    if (job.child) {
+      cancelLog(`killing claude process for runId=${cancelRunId}`);
+      job.child.kill('SIGTERM');
+      // Escalate if the CLI ignores SIGTERM (e.g. stuck in a subprocess).
+      job.killTimer = setTimeout(() => {
+        try { job.child.kill('SIGKILL'); } catch { /* already gone */ }
+      }, 5000);
+    } else {
+      cancelLog(`runId=${cancelRunId} not yet spawned; will abort on spawn`);
+    }
+    res.status(200).json({ cancelled: true });
+    return;
+  }
+
   const prompt = typeof payload.prompt === 'string' ? payload.prompt.trim() : '';
   if (!prompt) {
     res.status(400).json({ error: 'payload.prompt is required' });
     return;
   }
 
+  const runId = typeof payload.runId === 'string' ? payload.runId : '';
   const repo = typeof payload.repo === 'string' ? payload.repo : '';
   const issueNumber = payload.issueNumber ?? null;
   const githubToken = typeof payload.githubToken === 'string' ? payload.githubToken : '';
@@ -95,9 +146,9 @@ app.post('/invocations', async (req, res) => {
   const taskToken = typeof payload.taskToken === 'string' ? payload.taskToken : '';
 
   const log = (...args) => console.log(`[invocations]`, ...args);
-  log(`repo=${repo || '(none)'} issue=${issueNumber ?? '(none)'} promptChars=${prompt.length} mode=${taskToken ? 'callback' : 'sync'}`);
+  log(`runId=${runId || '(none)'} repo=${repo || '(none)'} issue=${issueNumber ?? '(none)'} promptChars=${prompt.length} mode=${taskToken ? 'callback' : 'sync'}`);
 
-  const runJob = () => runManagedJob({ prompt, repo, issueNumber, githubToken, baseBranch, systemAppend, log });
+  const runJob = (onSpawn) => runManagedJob({ prompt, repo, issueNumber, githubToken, baseBranch, systemAppend, log, onSpawn });
 
   // CALLBACK PATH: a Claude Code run can outlast the 15-min invoke ceiling, so
   // ack immediately and drive the (possibly hours-long) job in the background,
@@ -112,8 +163,34 @@ app.post('/invocations', async (req, res) => {
     activeJobs++;
     res.status(200).json({ started: true });
     log(`[callback] job started in background (activeJobs=${activeJobs}); will resume SFN task on completion`);
-    runJob().then(
+
+    // Register this run so a later cancel invocation (issue #182) can find and
+    // kill it. `child` is filled in by onSpawn once the CLI actually starts —
+    // until then the job may be cloning, and a cancel just sets `cancelled`.
+    const job = { child: null, taskToken, cancelled: false, killTimer: null };
+    if (runId) runningJobs.set(runId, job);
+
+    const onSpawn = (child) => {
+      job.child = child;
+      // If a cancel arrived while we were still cloning, honor it now that the
+      // CLI exists (the cancel handler couldn't kill a child that didn't exist).
+      if (job.cancelled) {
+        log(`[callback] runId=${runId} was cancelled before spawn; killing now`);
+        child.kill('SIGTERM');
+      }
+    };
+
+    runJob(onSpawn).then(
       async (finalText) => {
+        // A cancelled run reaches here if the CLI exited 0 despite the SIGTERM
+        // (race), or was never spawned. Treat it as superseded, not success.
+        if (job.cancelled) {
+          log(`[callback] job cancelled; sending SendTaskFailure (superseded)`);
+          await sfn.send(new SendTaskFailureCommand({
+            taskToken, error: 'ClaudeCodeRuntimeCancelled', cause: SUPERSEDED_CAUSE,
+          }));
+          return;
+        }
         log(`[callback] job finished (${finalText.length} chars); sending SendTaskSuccess`);
         await sfn.send(new SendTaskSuccessCommand({
           taskToken,
@@ -123,6 +200,15 @@ app.post('/invocations', async (req, res) => {
         }));
       },
       async (err) => {
+        // A killed CLI rejects (non-zero exit from SIGTERM/SIGKILL). If we asked
+        // for the cancel, report it as superseded rather than a runtime error.
+        if (job.cancelled) {
+          log(`[callback] job killed by cancel; sending SendTaskFailure (superseded)`);
+          await sfn.send(new SendTaskFailureCommand({
+            taskToken, error: 'ClaudeCodeRuntimeCancelled', cause: SUPERSEDED_CAUSE,
+          }));
+          return;
+        }
         // Short, token-redacted failure so the SFN Catch → PostFailureComment
         // step surfaces a useful (but not leaky) cause on the issue/PR.
         const cause = redact(String(err?.stack || err?.message || err)).slice(0, 3000);
@@ -140,6 +226,8 @@ app.post('/invocations', async (req, res) => {
     }).finally(() => {
       // Job (and its result delivery) is fully done — let /ping report idle again
       // so the runtime can reclaim the session once no other job is in flight.
+      if (job.killTimer) clearTimeout(job.killTimer);
+      if (runId) runningJobs.delete(runId);
       activeJobs--;
       log(`[callback] job settled (activeJobs=${activeJobs})`);
     });
@@ -160,9 +248,9 @@ app.post('/invocations', async (req, res) => {
 // Shared job body for both invocation paths: set up the workspace, then run
 // Claude Code to completion. Kept separate so the sync and callback paths never
 // drift. Leaves the git clone under WORKSPACE_ROOT (persistent) for reuse.
-async function runManagedJob({ prompt, repo, issueNumber, githubToken, baseBranch, systemAppend, log }) {
+async function runManagedJob({ prompt, repo, issueNumber, githubToken, baseBranch, systemAppend, log, onSpawn }) {
   const workDir = await setupWorkspace({ repo, githubToken, baseBranch, log });
-  return await runClaudeCode({ prompt, workDir, repo, issueNumber, systemAppend, githubToken, log });
+  return await runClaudeCode({ prompt, workDir, repo, issueNumber, systemAppend, githubToken, log, onSpawn });
 }
 
 // Strip any GitHub token that may have leaked into an error/clone URL before it
@@ -210,7 +298,7 @@ async function setupWorkspace({ repo, githubToken, baseBranch, log }) {
 
 // Drive the Claude Code CLI headlessly. `-p` runs a single prompt to completion;
 // `--output-format json` yields a final result object we can return.
-function runClaudeCode({ prompt, workDir, repo, issueNumber, systemAppend, githubToken, log }) {
+function runClaudeCode({ prompt, workDir, repo, issueNumber, systemAppend, githubToken, log, onSpawn }) {
   const appendParts = [];
   if (repo) {
     appendParts.push(
@@ -256,6 +344,8 @@ function runClaudeCode({ prompt, workDir, repo, issueNumber, systemAppend, githu
 
   return new Promise((resolve, reject) => {
     const child = spawn('claude', args, { cwd: workDir, env });
+    // Hand the child back so a cancel invocation (issue #182) can kill it.
+    if (typeof onSpawn === 'function') onSpawn(child);
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (d) => { stdout += d.toString(); });
