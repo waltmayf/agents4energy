@@ -9,7 +9,7 @@
 //   AGENTCORE_MEMORY_ARN     — arn:aws:bedrock-agentcore:...:memory/...
 //   AGENTCORE_GATEWAY_ID     — e.g. default-default-gateway-5qwnlmsqe3
 //   AGENTCORE_GATEWAY_ARN    — arn:aws:bedrock-agentcore:...:gateway/...
-//   AGENTCORE_RUNTIME_ID     — e.g. default_AgUiHandler-HISztIENHn
+//   AGENTCORE_RUNTIME_ID     — e.g. default_ClaudeCode-HISztIENHn
 //   AGENTCORE_RUNTIME_ARN    — arn:aws:bedrock-agentcore:...:runtime/...
 //   AGENTCORE_RUNTIME_ROLE_ARN — arn:aws:iam::...:role/...
 //   AGENTCORE_REGION         — e.g. us-east-1
@@ -33,7 +33,7 @@ const resources = state?.targets?.default?.resources ?? {};
 
 const memory = Object.values(resources.memories ?? {})[0] ?? {};
 const gateway = Object.values(resources.mcp?.gateways ?? {})[0] ?? {};
-const runtime = resources.runtimes?.AgUiHandler ?? {};
+const runtime = Object.values(resources.runtimes ?? {})[0] ?? {};
 
 const region = (memory.memoryArn ?? runtime.runtimeArn ?? '').split(':')[3] || 'us-east-1';
 

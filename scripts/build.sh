@@ -6,10 +6,10 @@ set -euo pipefail
 #   2. Build the Next.js frontend
 #   3. Upload to S3 and invalidate CloudFront cache
 #
-# The AgentCore harness/memory/gateway and the invokeHandler AppSync resolver
-# are built directly inside the agentStack CDK app (see web/amplify/backend.ts)
-# and their ARNs land in amplify_outputs.json via backend.addOutput({ custom: {...} })
-# — no post-deploy wiring script is needed.
+# The AgentCore harness/memory/gateway are built directly inside the
+# agentStack CDK app (see web/amplify/backend.ts) and their ARNs land in
+# amplify_outputs.json via backend.addOutput({ custom: {...} }) — no
+# post-deploy wiring script is needed.
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
