@@ -1,5 +1,6 @@
 'use client';
 import { MessageResponse } from '@/components/ai-elements/message';
+import { collapseWebhookSections } from '@/lib/collapse-webhook-sections';
 import { cn } from '@/lib/utils';
 
 /**
@@ -16,6 +17,11 @@ import { cn } from '@/lib/utils';
  * the assistant bubbles use, so headings, fenced code, lists, and inline code
  * display properly. Wired into `<CopilotChat>` via the
  * `messageView.userMessage.messageRenderer` slot (see chat/page.tsx).
+ *
+ * Before rendering, `collapseWebhookSections` rewrites the AGENTS.md/prior-
+ * comment-thread/github-access marker blocks into collapsed-by-default
+ * `<details>` widgets (issue #119), so the actual request stays the first
+ * thing visible. It's a no-op on plain (non-webhook) messages.
  *
  * The wrapper keeps the bubble chrome from CopilotKit's default renderer
  * (`bg-muted`, rounded, padded) but drops `whitespace-pre-wrap` — Markdown
@@ -36,7 +42,7 @@ export function UserMessageMarkdown({
         className,
       )}
     >
-      <MessageResponse>{content}</MessageResponse>
+      <MessageResponse>{collapseWebhookSections(content)}</MessageResponse>
     </div>
   );
 }
