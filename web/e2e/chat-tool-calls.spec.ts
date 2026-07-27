@@ -13,12 +13,16 @@
  * ToolCallRenderer) shows up WITHOUT a reload.
  *
  * NOTE on the reload step: the default harness persists BUILT-IN tool calls to
- * memory as flattened text (no structured toolUse/toolResult blocks), so the
- * reloaded transcript restores the conversation text but does NOT reconstruct a
- * tool-call card for the shell tool. That memory-format gap is tracked
- * separately in issue #117; MCP-server tool calls (which DO persist structured blocks) are
- * covered by the converse-to-agui unit tests. So here we only assert the live
- * card, plus that the reload restores the turn.
+ * memory as flattened text (no structured toolUse/toolResult blocks) — a
+ * persist-time gap in the managed harness itself, tracked in issue #117.
+ * converse-to-agui.ts makes a best-effort, degraded reconstruction (tool name
+ * + result, no arguments) when the leaked text matches a specific pattern
+ * (see the "#117" unit tests in converse-to-agui.test.ts), but that pattern
+ * depends on exactly how the model leaks its tool-call intent, which isn't
+ * guaranteed run-to-run — so this e2e test only asserts on the conversation
+ * TEXT surviving reload, not on a reconstructed card, to avoid flaking.
+ * MCP-server tool calls (which DO persist structured blocks) reconstruct
+ * reliably and are covered by the converse-to-agui unit tests.
  */
 import { test, expect } from '@playwright/test';
 
@@ -69,8 +73,8 @@ test.describe('Chat page — live tool calls', () => {
     );
 
     // Reload: the conversation is restored from AgentCore memory. (The built-in
-    // shell tool isn't persisted as a structured tool block, so we assert the
-    // turn's text is restored rather than a reconstructed tool card.)
+    // shell tool isn't reliably persisted as a structured tool block, so we
+    // assert the turn's text is restored rather than a reconstructed tool card.)
     const sessionUrl = page.url();
     await page.goto(sessionUrl);
     await expect(page.getByRole('button', { name: 'Sign in' })).not.toBeVisible();
