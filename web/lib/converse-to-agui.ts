@@ -80,6 +80,67 @@ function parseBlocks(ev: StoredEvent): ContentBlock[] | null {
   }
 }
 
+/**
+ * Built-in harness tools (shell/browser/file) aren't persisted to AgentCore
+ * memory as structured toolUse/toolResult blocks the way MCP-server tool calls
+ * are (issue #117) — the harness flattens them to plain text instead: the
+ * assistant turn leaks its tool-invocation intent as `functions.<name>` (a
+ * Harmony-format artifact, same family as #105/#149), and the tool's JSON
+ * result arrives as its own "user" turn. The call's *arguments* are never
+ * persisted in this format, so this is a best-effort, degraded reconstruction
+ * (name + result, no arguments) — not a full recovery.
+ */
+const BUILTIN_TOOL_LEAK_RE = /\bfunctions\.([a-zA-Z0-9_]+)\b/;
+
+/** True if flattened text is exactly a JSON object — the shape a tool result takes, not genuine user prose. */
+function asBareResultObject(text: string): Record<string, unknown> | null {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith('{') || !trimmed.endsWith('}')) return null;
+  try {
+    const parsed = JSON.parse(trimmed);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * If `ev`/`next` are the leaked-builtin-tool-call pair described above,
+ * return the degraded tool-call + tool-result messages to render instead of
+ * the raw leak sentence / JSON bubble. Returns null when the pair doesn't
+ * match (the normal, common case).
+ */
+function reconstructLeakedBuiltinTool(
+  ev: StoredEvent,
+  next: StoredEvent | undefined,
+  index: number,
+): Message[] | null {
+  if (ev.contentJson || !next || next.contentJson) return null;
+  if (normalizeRole(ev.role) !== 'assistant' || normalizeRole(next.role) !== 'user') return null;
+
+  const toolMatch = ev.text?.match(BUILTIN_TOOL_LEAK_RE);
+  const result = next.text ? asBareResultObject(next.text) : null;
+  if (!toolMatch || !result) return null;
+
+  const base = ev.eventId || `msg-${index}`;
+  const toolCallId = idFor(base, 'builtin-tool');
+  return [
+    {
+      id: base,
+      role: 'assistant',
+      toolCalls: [
+        { id: toolCallId, type: 'function', function: { name: toolMatch[1], arguments: '{}' } },
+      ],
+    } as unknown as Message,
+    {
+      id: idFor(next.eventId || `msg-${index + 1}`, 'toolresult'),
+      role: 'tool',
+      toolCallId,
+      content: next.text!.trim(),
+    } as Message,
+  ];
+}
+
 /** Convert one stored event into zero or more AG-UI messages. */
 export function eventToMessages(ev: StoredEvent, index: number): Message[] {
   const base = ev.eventId || `msg-${index}`;
@@ -164,5 +225,15 @@ export function eventToMessages(ev: StoredEvent, index: number): Message[] {
 
 /** Map a full list of stored events (already time-sorted) to AG-UI messages. */
 export function eventsToAguiMessages(events: StoredEvent[]): Message[] {
-  return events.flatMap((ev, i) => eventToMessages(ev, i));
+  const out: Message[] = [];
+  for (let i = 0; i < events.length; i++) {
+    const leaked = reconstructLeakedBuiltinTool(events[i], events[i + 1], i);
+    if (leaked) {
+      out.push(...leaked);
+      i++; // the result turn was consumed as part of the reconstructed pair
+      continue;
+    }
+    out.push(...eventToMessages(events[i], i));
+  }
+  return out;
 }

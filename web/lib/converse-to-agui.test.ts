@@ -156,3 +156,60 @@ test('full round-trip: assistant toolUse then tool result across events', () => 
     msgs.findIndex((m) => m.role === 'assistant') < msgs.findIndex((m) => m.role === 'tool'),
   );
 });
+
+test('built-in tool call leaked as flattened text reconstructs a degraded tool card (#117)', () => {
+  // The exact shape from issue #117: no contentJson on either event, the
+  // assistant turn leaks "functions.shell", and the following user turn is a
+  // bare JSON tool-result object.
+  const events: StoredEvent[] = [
+    {
+      eventId: 'a',
+      role: 'assistant',
+      text: 'We need to run a shell command using the provided function. Use functions.shell.',
+    },
+    {
+      eventId: 'b',
+      role: 'user',
+      text: '{"stdout": "HELLO_FROM_SHELL_42\\n", "stderr": "", "exit_code": 0}',
+    },
+    {
+      eventId: 'c',
+      role: 'assistant',
+      text: 'The command executed successfully.\n\n**Output**\n\n```\nHELLO_FROM_SHELL_42\n```',
+    },
+  ];
+  const msgs = eventsToAguiMessages(events);
+
+  const toolCallMsg = msgs.find(
+    (m) => m.role === 'assistant' && (m as { toolCalls?: unknown[] }).toolCalls?.length,
+  ) as { toolCalls: Array<{ id: string; function: { name: string } }> };
+  assert.ok(toolCallMsg, 'expected a reconstructed assistant tool-call message');
+  assert.equal(toolCallMsg.toolCalls[0].function.name, 'shell');
+
+  const toolMsg = msgs.find((m) => m.role === 'tool') as { toolCallId: string; content: string };
+  assert.ok(toolMsg, 'expected a reconstructed tool-result message');
+  assert.equal(toolMsg.toolCallId, toolCallMsg.toolCalls[0].id);
+  assert.match(toolMsg.content, /HELLO_FROM_SHELL_42/);
+
+  // The user's raw JSON never survives as a plain "user" bubble.
+  assert.ok(!msgs.some((m) => m.role === 'user'), 'raw tool-result JSON should not render as a user message');
+
+  // The final assistant summary still renders normally.
+  const finalMsg = msgs[msgs.length - 1] as { role: string; content: string };
+  assert.equal(finalMsg.role, 'assistant');
+  assert.match(finalMsg.content, /executed successfully/);
+});
+
+test('a genuine user message containing "functions." text is left untouched', () => {
+  // Guard against false positives: ordinary prose mentioning "functions.foo"
+  // followed by a real user JSON message should not be misread as a leaked
+  // tool-call pair.
+  const events: StoredEvent[] = [
+    { eventId: 'a', role: 'assistant', text: 'You can call functions.shell yourself if you want.' },
+    { eventId: 'b', role: 'user', text: 'no thanks, {"note": "just chatting"}' },
+  ];
+  const msgs = eventsToAguiMessages(events);
+  assert.equal(msgs.length, 2);
+  assert.equal(msgs[0].role, 'assistant');
+  assert.equal(msgs[1].role, 'user');
+});
