@@ -1,0 +1,11 @@
+{
+  "name": "agentcore-claude-code-runtime",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Claude Code CLI hosted in a Bedrock AgentCore Runtime (invoked via @agentcore-claude).",
+  "main": "server.js",
+  "dependencies": {
+    "express": "^4.21.2"
+  }
+}

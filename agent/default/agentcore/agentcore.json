@@ -7,7 +7,31 @@
     "agentcore:created-by": "agentcore-cli",
     "agentcore:project-name": "default"
   },
-  "runtimes": [],
+  "runtimes": [
+    {
+      "name": "ClaudeCode",
+      "description": "Claude Code CLI hosted in AgentCore Runtime; invoked via @agentcore-claude on GitHub issues/PRs.",
+      "build": "Container",
+      "codeLocation": "app/ClaudeCode",
+      "dockerfile": "Dockerfile",
+      "entrypoint": "server.js",
+      "protocol": "HTTP",
+      "networkMode": "PUBLIC",
+      "filesystemConfigurations": [
+        {
+          "sessionStorage": {
+            "mountPath": "/mnt/workspace"
+          }
+        }
+      ],
+      "envVars": [
+        {
+          "name": "ANTHROPIC_MODEL",
+          "value": "us.anthropic.claude-sonnet-5"
+        }
+      ]
+    }
+  ],
   "memories": [
     {
       "name": "MyHarnessMemory",

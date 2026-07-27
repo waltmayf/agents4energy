@@ -30,10 +30,27 @@ export interface AgentWebhookStackProps {
    */
   prepareGitAuthLambda: lambda.IFunction;
   /**
+   * Lambda that invokes the Claude Code AgentCore Runtime for `@agentcore-claude`
+   * mentions (see agent-webhook-invoke-claude). Reshapes the runtime's reply into
+   * the same $.agentResult shape the native invokeHarness task produces, so the
+   * shared PostFinalComment step reads both identically.
+   */
+  invokeClaudeLambda: lambda.IFunction;
+  /**
+   * ARN of the Claude Code AgentCore Runtime. The state machine role is granted
+   * `bedrock-agentcore:InvokeAgentRuntime` on it so the InvokeClaude Lambda's
+   * SigV4 call succeeds. May be empty at synth on branches that don't deploy the
+   * runtime — the grant is then skipped and the claude branch fails cleanly.
+   */
+  claudeCodeRuntimeArn: string;
+  /**
    * Harness ARN for the native `bedrockagentcore:invokeHarness` task. Passed as
    * a plain string (the state machine role is granted InvokeHarness on it below).
-   * May be empty at synth on branches that don't deploy the harness — the state
-   * machine still synthesizes; the invoke task fails cleanly at run time.
+   * May be empty at synth on branches that don't deploy the harness — a
+   * syntactically-valid placeholder ARN is then substituted into the task
+   * definition (SFN validates ARN format at deploy time), and the InvokeHarness
+   * IAM grant is skipped. The harness branch is never routed to while the
+   * harness is absent, so the placeholder is never actually invoked.
    */
   harnessArn: string;
   /**
@@ -85,6 +102,17 @@ export class AgentWebhookStack extends Construct {
     const stack = Stack.of(this);
     this.stateMachineArn = `arn:aws:states:${stack.region}:${stack.account}:stateMachine:${props.stateMachineName}`;
 
+    // The native invokeHarness task's `HarnessArn` field is schema-validated for
+    // ARN *format* at deploy time (SFN rejects both an empty string and a
+    // malformed value with SCHEMA_VALIDATION_FAILED). On branches that don't
+    // deploy the harness (props.harnessArn === '', e.g. AGENTCORE_SKIP_HARNESS=1),
+    // substitute a syntactically-valid placeholder so the definition validates —
+    // the harness branch is never routed to while the harness is absent, so this
+    // ARN is never actually invoked.
+    const harnessArnForTask =
+      props.harnessArn ||
+      `arn:aws:bedrock-agentcore:${stack.region}:${stack.account}:harness/placeholder-harness-not-deployed`;
+
     const postInitial = new tasks.LambdaInvoke(this, 'PostInitialComment', {
       lambdaFunction: props.postCommentLambda,
       payload: sfn.TaskInput.fromObject({
@@ -134,7 +162,7 @@ export class AgentWebhookStack extends Construct {
         Type: 'Task',
         Resource: 'arn:aws:states:::bedrockagentcore:invokeHarness',
         Parameters: {
-          HarnessArn: props.harnessArn,
+          HarnessArn: harnessArnForTask,
           'RuntimeSessionId.$': '$.runId',
           Messages: [
             {
@@ -170,6 +198,32 @@ export class AgentWebhookStack extends Construct {
           },
         ],
       },
+    });
+
+    // Step 3 (alternative) — Claude Code AgentCore Runtime invoke (Lambda).
+    // For `@agentcore-claude` mentions: the Lambda calls InvokeAgentRuntime on
+    // the ClaudeCode runtime (which clones the repo and runs the Claude Code CLI
+    // to completion) and reshapes the reply into the same $.agentResult shape the
+    // native invokeHarness task produces, so PostFinalComment reads both the same
+    // way. Unlike the harness, this has no optimized SFN integration — the runtime
+    // streams an HTTP body, not a Converse-shaped result — so it stays a Lambda.
+    const invokeClaude = new tasks.LambdaInvoke(this, 'InvokeClaude', {
+      lambdaFunction: props.invokeClaudeLambda,
+      payload: sfn.TaskInput.fromObject({
+        runId: sfn.JsonPath.stringAt('$.runId'),
+        source: sfn.JsonPath.stringAt('$.source'),
+        prompt: sfn.JsonPath.stringAt('$.prepared.effectivePrompt'),
+        repo: sfn.JsonPath.stringAt('$.repo'),
+        issueNumber: sfn.JsonPath.numberAt('$.issueNumber'),
+        issueKey: sfn.JsonPath.stringAt('$.issueKey'),
+        githubToken: sfn.JsonPath.stringAt('$.initialComment.githubToken'),
+        agentsSystemPrompt: sfn.JsonPath.stringAt('$.initialComment.agentsSystemPrompt'),
+        logGroupName: sfn.JsonPath.stringAt('$.initialComment.logGroupName'),
+        logStreamName: sfn.JsonPath.stringAt('$.initialComment.logStreamName'),
+      }),
+      payloadResponseOnly: true,
+      resultPath: '$.agentResult',
+      taskTimeout: sfn.Timeout.duration(Duration.minutes(14)),
     });
 
     const postFinal = new tasks.LambdaInvoke(this, 'PostFinalComment', {
@@ -213,15 +267,27 @@ export class AgentWebhookStack extends Construct {
       resultPath: sfn.JsonPath.DISCARD,
     });
 
-    // Both the git-auth prep and the native invoke route their failures to the
-    // same failure-comment state (which adds agent-error for label runs).
+    // Git-auth prep and BOTH agent branches route their failures to the same
+    // failure-comment state (which adds agent-error for label runs).
     prepareGitAuth.addCatch(postFailureComment, { resultPath: '$.error' });
     invokeHarness.addCatch(postFailureComment, { resultPath: '$.error' });
+    invokeClaude.addCatch(postFailureComment, { resultPath: '$.error' });
+
+    // Both agent branches converge on the same PostFinalComment step (they
+    // produce the identical $.agentResult.Output.Message.Content shape).
+    invokeHarness.next(postFinal);
+    invokeClaude.next(postFinal);
+
+    // After git-auth prep, branch on $.agent (set by agent-webhook-receiver from
+    // the mention: 'claude' for @agentcore-claude, else 'harness'). Default to the
+    // harness so label/Jira triggers (which never set 'claude') keep working.
+    const routeAgent = new sfn.Choice(this, 'RouteAgent')
+      .when(sfn.Condition.stringEquals('$.agent', 'claude'), invokeClaude)
+      .otherwise(invokeHarness);
 
     const definition = postInitial
       .next(prepareGitAuth)
-      .next(invokeHarness)
-      .next(postFinal);
+      .next(routeAgent);
 
     this.stateMachine = new sfn.StateMachine(this, 'StateMachine', {
       stateMachineName: props.stateMachineName,
@@ -240,6 +306,13 @@ export class AgentWebhookStack extends Construct {
         resources: [props.harnessArn],
       }));
     }
+
+    // The InvokeClaude branch runs as a Lambda (invokeClaudeLambda), which is
+    // granted InvokeAgentRuntime on its OWN execution role in backend.ts — the
+    // state machine only invokes the Lambda, not the runtime directly, so no
+    // runtime grant is needed on the state machine role. The claudeCodeRuntimeArn
+    // prop is kept for symmetry/documentation and future native-integration use.
+    void props.claudeCodeRuntimeArn;
 
     this.httpApi = new apigwv2.HttpApi(this, 'HttpApi', {
       description: 'Webhook receiver for GitHub/Jira agent-mention comments',

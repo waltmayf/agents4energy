@@ -2,7 +2,7 @@ import type { APIGatewayProxyEventV2, APIGatewayProxyStructuredResultV2 } from '
 import { randomUUID } from 'crypto';
 import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-secrets-manager';
 import { SFNClient, StartExecutionCommand } from '@aws-sdk/client-sfn';
-import { verifyGithubSignature, verifyJiraSharedSecret, extractPromptAfterMention } from '../_shared/webhookVerify';
+import { verifyGithubSignature, verifyJiraSharedSecret, extractPromptAfterMention, parseMention } from '../_shared/webhookVerify';
 
 const REGION = process.env.AWS_REGION ?? 'us-east-1';
 const GITHUB_WEBHOOK_SECRET_ARN = process.env.GITHUB_WEBHOOK_SECRET_ARN ?? '';
@@ -118,6 +118,9 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
           // Signals the Step Function to manage the agent-working/agent-error
           // labels around the run (a comment-mention run leaves labels alone).
           trigger: 'label',
+          // Label triggers always route to MyHarness — there's no per-label way
+          // to pick the Claude Code runtime, and the label is named `agentcore`.
+          agent: 'harness',
           repo: payload.repository.full_name,
           issueNumber: target.number,
           issueKey: null,
@@ -144,8 +147,8 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
       return json(200, { skipped: 'bot sender' });
     }
 
-    const prompt = extractPromptAfterMention(payload.comment.body);
-    if (prompt === null) return json(200, { skipped: 'no trigger mention' });
+    const mention = parseMention(payload.comment.body);
+    if (mention === null) return json(200, { skipped: 'no trigger mention' });
 
     const runId = randomUUID();
     await sfn.send(new StartExecutionCommand({
@@ -155,10 +158,13 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
         runId,
         source: 'github',
         trigger: 'comment',
+        // 'harness' (@agentcore) → MyHarness; 'claude' (@agentcore-claude) →
+        // the Claude Code AgentCore Runtime. The Step Function branches on this.
+        agent: mention.agent,
         repo: payload.repository.full_name,
         issueNumber: payload.issue.number,
         issueKey: null,
-        prompt: prompt || payload.issue.title,
+        prompt: mention.prompt || payload.issue.title,
         sender: senderLogin,
       }),
     }));
@@ -191,6 +197,9 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
         runId,
         source: 'jira',
         trigger: 'comment',
+        // Jira has no repo/git context, so the Claude Code runtime (which clones
+        // and opens PRs) doesn't apply — always route Jira to MyHarness.
+        agent: 'harness',
         repo: null,
         issueNumber: null,
         issueKey: payload.issue.key,

@@ -10,6 +10,7 @@ import { mintGithubToken } from './functions/mint-github-token/resource';
 import { agentWebhookReceiver } from './functions/agent-webhook-receiver/resource';
 import { agentWebhookPostComment } from './functions/agent-webhook-post-comment/resource';
 import { agentWebhookInvokeAgent } from './functions/agent-webhook-invoke-agent/resource';
+import { agentWebhookInvokeClaude } from './functions/agent-webhook-invoke-claude/resource';
 import { agentWebhookAuthorizer } from './functions/agent-webhook-authorizer/resource';
 import { Policy, PolicyStatement, ServicePrincipal } from 'aws-cdk-lib/aws-iam';
 import { Function as LambdaFunction } from 'aws-cdk-lib/aws-lambda';
@@ -18,7 +19,8 @@ import { fileURLToPath } from 'url';
 import { resolve, dirname } from 'path';
 import { readFileSync } from 'fs';
 import { HostingConstruct } from './constructs/hostingConstruct';
-import { AgentCoreApplication, type HarnessSpec } from './constructs/agentCoreApplication';
+import { AgentCoreApplication, type HarnessDeployment } from './constructs/agentCoreApplication';
+import type { HarnessSpec } from '@aws/agentcore-cdk';
 import { E2eTestUser } from './constructs/e2eTestUser/resource';
 import { AgentWebhookStack } from './constructs/agentWebhookStack';
 
@@ -33,8 +35,9 @@ const __dirname = dirname(__filename);
 // iteration via `agentcore dev`/`agentcore validate`, but production deploys no
 // longer run `agentcore deploy` — this stack owns the resources directly).
 //
-// Harnesses are inlined below as literal CfnHarness-shaped objects instead —
-// there is no harness.json/HarnessSpecInput translation layer for them.
+// Harnesses are inlined below as literal `HarnessSpec`s (the `harness.json`
+// shape @aws/agentcore-cdk validates) instead of living in agentcore.json, so
+// the system prompt + Cognito authorizer can be injected at synth time.
 // ============================================================================
 
 const agentcoreRoot = resolve(__dirname, '../../agent/default/agentcore');
@@ -42,8 +45,8 @@ const projectSpec = JSON.parse(readFileSync(resolve(agentcoreRoot, 'agentcore.js
 
 // MyHarness — see agent/default/app/MyHarness/. The system prompt is prose, not
 // config, so it lives in system-prompt.md and is read from disk here; everything
-// else is inlined below as literal CfnHarness sub-properties, passed straight
-// through by AgentCoreApplication with no field-mapping.
+// else is inlined below as a literal `HarnessSpec` (the shape @aws/agentcore-cdk
+// validates and turns into the AWS::BedrockAgentCore::Harness resource).
 const myHarnessSystemPrompt = readFileSync(
   resolve(agentcoreRoot, '../app/MyHarness/system-prompt.md'),
   'utf8',
@@ -52,12 +55,14 @@ const myHarnessSystemPrompt = readFileSync(
 const harnessSpecs: HarnessSpec[] = [
   {
     name: 'MyHarness',
+    // provider+modelId+apiFormat — the HarnessModelSchema shape. `bedrock` +
+    // `chat_completions` targets the OpenAI-compatible completions API the
+    // gpt-oss model exposes through Bedrock.
     model: {
-      bedrockModelConfig: {
-        modelId: 'openai.gpt-oss-120b-1:0',
-      },
+      provider: 'bedrock',
+      modelId: 'openai.gpt-oss-120b-1:0',
+      apiFormat: 'chat_completions',
     },
-    apiFormat: 'chat_completions',
     systemPrompt: myHarnessSystemPrompt,
     tools: [
       { type: 'agentcore_browser', name: 'browser', config: { agentCoreBrowser: {} } },
@@ -68,7 +73,13 @@ const harnessSpecs: HarnessSpec[] = [
       // commands in the harness runtime session, so seeded git/gh credentials
       // and installed CLIs are exactly what the agent sees.
     ],
-    memoryName: 'MyHarnessMemory',
+    // No Claude Code-style skills on MyHarness. `HarnessSpec` is the schema's
+    // *output* type (skills defaults to []), so the field is required here.
+    skills: [],
+    // Reference the same-project MyHarnessMemory created from agentcore.json's
+    // `memories`. `mode: 'existing'` + name → the construct wires the memory's
+    // discovery env vars + IAM onto this harness's execution role.
+    memory: { mode: 'existing', name: 'MyHarnessMemory' },
     truncation: {
       strategy: 'summarization',
       config: { summarization: {} },
@@ -126,6 +137,7 @@ const backend = defineBackend({
   agentWebhookReceiver,
   agentWebhookPostComment,
   agentWebhookInvokeAgent,
+  agentWebhookInvokeClaude,
   agentWebhookAuthorizer,
 });
 
@@ -176,7 +188,25 @@ const cognitoDiscoveryUrl = Fn.join('', [
 // Cognito Identity Pool credentials (the pool's authenticated role is granted
 // both bedrock-agentcore:InvokeAgentRuntime and :InvokeHarness in the wiring
 // below — InvokeHarnessCommand's IAM authorization checks both actions).
-const harnessSpecsWithAuth: HarnessSpec[] = harnessSpecs;
+// Wrap each spec as a HarnessDeployment for the construct. `harnessDir` points
+// at agent/default/app/MyHarness/ so the construct can auto-discover a
+// system-prompt.md there if `spec.systemPrompt` is ever omitted (we pass it
+// literally above, so this is belt-and-braces). No Cognito authorizer is
+// injected — MyHarness authorizes with AWS_IAM (see the comment above), so
+// `authorizerType`/`authorizerConfiguration` stay unset and default to IAM.
+// AGENTCORE_SKIP_HARNESS=1 deploys everything EXCEPT the harness. Used for a
+// one-time two-phase migration: the harness execution role has a *fixed*
+// physical name (`<projectName>_MyHarness`), so when the construct tree changes
+// (e.g. swapping to the real AgentCoreApplication) its logical ID changes while
+// the name stays — and CloudFormation's create-before-delete on an in-place
+// update collides on that name ("already exists"). Deploy once with the flag to
+// let CFN delete the old fixed-name role, then again without it to recreate it
+// under the new logical ID with the now-free name. Not needed on fresh stacks.
+const skipHarness = process.env.AGENTCORE_SKIP_HARNESS === '1';
+const harnessSpecsWithAuth: HarnessDeployment[] = (skipHarness ? [] : harnessSpecs).map((spec) => ({
+  spec,
+  harnessDir: resolve(agentcoreRoot, '../app/MyHarness'),
+}));
 
 // Memory/Harness/Gateway from agentcore.json — same-stack CDK tokens, no
 // post-deploy control-plane resolution needed. agentcore.json's `runtimes` is
@@ -218,6 +248,9 @@ const longestResourceNameLength = Math.max(
   1,
   ...harnessSpecs.map((h) => h.name.length),
   ...(projectSpec.memories ?? []).map((m: { name: string }) => m.name.length),
+  // Runtimes (e.g. ClaudeCode) share the same `${projectName}_${name}` naming
+  // and 48-char cap as harnesses/memories.
+  ...(projectSpec.runtimes ?? []).map((r: { name: string }) => r.name.length),
 );
 const uniqueProjectName = toAgentCoreProjectName(
   48 - 1 - longestResourceNameLength,
@@ -229,6 +262,10 @@ const uniqueProjectName = toAgentCoreProjectName(
 const agentCoreApp = new AgentCoreApplication(agentStack, 'AgentCoreApplication', {
   projectName: uniqueProjectName,
   memories: projectSpec.memories ?? [],
+  // AgentCore Runtimes from agentcore.json — the ClaudeCode container agent
+  // (invoked via @agentcore-claude on GitHub issues/PRs, see agent/default/app/
+  // ClaudeCode). Built via CodeBuild → ECR → CfnRuntime by @aws/agentcore-cdk.
+  runtimes: projectSpec.runtimes ?? [],
   harnesses: harnessSpecsWithAuth,
   mcpSpec: agentCoreGatewaysWithUniqueNames
     ? {
@@ -267,8 +304,11 @@ for (const child of agentStack.node.findAll()) {
   }
 }
 
-const memoryName = harnessSpecs[0]?.memoryName;
-const harnessName = harnessSpecs[0]?.name;
+const firstHarnessMemory = harnessSpecs[0]?.memory;
+const memoryName = firstHarnessMemory?.mode === 'existing' ? firstHarnessMemory.name : undefined;
+// During the AGENTCORE_SKIP_HARNESS phase the harness isn't created, so its ARN
+// accessors would throw — treat the harness as absent (ARNs resolve to '').
+const harnessName = skipHarness ? undefined : harnessSpecs[0]?.name;
 const gatewayName = projectSpec.agentCoreGateways?.[0]?.name;
 
 const AGENTCORE_MEMORY_ID = memoryName ? agentCoreApp.memoryId(memoryName) : '';
@@ -279,6 +319,17 @@ const AGENTCORE_GATEWAY_ENDPOINT = gatewayName ? agentCoreApp.gatewayEndpoint(ga
 const AGENTCORE_HARNESS_ARN = harnessName ? agentCoreApp.harnessArn(harnessName) : '';
 const AGENTCORE_HARNESS_ROLE_ARN = harnessName ? agentCoreApp.harnessRoleArn(harnessName) : '';
 const AGENTCORE_REGION = Stack.of(agentStack).region;
+
+// ClaudeCode AgentCore Runtime — the container agent invoked via
+// @agentcore-claude on GitHub issues/PRs (see agent/default/app/ClaudeCode).
+// Its name matches the runtime `name` in agentcore.json; runtimes are optional
+// so this is '' when none are configured.
+const claudeCodeRuntimeName = (projectSpec.runtimes ?? []).find(
+  (r: { name: string }) => r.name === 'ClaudeCode',
+)?.name;
+const AGENTCORE_CLAUDE_CODE_RUNTIME_ARN = claudeCodeRuntimeName
+  ? agentCoreApp.runtimeArn(claudeCodeRuntimeName)
+  : '';
 
 // MyHarness now authorizes with AWS_IAM, so the browser signs InvokeHarness
 // requests with Cognito Identity Pool credentials (see web/lib/agentcore-transport.ts).
@@ -292,46 +343,28 @@ const AGENTCORE_REGION = Stack.of(agentStack).region;
 // names. Without it synth fails with "Unable to determine ARN separator for SSM
 // parameter since the parameter name is an unresolved token."
 const ssmBasePath = `/agentcore/${Stack.of(agentStack).stackName}`;
-new StringParameter(agentStack, 'SsmAgentcoreMemoryId', {
-  parameterName: `${ssmBasePath}/memory_id`,
-  stringValue: AGENTCORE_MEMORY_ID,
-  simpleName: false,
-});
-new StringParameter(agentStack, 'SsmAgentcoreMemoryArn', {
-  parameterName: `${ssmBasePath}/memory_arn`,
-  stringValue: AGENTCORE_MEMORY_ARN,
-  simpleName: false,
-});
-new StringParameter(agentStack, 'SsmAgentcoreGatewayId', {
-  parameterName: `${ssmBasePath}/gateway_id`,
-  stringValue: AGENTCORE_GATEWAY_ID,
-  simpleName: false,
-});
-new StringParameter(agentStack, 'SsmAgentcoreGatewayArn', {
-  parameterName: `${ssmBasePath}/gateway_arn`,
-  stringValue: AGENTCORE_GATEWAY_ARN,
-  simpleName: false,
-});
-new StringParameter(agentStack, 'SsmAgentcoreGatewayEndpoint', {
-  parameterName: `${ssmBasePath}/gateway_endpoint`,
-  stringValue: AGENTCORE_GATEWAY_ENDPOINT,
-  simpleName: false,
-});
-new StringParameter(agentStack, 'SsmAgentcoreHarnessArn', {
-  parameterName: `${ssmBasePath}/harness_arn`,
-  stringValue: AGENTCORE_HARNESS_ARN,
-  simpleName: false,
-});
-new StringParameter(agentStack, 'SsmAgentcoreHarnessRoleArn', {
-  parameterName: `${ssmBasePath}/harness_role_arn`,
-  stringValue: AGENTCORE_HARNESS_ROLE_ARN,
-  simpleName: false,
-});
-new StringParameter(agentStack, 'SsmAgentcoreRegion', {
-  parameterName: `${ssmBasePath}/region`,
-  stringValue: AGENTCORE_REGION,
-  simpleName: false,
-});
+// SSM PutParameter rejects an empty string value ("min length 1"), so skip any
+// identifier that isn't present in this deployment (e.g. the harness ARN during
+// an AGENTCORE_SKIP_HARNESS phase, or the gateway ARNs on a gateway-less branch)
+// rather than failing the whole stack. Consumers already tolerate a missing
+// parameter the same way they tolerate an empty env var.
+const putAgentcoreParam = (id: string, suffix: string, value: string) => {
+  if (!value) return;
+  new StringParameter(agentStack, id, {
+    parameterName: `${ssmBasePath}/${suffix}`,
+    stringValue: value,
+    simpleName: false,
+  });
+};
+putAgentcoreParam('SsmAgentcoreMemoryId', 'memory_id', AGENTCORE_MEMORY_ID);
+putAgentcoreParam('SsmAgentcoreMemoryArn', 'memory_arn', AGENTCORE_MEMORY_ARN);
+putAgentcoreParam('SsmAgentcoreGatewayId', 'gateway_id', AGENTCORE_GATEWAY_ID);
+putAgentcoreParam('SsmAgentcoreGatewayArn', 'gateway_arn', AGENTCORE_GATEWAY_ARN);
+putAgentcoreParam('SsmAgentcoreGatewayEndpoint', 'gateway_endpoint', AGENTCORE_GATEWAY_ENDPOINT);
+putAgentcoreParam('SsmAgentcoreHarnessArn', 'harness_arn', AGENTCORE_HARNESS_ARN);
+putAgentcoreParam('SsmAgentcoreHarnessRoleArn', 'harness_role_arn', AGENTCORE_HARNESS_ROLE_ARN);
+putAgentcoreParam('SsmAgentcoreRegion', 'region', AGENTCORE_REGION);
+putAgentcoreParam('SsmAgentcoreClaudeCodeRuntimeArn', 'claude_code_runtime_arn', AGENTCORE_CLAUDE_CODE_RUNTIME_ARN);
 
 // Grant the pool's authenticated role permission to invoke the harness.
 //
@@ -421,13 +454,18 @@ const invokeAgentLambda = backend.invokeAgent.resources.lambda as LambdaFunction
 // InvokeHarnessCommand, signed with its own execution-role credentials — no
 // Cognito service account / SSM password needed anymore. InvokeHarnessCommand
 // checks both the InvokeAgentRuntime and InvokeHarness IAM actions.
-invokeAgentLambda.addToRolePolicy(new PolicyStatement({
-  actions: [
-    'bedrock-agentcore:InvokeAgentRuntime',
-    'bedrock-agentcore:InvokeHarness',
-  ],
-  resources: [AGENTCORE_HARNESS_ARN],
-}));
+// Guard on a non-empty ARN: when AGENTCORE_SKIP_HARNESS=1 the harness isn't
+// deployed and AGENTCORE_HARNESS_ARN is '' — an empty IAM policy Resource is
+// rejected ("Resource must be in ARN format or *"), so skip the grant.
+if (AGENTCORE_HARNESS_ARN) {
+  invokeAgentLambda.addToRolePolicy(new PolicyStatement({
+    actions: [
+      'bedrock-agentcore:InvokeAgentRuntime',
+      'bedrock-agentcore:InvokeHarness',
+    ],
+    resources: [AGENTCORE_HARNESS_ARN],
+  }));
+}
 
 // ============================================================================
 // MINT-GITHUB-TOKEN Lambda — short-lived GitHub App installation tokens.
@@ -474,6 +512,7 @@ const JIRA_API_TOKEN_SECRET_ARN = process.env.JIRA_API_TOKEN_SECRET_ARN ?? '';
 const webhookReceiverLambda = backend.agentWebhookReceiver.resources.lambda as LambdaFunction;
 const webhookPostCommentLambda = backend.agentWebhookPostComment.resources.lambda as LambdaFunction;
 const webhookInvokeAgentLambda = backend.agentWebhookInvokeAgent.resources.lambda as LambdaFunction;
+const webhookInvokeClaudeLambda = backend.agentWebhookInvokeClaude.resources.lambda as LambdaFunction;
 const webhookAuthorizerLambda = backend.agentWebhookAuthorizer.resources.lambda as LambdaFunction;
 
 // The harness INVOKE is now a native `bedrockagentcore:invokeHarness` Step
@@ -517,12 +556,42 @@ webhookInvokeAgentLambda.addToRolePolicy(new PolicyStatement({
 // /runtimes/{harnessArn}/commands — see docs/webhook-stepfunction-integration.md
 // "Git access"). The harness turn moved to the native Step Functions task, whose
 // InvokeHarness grant lives on the state machine role (in agentWebhookStack).
-webhookInvokeAgentLambda.addToRolePolicy(new PolicyStatement({
-  actions: [
-    'bedrock-agentcore:InvokeAgentRuntime',
-    'bedrock-agentcore:InvokeAgentRuntimeCommand',
-  ],
-  resources: [AGENTCORE_HARNESS_ARN],
+// Guarded on a non-empty ARN — when AGENTCORE_SKIP_HARNESS=1 the harness ARN is
+// '' and an empty IAM policy Resource is rejected ("must be in ARN format or *").
+if (AGENTCORE_HARNESS_ARN) {
+  webhookInvokeAgentLambda.addToRolePolicy(new PolicyStatement({
+    actions: [
+      'bedrock-agentcore:InvokeAgentRuntime',
+      'bedrock-agentcore:InvokeAgentRuntimeCommand',
+    ],
+    resources: [AGENTCORE_HARNESS_ARN],
+  }));
+}
+
+// The @agentcore-claude branch: this Lambda calls InvokeAgentRuntime on the
+// ClaudeCode runtime (SigV4-signed with its own execution-role creds) and
+// reshapes the reply into the shared $.agentResult shape. Env + grant skipped
+// cleanly when the runtime isn't deployed on this branch (ARN empty).
+backend.agentWebhookInvokeClaude.addEnvironment('CLAUDE_CODE_RUNTIME_ARN', AGENTCORE_CLAUDE_CODE_RUNTIME_ARN);
+if (AGENTCORE_CLAUDE_CODE_RUNTIME_ARN) {
+  webhookInvokeClaudeLambda.addToRolePolicy(new PolicyStatement({
+    actions: ['bedrock-agentcore:InvokeAgentRuntime'],
+    // InvokeAgentRuntime authorizes against the runtime's ENDPOINT sub-resource
+    // (arn:.../runtime/<id>/runtime-endpoint/DEFAULT), not just the bare runtime
+    // ARN — a grant on the runtime ARN alone yields AccessDeniedException
+    // ("no identity-based policy allows the bedrock-agentcore:InvokeAgentRuntime
+    // action" on .../runtime-endpoint/DEFAULT). Grant both the runtime and all
+    // its endpoints so the SigV4 call from the @agentcore-claude branch succeeds.
+    resources: [
+      AGENTCORE_CLAUDE_CODE_RUNTIME_ARN,
+      `${AGENTCORE_CLAUDE_CODE_RUNTIME_ARN}/runtime-endpoint/*`,
+    ],
+  }));
+}
+// Best-effort Live Tail logging from the Claude branch (same log-group scheme).
+webhookInvokeClaudeLambda.addToRolePolicy(new PolicyStatement({
+  actions: ['logs:PutLogEvents'],
+  resources: [`arn:aws:logs:${AGENTCORE_REGION}:${backend.stack.account}:log-group:/agent-webhook/*:log-stream:*`],
 }));
 
 // Own stack (not agentStack) — AgentWebhookStack references the function-stack
@@ -538,6 +607,9 @@ const agentWebhookStack = new AgentWebhookStack(agentWebhookCdkStack, 'AgentWebh
   // Git-auth prep only — the harness invoke is the native task in the stack,
   // granted InvokeHarness on the state machine role via harnessArn below.
   prepareGitAuthLambda: webhookInvokeAgentLambda,
+  // @agentcore-claude branch — invokes the ClaudeCode runtime.
+  invokeClaudeLambda: webhookInvokeClaudeLambda,
+  claudeCodeRuntimeArn: AGENTCORE_CLAUDE_CODE_RUNTIME_ARN,
   harnessArn: AGENTCORE_HARNESS_ARN,
   // Physical name unique per sandbox/branch (same scheme as the AgentCore
   // gateway name above) so concurrent deployments in the same account never
@@ -605,6 +677,7 @@ backend.addOutput({
     agentcore_gateway_id: AGENTCORE_GATEWAY_ID,
     agentcore_gateway_arn: AGENTCORE_GATEWAY_ARN,
     agentcore_gateway_endpoint: AGENTCORE_GATEWAY_ENDPOINT,
+    agentcore_claude_code_runtime_arn: AGENTCORE_CLAUDE_CODE_RUNTIME_ARN,
     appsync_api_id: cfnGraphqlApi.attrApiId,
     // e2e test user credentials — see web/e2e/auth.setup.ts
     e2e_test_user_email_ssm_path: E2E_TEST_USER_EMAIL_SSM_PATH,
