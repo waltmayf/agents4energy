@@ -702,3 +702,35 @@ backend.addOutput({
     agent_webhook_state_machine_arn: agentWebhookStack.stateMachineArn,
   },
 });
+
+// ============================================================================
+// E2E CONFIG — CDK-owned SSM parameter read by scripts/fetch-e2e-config.ts.
+// Path must match that script's slugRepo/slugBranch derivation exactly:
+// /outputs/<repoSlug>/<branchSlug>/e2e-config (repoSlug = lowercased
+// "owner/repo"; branchSlug = backendName, already lowercased+truncated to 14
+// chars by scripts/build.sh's BRANCH_SLUG before it's passed to `ampx sandbox
+// --identifier`). Placed after addOutput/agentWebhookStack above because it
+// references AGENTCORE_REGION, E2E_TEST_USER_*_SSM_PATH, and
+// agentWebhookStack — all declared earlier in this file. GITHUB_REPOSITORY is
+// set automatically in GitHub Actions but not in a local `pnpm deploy`; skip
+// creating the parameter when it's unset rather than publishing a config at a
+// path fetch-e2e-config.ts (which requires GITHUB_REPOSITORY or a git remote)
+// wouldn't derive the same way.
+// ============================================================================
+
+const e2eConfigRepoSlug = process.env.GITHUB_REPOSITORY?.toLowerCase().replace(/[^a-z0-9-/]+/g, '-');
+if (e2eConfigRepoSlug && backendName) {
+  new StringParameter(agentStack, 'E2eConfig', {
+    parameterName: `/outputs/${e2eConfigRepoSlug}/${backendName}/e2e-config`,
+    stringValue: JSON.stringify({
+      appUrl: `https://${hosting.distributionDomainName}/${backendName}/`,
+      userPoolId,
+      userPoolClientId: backend.auth.resources.userPoolClient.userPoolClientId,
+      region: AGENTCORE_REGION,
+      testUserEmailSsmPath: E2E_TEST_USER_EMAIL_SSM_PATH,
+      testUserPasswordSsmPath: E2E_TEST_USER_PASSWORD_SSM_PATH,
+      agentWebhookStateMachineArn: agentWebhookStack.stateMachineArn,
+    }),
+    simpleName: false,
+  });
+}
