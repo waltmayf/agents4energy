@@ -4,11 +4,11 @@
 # and gateway (all owned in-stack by web/amplify/backend.ts) plus S3/CloudFront
 # hosting — then builds the Next.js app and publishes it to S3 + CloudFront.
 #
-# There is no separate `agentcore deploy`, no `configure-agentcore-auth.js`,
-# no `inject-agentcore-env.js`, and no `extract-deployment-info.js` step:
-# backend.ts re-derives the harness JWT authorizer from its own Cognito pool
-# and exports hosting ARNs via addOutput({ custom: {...} }). See
-# docs/architecture.md and scripts/build.sh.
+# There is no separate `agentcore deploy`, no `inject-agentcore-env.js`, and
+# no `extract-deployment-info.js` step: backend.ts re-derives the harness
+# authorizer (AWS_IAM) and the gateway's CUSTOM_JWT authorizer from its own
+# Cognito pool at synth time, and exports hosting ARNs via
+# addOutput({ custom: {...} }). See docs/architecture.md and scripts/build.sh.
 name: Deploy
 
 on:
