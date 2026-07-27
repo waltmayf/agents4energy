@@ -11,7 +11,11 @@ const agentCore = new BedrockAgentCoreClient({ region: REGION });
 
 // Mirrors the git-auth step's input — the state machine passes the same fields
 // (plus the token minted by PostInitialComment) to whichever agent branch runs.
+// `taskToken` is added by the InvokeClaude task (WAIT_FOR_TASK_TOKEN, issue
+// #175): we forward it to the runtime, which resumes the paused SFN task via
+// SendTaskSuccess/SendTaskFailure when the (possibly hours-long) job finishes.
 interface InvokeClaudeInput {
+  taskToken: string;
   runId: string;
   source: 'github' | 'jira';
   prompt: string;
@@ -24,13 +28,6 @@ interface InvokeClaudeInput {
   logStreamName?: string;
 }
 
-// Same shape the native invokeHarness task produces, so the shared
-// PostFinalComment step reads $.agentResult.Output.Message.Content[0].Text
-// identically for both the harness and the Claude Code runtime.
-interface AgentResult {
-  Output: { Message: { Role: 'assistant'; Content: Array<{ Text: string }> } };
-}
-
 async function log(groupName: string | undefined, streamName: string | undefined, message: string): Promise<void> {
   if (!groupName || !streamName) return;
   try {
@@ -40,17 +37,26 @@ async function log(groupName: string | undefined, streamName: string | undefined
   }
 }
 
-export const handler = async (input: InvokeClaudeInput): Promise<AgentResult> => {
-  const { runId, prompt, repo, issueNumber, githubToken, agentsSystemPrompt, logGroupName, logStreamName } = input;
+// Kicks off the Claude Code runtime and returns immediately. Because the
+// InvokeClaude task uses WAIT_FOR_TASK_TOKEN, this Lambda's return value is
+// IGNORED for the task result — the runtime supplies the real result later by
+// calling SendTaskSuccess with the task token. So we only need to confirm the
+// runtime accepted the job (fast 200 ack) and then get out of the way; the SFN
+// task stays paused until the runtime reports back (or the task times out).
+export const handler = async (input: InvokeClaudeInput): Promise<{ started: true }> => {
+  const { taskToken, runId, prompt, repo, issueNumber, githubToken, agentsSystemPrompt, logGroupName, logStreamName } = input;
 
   if (!CLAUDE_CODE_RUNTIME_ARN) {
     throw new Error('CLAUDE_CODE_RUNTIME_ARN not configured — the ClaudeCode runtime is not deployed on this branch.');
   }
 
-  await log(logGroupName, logStreamName, `[${runId}] invoking Claude Code runtime (repo=${repo ?? '(none)'} issue=${issueNumber ?? '(none)'})`);
+  await log(logGroupName, logStreamName, `[${runId}] starting Claude Code runtime (repo=${repo ?? '(none)'} issue=${issueNumber ?? '(none)'})`);
 
   // The runtime's server.js reads these fields (see agent/default/app/ClaudeCode/server.js).
+  // When `taskToken` is present the runtime runs the job in the background and
+  // resumes this paused task itself; the HTTP ack below is just "job accepted".
   const payload = {
+    taskToken,
     prompt,
     repo: repo ?? undefined,
     issueNumber: issueNumber ?? undefined,
@@ -70,30 +76,19 @@ export const handler = async (input: InvokeClaudeInput): Promise<AgentResult> =>
     payload: new TextEncoder().encode(JSON.stringify(payload)),
   }));
 
-  // InvokeAgentRuntime returns the runtime's HTTP response body as a streaming
-  // blob; our server.js replies with a single JSON object (not SSE), so collect
-  // it fully and parse.
+  // The runtime replies with a quick JSON ack (`{ started: true }`) once it has
+  // spawned the background job. Collect it to confirm acceptance; a non-2xx ack
+  // means the runtime never took ownership of the token, so throw — the task's
+  // own failure/catch handles it (the runtime hasn't and won't call SendTask*).
   const raw = response.response ? await response.response.transformToString() : '';
 
   if (response.statusCode && response.statusCode >= 400) {
-    throw new Error(`Claude Code runtime returned HTTP ${response.statusCode}: ${raw.slice(0, 2000)}`);
+    throw new Error(`Claude Code runtime failed to accept the job (HTTP ${response.statusCode}): ${raw.slice(0, 2000)}`);
   }
 
-  let resultText: string;
-  try {
-    const parsed = JSON.parse(raw) as { result?: string; error?: string };
-    if (parsed.error) throw new Error(`Claude Code runtime error: ${parsed.error}`);
-    resultText = parsed.result ?? raw;
-  } catch (err) {
-    // If the body wasn't the JSON we expected, surface it rather than crashing
-    // the state — but a thrown runtime error above should propagate.
-    if (err instanceof Error && err.message.startsWith('Claude Code runtime error:')) throw err;
-    resultText = raw;
-  }
+  await log(logGroupName, logStreamName, `[${runId}] Claude Code runtime accepted the job; awaiting task-token callback`);
 
-  await log(logGroupName, logStreamName, `[${runId}] Claude Code runtime finished (${resultText.length} chars)`);
-
-  return {
-    Output: { Message: { Role: 'assistant', Content: [{ Text: resultText }] } },
-  };
+  // Return value is ignored by the callback pattern — the runtime resumes the
+  // paused task via SendTaskSuccess/SendTaskFailure. Return a small ack for logs.
+  return { started: true };
 };

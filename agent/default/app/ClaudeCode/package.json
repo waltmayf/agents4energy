@@ -6,6 +6,7 @@
   "description": "Claude Code CLI hosted in a Bedrock AgentCore Runtime (invoked via @agentcore-claude).",
   "main": "server.js",
   "dependencies": {
+    "@aws-sdk/client-sfn": "^3.1075.0",
     "express": "^4.21.2"
   }
 }

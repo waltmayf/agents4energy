@@ -620,6 +620,21 @@ const agentWebhookStack = new AgentWebhookStack(agentWebhookCdkStack, 'AgentWebh
 
 backend.agentWebhookReceiver.addEnvironment('STATE_MACHINE_ARN', agentWebhookStack.stateMachineArn);
 
+// The @agentcore-claude branch uses the Step Functions callback pattern
+// (WAIT_FOR_TASK_TOKEN, issue #175): the InvokeClaude task pauses on a task
+// token and the ClaudeCode RUNTIME resumes it when the (possibly hours-long)
+// job finishes, calling SendTaskSuccess/SendTaskFailure with its own execution-
+// role credentials. Grant that role states:SendTask* on the webhook state
+// machine ARN. Guarded on the runtime being deployed (mirrors the invoke
+// Lambda's InvokeAgentRuntime grant above) — skipped cleanly otherwise. The
+// state machine ARN is a plain string, so no cross-stack token cycle.
+if (claudeCodeRuntimeName) {
+  agentCoreApp.addRuntimeRolePolicy(claudeCodeRuntimeName, new PolicyStatement({
+    actions: ['states:SendTaskSuccess', 'states:SendTaskFailure'],
+    resources: [agentWebhookStack.stateMachineArn],
+  }));
+}
+
 // ============================================================================
 // E2E TEST USER — Cognito user + SSM-stored credentials for Playwright auth.
 //

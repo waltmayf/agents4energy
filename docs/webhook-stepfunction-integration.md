@@ -50,13 +50,16 @@ GitHub issue_comment webhook          Jira comment_created webhook
              • on failure: Catch → agent-webhook-post-comment (stage=final,
                isError=true) posts the error AND (label runs) adds "agent-error"
         3. RouteAgent  (Choice on $.agent — set by the receiver from the mention)
-           ├─ 'claude'  → InvokeClaude  (agent-webhook-invoke-claude Lambda)
-           │    • calls InvokeAgentRuntime on the ClaudeCode AgentCore Runtime
-           │      (agent/default/app/ClaudeCode) — clones the repo and runs the
-           │      Claude Code CLI to completion — and reshapes the reply into the
-           │      SAME $.agentResult.Output.Message.Content shape the harness task
-           │      produces, so PostFinalComment reads both identically
-           │    • on failure: Catch → agent-webhook-post-comment (isError=true)
+           ├─ 'claude'  → InvokeClaude  (agent-webhook-invoke-claude Lambda,
+           │              Step Functions CALLBACK pattern / .waitForTaskToken)
+           │    • hands the ClaudeCode AgentCore Runtime a task token and returns
+           │      after a quick ack; the task then PAUSES (up to 3h). The runtime
+           │      clones the repo and runs the Claude Code CLI in the background
+           │      (jobs routinely run >1h — see #175), then RESUMES this task via
+           │      SendTaskSuccess with the SAME $.agentResult.Output.Message.Content
+           │      shape the harness task produces, so PostFinalComment reads both
+           │      identically (SendTaskFailure on a non-zero CLI exit)
+           │    • on failure/timeout: Catch → agent-webhook-post-comment (isError=true)
            └─ else      → InvokeHarness (NATIVE bedrockagentcore:invokeHarness task)
                 • the optimized Step Functions integration invokes the harness and
                   decodes the streamed response into a Converse-shaped result; the
@@ -111,13 +114,13 @@ The pipeline routes to one of two agents based on the mention phrase, via a `sfn
 | Mention | `$.agent` | Step 3 target | What runs |
 |---|---|---|---|
 | `@agentcore` (or `agentcore` label / Jira) | `harness` | `InvokeHarness` native task | `MyHarness` — `openai.gpt-oss-120b` behind the AgentCore Harness |
-| `@agentcore-claude` | `claude` | `InvokeClaude` Lambda | `ClaudeCode` AgentCore Runtime — the Claude Code CLI in a container |
+| `@agentcore-claude` | `claude` | `InvokeClaude` Lambda (callback / `.waitForTaskToken`) | `ClaudeCode` AgentCore Runtime — the Claude Code CLI in a container |
 
-The **ClaudeCode runtime** (`agent/default/app/ClaudeCode/`) is a first-class AgentCore Runtime declared in `agentcore.json` (`runtimes[]`) and created by the real `AgentCoreApplication` construct (CodeBuild → ECR → `CfnRuntime`, ARM64). It hosts a small HTTP server (`server.js`) that, on `POST /invocations`, clones the target repo into its session-storage mount, runs the Claude Code CLI to completion against the prompt, and returns the final text.
+The **ClaudeCode runtime** (`agent/default/app/ClaudeCode/`) is a first-class AgentCore Runtime declared in `agentcore.json` (`runtimes[]`) and created by the real `AgentCoreApplication` construct (CodeBuild → ECR → `CfnRuntime`, ARM64). It hosts a small HTTP server (`server.js`) that, on `POST /invocations` **with a task token**, clones the target repo into its session-storage mount, immediately acks `{ started: true }`, then runs the Claude Code CLI **in the background** — jobs routinely run >1h (issue #175) — and resumes the paused Step Functions task itself via `SendTaskSuccess`/`SendTaskFailure` when it finishes.
 
-Unlike the harness, the runtime has **no optimized Step Functions integration** — `InvokeAgentRuntime` streams an HTTP body rather than a Converse-shaped result — so it's driven by a Lambda (`agent-webhook-invoke-claude`) that calls `InvokeAgentRuntime` (SigV4-signed with its own execution role) and reshapes the reply into the same `$.agentResult.Output.Message.Content` array the native harness task produces. Both branches therefore converge on the identical `PostFinalComment` step. The runtime ARN is `''` on branches that don't deploy it — the env var and IAM grant are then skipped and the claude branch fails cleanly at invoke time.
+Unlike the harness, the runtime has **no optimized Step Functions integration** — `InvokeAgentRuntime` streams an HTTP body rather than a Converse-shaped result — so its branch is a Lambda (`agent-webhook-invoke-claude`) that invokes the runtime (SigV4-signed with its own execution role) using the **callback pattern**: it hands the runtime a `sfn.JsonPath.taskToken`, waits only for the fast ack, and returns while the task stays paused (up to a 3h `taskTimeout`). The runtime later delivers the result over that token, reshaped into the same `$.agentResult.Output.Message.Content` array the native harness task produces. Both branches therefore converge on the identical `PostFinalComment` step. The runtime ARN is `''` on branches that don't deploy it — the env var and IAM grant are then skipped and the claude branch fails cleanly at invoke time.
 
-> The Lambda's role is granted `bedrock-agentcore:InvokeAgentRuntime` on **both** the runtime ARN **and** `${runtimeArn}/runtime-endpoint/*` — the action authorizes against the runtime's endpoint sub-resource (`…/runtime-endpoint/DEFAULT`), so a grant on the bare runtime ARN alone yields `AccessDeniedException`. See `docs/claude-code-agentcore-runtime.md`.
+> Two IAM grants this path depends on: (1) the **Lambda's** role gets `bedrock-agentcore:InvokeAgentRuntime` on **both** the runtime ARN **and** `${runtimeArn}/runtime-endpoint/*` — the action authorizes against the runtime's endpoint sub-resource (`…/runtime-endpoint/DEFAULT`), so a grant on the bare runtime ARN alone yields `AccessDeniedException`; (2) the **runtime's** execution role gets `states:SendTaskSuccess`/`SendTaskFailure` on the state machine ARN, because the runtime (not the state machine) resumes the paused task. See `docs/claude-code-agentcore-runtime.md`.
 
 > **ChatSession is intentionally NOT created by this pipeline.** A `ChatSession` is created browser-side only, when the user opens the chat page. If the page is opened with a session id that doesn't exist yet, the browser creates it and starts listening for AgentCore-memory messages on it. Keeping session creation out of the Step Function avoids orphan sessions for runs nobody watches.
 
@@ -165,7 +168,7 @@ Unlike the Actions flow — which streams Claude Code's own OTel-exported tool c
 
 ## Step Function
 
-Defined in [`web/amplify/constructs/agentWebhookStack.ts`](../web/amplify/constructs/agentWebhookStack.ts): `LambdaInvoke` (post-initial) → `LambdaInvoke` (git-auth prep) → `Choice` (`RouteAgent` on `$.agent`) → either `CustomState` (native `bedrockagentcore:invokeHarness`) **or** `LambdaInvoke` (`agent-webhook-invoke-claude`) → `LambdaInvoke` (post-final), with a `Catch` on the git-auth, harness-invoke, and claude-invoke states routing to a shared failure-comment state. Both agent branches `.next(postFinal)`. State input/output is threaded via JSONPath (`$.initialComment`, `$.prepared`, `$.agentResult`, `$.error`); `agent-webhook-post-comment` and the git-auth Lambda both branch on `source` (`github` | `jira`) internally.
+Defined in [`web/amplify/constructs/agentWebhookStack.ts`](../web/amplify/constructs/agentWebhookStack.ts): `LambdaInvoke` (post-initial) → `LambdaInvoke` (git-auth prep) → `Choice` (`RouteAgent` on `$.agent`) → either `CustomState` (native `bedrockagentcore:invokeHarness`) **or** `LambdaInvoke` (`agent-webhook-invoke-claude`, **`WAIT_FOR_TASK_TOKEN`** — see the callback note in `docs/claude-code-agentcore-runtime.md`) → `LambdaInvoke` (post-final), with a `Catch` on the git-auth, harness-invoke, and claude-invoke states routing to a shared failure-comment state. Both agent branches `.next(postFinal)`. The claude task's `taskTimeout` is 3h and the state-machine `timeout` is 4h (so a runaway Claude Code job surfaces as a task-level `States.Timeout` to the `Catch`, not an execution timeout). State input/output is threaded via JSONPath (`$.initialComment`, `$.prepared`, `$.agentResult`, `$.error`); `agent-webhook-post-comment` and the git-auth Lambda both branch on `source` (`github` | `jira`) internally.
 
 `AgentWebhookStack` is provisioned in its **own CDK stack** (`backend.createStack('agent-webhook')`), not inside the existing `agentStack`. Building it inside `agentStack` created a circular nested-stack dependency: the state machine's `LambdaInvoke` tasks need the function-stack Lambdas' ARNs (function stack depends on this stack), while `agentStack` already depends on the function stack for other Lambdas' env vars. `agentWebhookReceiver`'s `states:StartExecution` permission is granted against a **plain-string ARN** (`arn:aws:states:<region>:<account>:stateMachine:<name>`) rather than `stateMachine.stateMachineArn`, for the same reason — the latter is a cross-stack CloudFormation token that would reintroduce the cycle. The native invoke task's `bedrock-agentcore:InvokeHarness` grant is added to the **state machine role** (`stateMachine.addToRolePolicy`), scoped to the harness ARN.
 
@@ -177,7 +180,7 @@ Defined in [`web/amplify/constructs/agentWebhookStack.ts`](../web/amplify/constr
 | [`agent-webhook-receiver`](../web/amplify/functions/agent-webhook-receiver/) | API Gateway target. Verifies signature, detects mention, `StartExecution` |
 | [`agent-webhook-post-comment`](../web/amplify/functions/agent-webhook-post-comment/) | Posts initial (Live Tail link) and final comments, mints GitHub tokens |
 | [`agent-webhook-invoke-agent`](../web/amplify/functions/agent-webhook-invoke-agent/) | GitHub context enrichment + git/gh-auth prep: fetches the issue/PR's labels/comments/diffstat and seeds git+gh credentials in the harness session via `InvokeAgentRuntimeCommand`, logs its stdout/stderr, returns the annotated prompt. (Despite the name, it no longer invokes the harness — that's the native SFN task.) |
-| [`agent-webhook-invoke-claude`](../web/amplify/functions/agent-webhook-invoke-claude/) | `@agentcore-claude` branch. Calls `InvokeAgentRuntime` on the ClaudeCode AgentCore Runtime and reshapes its reply into the shared `$.agentResult` shape. Only reached when `$.agent == "claude"`. |
+| [`agent-webhook-invoke-claude`](../web/amplify/functions/agent-webhook-invoke-claude/) | `@agentcore-claude` branch (`WAIT_FOR_TASK_TOKEN`). Hands the ClaudeCode AgentCore Runtime a Step Functions task token via `InvokeAgentRuntime`, confirms the fast `{ started: true }` ack, and returns while the task stays paused; the runtime later resumes it with the shared `$.agentResult` shape via `SendTaskSuccess`. Only reached when `$.agent == "claude"`. |
 
 `agent-webhook-post-comment` reuses [`web/amplify/functions/_shared/githubAppToken.ts`](../web/amplify/functions/_shared/githubAppToken.ts) — the GitHub App JWT/installation-token logic factored out of `mint-github-token` (see `docs/github-integration.md`) so both the browser-initiated flow and this webhook flow mint tokens identically.
 

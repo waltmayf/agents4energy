@@ -30,10 +30,12 @@ export interface AgentWebhookStackProps {
    */
   prepareGitAuthLambda: lambda.IFunction;
   /**
-   * Lambda that invokes the Claude Code AgentCore Runtime for `@agentcore-claude`
-   * mentions (see agent-webhook-invoke-claude). Reshapes the runtime's reply into
-   * the same $.agentResult shape the native invokeHarness task produces, so the
-   * shared PostFinalComment step reads both identically.
+   * Lambda that kicks off the Claude Code AgentCore Runtime for `@agentcore-claude`
+   * mentions (see agent-webhook-invoke-claude). Invoked via the Step Functions
+   * callback pattern (issue #175): it hands the runtime a task token and returns
+   * immediately, and the runtime later resumes the paused task with the
+   * $.agentResult shape (same as the native invokeHarness task), so the shared
+   * PostFinalComment step reads both identically.
    */
   invokeClaudeLambda: lambda.IFunction;
   /**
@@ -200,16 +202,27 @@ export class AgentWebhookStack extends Construct {
       },
     });
 
-    // Step 3 (alternative) — Claude Code AgentCore Runtime invoke (Lambda).
-    // For `@agentcore-claude` mentions: the Lambda calls InvokeAgentRuntime on
-    // the ClaudeCode runtime (which clones the repo and runs the Claude Code CLI
-    // to completion) and reshapes the reply into the same $.agentResult shape the
-    // native invokeHarness task produces, so PostFinalComment reads both the same
-    // way. Unlike the harness, this has no optimized SFN integration — the runtime
+    // Step 3 (alternative) — Claude Code AgentCore Runtime invoke (Lambda +
+    // callback token). For `@agentcore-claude` mentions the Lambda calls
+    // InvokeAgentRuntime on the ClaudeCode runtime, which clones the repo and
+    // runs the Claude Code CLI. A real Claude Code job routinely runs far longer
+    // than the 15-min Lambda / state-machine ceiling the synchronous path was
+    // capped at (often >1h), so this uses the Step Functions callback pattern
+    // (`.waitForTaskToken`, issue #175): the invoke Lambda hands the runtime a
+    // task token and returns immediately, and the execution PAUSES here until the
+    // runtime itself calls SendTaskSuccess/SendTaskFailure with the token (up to
+    // the taskTimeout below, matching AgentCore's ~hours-long session limits).
+    // Unlike the harness this has no optimized SFN integration — the runtime
     // streams an HTTP body, not a Converse-shaped result — so it stays a Lambda.
     const invokeClaude = new tasks.LambdaInvoke(this, 'InvokeClaude', {
       lambdaFunction: props.invokeClaudeLambda,
+      integrationPattern: sfn.IntegrationPattern.WAIT_FOR_TASK_TOKEN,
       payload: sfn.TaskInput.fromObject({
+        // The callback token the runtime uses to resume this paused state. Passed
+        // through the invoke Lambda into the runtime payload; the runtime returns
+        // the final result via SendTaskSuccess (not the Lambda's return value,
+        // which the token pattern ignores).
+        taskToken: sfn.JsonPath.taskToken,
         runId: sfn.JsonPath.stringAt('$.runId'),
         source: sfn.JsonPath.stringAt('$.source'),
         prompt: sfn.JsonPath.stringAt('$.prepared.effectivePrompt'),
@@ -221,9 +234,18 @@ export class AgentWebhookStack extends Construct {
         logGroupName: sfn.JsonPath.stringAt('$.initialComment.logGroupName'),
         logStreamName: sfn.JsonPath.stringAt('$.initialComment.logStreamName'),
       }),
-      payloadResponseOnly: true,
+      // NOT payloadResponseOnly: with WAIT_FOR_TASK_TOKEN the task result comes
+      // from the SendTaskSuccess `output`, not the Lambda's synchronous return.
+      // The runtime sends `{ Output: { Message: { Role, Content: [{ Text }] } } }`
+      // (the same shape the native invokeHarness task produces), landing at
+      // $.agentResult so the shared PostFinalComment step reads both identically.
       resultPath: '$.agentResult',
-      taskTimeout: sfn.Timeout.duration(Duration.minutes(14)),
+      // Cap the paused wait at ~3h to match AgentCore's session limits — a job
+      // that hasn't reported back by then is treated as timed out and routed to
+      // the failure path. The state machine `timeout` below is set comfortably
+      // higher so this task-level timeout, not the execution timeout, is what
+      // surfaces to Catch.
+      taskTimeout: sfn.Timeout.duration(Duration.hours(3)),
     });
 
     const postFinal = new tasks.LambdaInvoke(this, 'PostFinalComment', {
@@ -292,7 +314,12 @@ export class AgentWebhookStack extends Construct {
     this.stateMachine = new sfn.StateMachine(this, 'StateMachine', {
       stateMachineName: props.stateMachineName,
       definitionBody: sfn.DefinitionBody.fromChainable(definition),
-      timeout: Duration.minutes(15),
+      // Raised well above the old 15-min cap to accommodate the @agentcore-claude
+      // callback branch (issue #175), whose InvokeClaude task can stay paused on
+      // its task token for up to ~3h. Set above that task's 3h taskTimeout so the
+      // task-level timeout is what surfaces to Catch, not the execution timeout.
+      // The native harness branch still self-bounds at 840s via its TimeoutSeconds.
+      timeout: Duration.hours(4),
     });
 
     // The native invokeHarness task calls the harness with the state machine's
@@ -307,11 +334,16 @@ export class AgentWebhookStack extends Construct {
       }));
     }
 
-    // The InvokeClaude branch runs as a Lambda (invokeClaudeLambda), which is
-    // granted InvokeAgentRuntime on its OWN execution role in backend.ts — the
-    // state machine only invokes the Lambda, not the runtime directly, so no
-    // runtime grant is needed on the state machine role. The claudeCodeRuntimeArn
-    // prop is kept for symmetry/documentation and future native-integration use.
+    // The InvokeClaude branch runs as a Lambda (invokeClaudeLambda), granted
+    // InvokeAgentRuntime on its OWN execution role in backend.ts — the state
+    // machine only invokes the Lambda, not the runtime directly, so no runtime
+    // grant is needed on the state machine role. With the callback pattern
+    // (#175) the ClaudeCode RUNTIME resumes this task via SendTaskSuccess/
+    // SendTaskFailure; those calls are authorized by the RUNTIME's execution
+    // role (granted states:SendTask* on this.stateMachineArn in backend.ts), not
+    // the state machine role, so nothing extra is added to the state machine role
+    // here. The claudeCodeRuntimeArn prop is kept for symmetry/documentation and
+    // future native-integration use.
     void props.claudeCodeRuntimeArn;
 
     this.httpApi = new apigwv2.HttpApi(this, 'HttpApi', {

@@ -12,23 +12,38 @@
 //     "issueNumber": 123,                     // optional; used for the reply
 //     "githubToken": "ghs_...",               // optional; short-lived App token
 //     "branch":      "main",                  // optional; base branch (default: repo default)
-//     "systemAppend":"<extra system prompt>"  // optional
+//     "systemAppend":"<extra system prompt>", // optional
+//     "taskToken":   "<sfn callback token>"   // optional; enables the async path
 //   }
 //
 // We run the Claude Code CLI headlessly against Amazon Bedrock (same engine as
 // anthropics/claude-code-action --use_bedrock), so a customer already using the
 // GitHub Action migrates by pointing @agentcore-claude at this runtime instead.
 //
-// AgentCore sessions can run up to 8h; a single InvokeAgentRuntime request is
-// synchronous, so we run Claude Code to completion and return its final text.
+// Two invocation modes (issue #175):
+//   - No `taskToken`: SYNCHRONOUS. Run Claude Code to completion and return its
+//     final text in the HTTP response (used by the direct-invoke smoke test and
+//     any non-Step-Functions caller). Bounded by the caller's 15-min ceiling.
+//   - With `taskToken`: CALLBACK. A Claude Code job routinely runs longer than
+//     the 15-min Lambda/state-machine ceiling (often >1h), so we start the job
+//     in the BACKGROUND, immediately ack `{ started: true }`, and when the job
+//     finishes resume the paused Step Functions task ourselves via
+//     SendTaskSuccess/SendTaskFailure. AgentCore sessions can run up to ~hours,
+//     which comfortably covers the state machine's 3h task timeout.
 
 import express from 'express';
 import { spawn } from 'node:child_process';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { SFNClient, SendTaskSuccessCommand, SendTaskFailureCommand } from '@aws-sdk/client-sfn';
 
 const PORT = 8080;
+// SendTaskSuccess/Failure need only the token + a client in the SAME region and
+// account as the state machine (the runtime's execution role is granted
+// states:SendTask* on the webhook state machine ARN in backend.ts). AWS_REGION
+// is always set inside the AgentCore Runtime container.
+const sfn = new SFNClient({ region: process.env.AWS_REGION });
 // Bedrock model for Claude Code. Overridable via env so the runtime's model can
 // be bumped without a code change. Mirrors .github/workflows/claude.yml.
 const MODEL = process.env.ANTHROPIC_MODEL || 'us.anthropic.claude-sonnet-5';
@@ -41,8 +56,26 @@ const app = express();
 // (issue bodies, diffs), so lift the default 100kb limit.
 app.use(express.json({ limit: '25mb' }));
 
+// Count of Claude Code jobs currently running in the BACKGROUND (callback path).
+// This is the single most important piece of the callback design: AgentCore
+// Runtime polls GET /ping to decide when a session is idle and may be
+// snapshotted/suspended/reclaimed. `Healthy` means "idle, safe to reclaim";
+// `HealthyBusy` means "work in flight, keep me alive". A detached background
+// job has NO in-flight HTTP request, so if /ping reported `Healthy` the runtime
+// would reclaim the microVM at its idle threshold (~13 min observed) and kill
+// the still-running `claude` process before it could call SendTaskSuccess —
+// exactly the failure seen on issue #165. So we report `HealthyBusy` for the
+// entire lifetime of every background job, which pins the session open (up to
+// the ~8h session cap) until the job finishes and resumes the SFN task.
+let activeJobs = 0;
+
 app.get('/ping', (_req, res) => {
-  res.status(200).json({ status: 'Healthy' });
+  res.status(200).json({
+    status: activeJobs > 0 ? 'HealthyBusy' : 'Healthy',
+    // Unix seconds; part of the AgentCore health contract so the control plane
+    // can tell a fresh status apart from a stale one.
+    time_of_last_update: Math.floor(Date.now() / 1000),
+  });
 });
 
 app.post('/invocations', async (req, res) => {
@@ -58,24 +91,85 @@ app.post('/invocations', async (req, res) => {
   const githubToken = typeof payload.githubToken === 'string' ? payload.githubToken : '';
   const baseBranch = typeof payload.branch === 'string' ? payload.branch : '';
   const systemAppend = typeof payload.systemAppend === 'string' ? payload.systemAppend : '';
+  // Present only on the Step Functions callback path (issue #175).
+  const taskToken = typeof payload.taskToken === 'string' ? payload.taskToken : '';
 
   const log = (...args) => console.log(`[invocations]`, ...args);
-  log(`repo=${repo || '(none)'} issue=${issueNumber ?? '(none)'} promptChars=${prompt.length}`);
+  log(`repo=${repo || '(none)'} issue=${issueNumber ?? '(none)'} promptChars=${prompt.length} mode=${taskToken ? 'callback' : 'sync'}`);
 
-  let workDir;
+  const runJob = () => runManagedJob({ prompt, repo, issueNumber, githubToken, baseBranch, systemAppend, log });
+
+  // CALLBACK PATH: a Claude Code run can outlast the 15-min invoke ceiling, so
+  // ack immediately and drive the (possibly hours-long) job in the background,
+  // resuming the paused Step Functions task ourselves when it finishes. After
+  // res returns the HTTP request is done, but the server process keeps running,
+  // so the background promise continues. Guard it with .catch so a rejection can
+  // never surface as an unhandledRejection and crash the process.
+  if (taskToken) {
+    // Mark the session BUSY before we ack, so /ping reports HealthyBusy from the
+    // moment the HTTP request returns and the runtime never reclaims the microVM
+    // out from under the background job. Decremented in .finally below.
+    activeJobs++;
+    res.status(200).json({ started: true });
+    log(`[callback] job started in background (activeJobs=${activeJobs}); will resume SFN task on completion`);
+    runJob().then(
+      async (finalText) => {
+        log(`[callback] job finished (${finalText.length} chars); sending SendTaskSuccess`);
+        await sfn.send(new SendTaskSuccessCommand({
+          taskToken,
+          // Match the synchronous $.agentResult shape the native invokeHarness
+          // task produces so the shared PostFinalComment step reads both alike.
+          output: JSON.stringify({ Output: { Message: { Role: 'assistant', Content: [{ Text: finalText }] } } }),
+        }));
+      },
+      async (err) => {
+        // Short, token-redacted failure so the SFN Catch → PostFailureComment
+        // step surfaces a useful (but not leaky) cause on the issue/PR.
+        const cause = redact(String(err?.stack || err?.message || err)).slice(0, 3000);
+        log(`[callback] job failed; sending SendTaskFailure:`, cause);
+        await sfn.send(new SendTaskFailureCommand({
+          taskToken,
+          error: 'ClaudeCodeRuntimeError',
+          cause,
+        }));
+      },
+    ).catch((sendErr) => {
+      // SendTask* itself failed (e.g. token already timed out) — nothing left to
+      // do but log; the SFN task will time out on its own if it hasn't already.
+      log(`[callback] ERROR delivering task result:`, sendErr?.stack || String(sendErr));
+    }).finally(() => {
+      // Job (and its result delivery) is fully done — let /ping report idle again
+      // so the runtime can reclaim the session once no other job is in flight.
+      activeJobs--;
+      log(`[callback] job settled (activeJobs=${activeJobs})`);
+    });
+    return;
+  }
+
+  // SYNCHRONOUS PATH: run to completion and return the final text in the HTTP
+  // response (direct-invoke smoke test / any non-token caller).
   try {
-    workDir = await setupWorkspace({ repo, githubToken, baseBranch, log });
-    const finalText = await runClaudeCode({ prompt, workDir, repo, issueNumber, systemAppend, githubToken, log });
+    const finalText = await runJob();
     res.status(200).json({ result: finalText, repo: repo || null, issueNumber });
   } catch (err) {
     log('ERROR', err?.stack || String(err));
-    res.status(500).json({ error: String(err?.message || err) });
-  } finally {
-    // Leave the git clone under WORKSPACE_ROOT (persistent) for reuse; only the
-    // ephemeral config dir (if any) needs cleanup. Nothing to remove here today.
-    void workDir;
+    res.status(500).json({ error: redact(String(err?.message || err)) });
   }
 });
+
+// Shared job body for both invocation paths: set up the workspace, then run
+// Claude Code to completion. Kept separate so the sync and callback paths never
+// drift. Leaves the git clone under WORKSPACE_ROOT (persistent) for reuse.
+async function runManagedJob({ prompt, repo, issueNumber, githubToken, baseBranch, systemAppend, log }) {
+  const workDir = await setupWorkspace({ repo, githubToken, baseBranch, log });
+  return await runClaudeCode({ prompt, workDir, repo, issueNumber, systemAppend, githubToken, log });
+}
+
+// Strip any GitHub token that may have leaked into an error/clone URL before it
+// leaves this process (SFN cause, HTTP error body, logs).
+function redact(s) {
+  return s.replace(/x-access-token:[^@\s]+@/g, 'x-access-token:***@');
+}
 
 // Clone the repo (if provided) into session storage and configure git/gh auth
 // using the short-lived GitHub App token. Returns the directory Claude Code

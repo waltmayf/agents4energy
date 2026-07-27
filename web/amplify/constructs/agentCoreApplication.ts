@@ -1,4 +1,5 @@
 import { Construct } from 'constructs';
+import { PolicyStatement } from 'aws-cdk-lib/aws-iam';
 import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
 import { resolve, dirname } from 'path';
@@ -158,6 +159,20 @@ export class AgentCoreApplication extends Construct {
     const env = this.app.environments.get(name);
     if (!env) throw new Error(`Runtime "${name}" not found in AgentCoreApplication`);
     return env.runtime.runtimeId;
+  }
+
+  /**
+   * Attach a policy statement to an AgentCore Runtime's execution role — the
+   * role the container assumes at run time. Used to grant the ClaudeCode runtime
+   * `states:SendTaskSuccess`/`SendTaskFailure` so it can resume the webhook
+   * state machine's paused callback task (issue #175). Delegates to the real
+   * runtime construct's `addToPolicy` (a no-op with a synth warning for imported
+   * roles, per @aws/agentcore-cdk).
+   */
+  public addRuntimeRolePolicy(name: string, statement: PolicyStatement): void {
+    const env = this.app.environments.get(name);
+    if (!env) throw new Error(`Runtime "${name}" not found in AgentCoreApplication`);
+    env.runtime.addToPolicy(statement);
   }
 
   public memoryArn(name: string): string {
