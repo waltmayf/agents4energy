@@ -1,11 +1,16 @@
 # Fast, credential-free PR gate (issue #135). Runs on every pull request and
 # blocks merge when the code doesn't type-check or the unit tests fail — the
 # class of defect that shipped in PR #134 (backend.ts failed `npx tsc --noEmit`
-# with "used before declaration" errors, but nothing in CI caught it).
+# with "used before declaration" errors, but nothing in CI caught it). Also runs
+# a synth-only CDK check (issue #152) that catches circular stack dependencies
+# and other synth-time CDK errors — the class of defect from PR #148, which
+# type-checked cleanly but failed to deploy with
+# "CloudformationStackCircularDependencyError: circular dependency found
+# between nested stacks".
 #
 # Deliberately does NOT deploy or touch AWS: no OIDC, no secrets, just install +
-# type-check + unit tests. Keep it that way so it stays fast and safe to run on
-# untrusted PRs.
+# type-check + synth check + unit tests. Keep it that way so it stays fast and
+# safe to run on untrusted PRs.
 #
 # Lint (`pnpm lint`) is intentionally NOT gated yet: `main` currently has a large
 # backlog of pre-existing eslint errors (incl. eslint scanning generated output),
@@ -54,6 +59,19 @@ jobs:
       # This is the check that would have blocked PR #134.
       - name: Type check (web)
         run: cd web && npx tsc --noEmit
+
+      # Synth-only CDK check (#152): dynamically imports amplify/backend.ts and
+      # triggers the same 'amplifySynth' App.synth() call @aws-amplify/backend's
+      # sandbox/pipeline-deploy use internally (see default_stack_factory.js) —
+      # without ampx, which calls SSM:GetParameter to check CDK bootstrap status
+      # *before* synth and so requires valid AWS credentials just to reach it.
+      # App.synth() alone doesn't catch circular dependencies between nested
+      # stacks (that's a CloudFormation deploy-time error, not a CDK synth-time
+      # one), so the script also walks every generated template and checks it
+      # for resource dependency cycles via aws-cdk-lib/assertions. No AWS calls,
+      # no credentials — see web/scripts/check-cdk-synth.mjs for details.
+      - name: CDK synth check (web)
+        run: cd web && pnpm test:synth
 
       # Unit tests — node:test suite, no AWS/browser needed.
       - name: Unit tests (web)

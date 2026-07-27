@@ -8,6 +8,7 @@
     "start": "next start",
     "lint": "eslint",
     "test:unit": "node --test --experimental-strip-types \"lib/**/*.test.ts\"",
+    "test:synth": "node scripts/check-cdk-synth.mjs",
     "test:e2e": "playwright test",
     "test:e2e:ui": "playwright test --ui",
     "test:e2e:install": "playwright install chromium"
