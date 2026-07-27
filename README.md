@@ -1,4 +1,6 @@
-# Agents4Energy 
+# Agents4Energy
+
+**Note:** The Amplify backend now provisions AgentCore resources (memory, harness, runtimes) with the official `@aws/agentcore-cdk` `AgentCoreApplication` L3 construct, plus `AgentCoreMcp` for the gateway — see [docs/agentcore-cdk-construct.md](docs/agentcore-cdk-construct.md).
 
 Getting started deploying generative AI agents for the first time? Begin by deploying [this agents4energy sample agent repository](https://github.com/aws-samples/sample-agents4energy-agent-template-alpha).
 
