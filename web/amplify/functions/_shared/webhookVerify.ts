@@ -28,6 +28,7 @@ export function verifyJiraSharedSecret(providedSecret: string | undefined, expec
 }
 
 const MENTION_RE = /@agentcore\b/i;
+const MENTION_CLAUDE_RE = /@agentcore-claude\b/i;
 
 // Returns the prompt text following the trigger mention, or null if the
 // mention isn't present. A distinct mention phrase (rather than reusing
@@ -35,6 +36,10 @@ const MENTION_RE = /@agentcore\b/i;
 // .github/workflows/agent-mention.yml, which already matches any
 // `@agent[-<slug>]` mention on the same repo.
 export function extractPromptAfterMention(commentBody: string): string | null {
+  // Check for Claude-specific mention first
+  if (MENTION_CLAUDE_RE.test(commentBody)) {
+    return commentBody.replace(MENTION_CLAUDE_RE, '').trim();
+  }
   if (!MENTION_RE.test(commentBody)) return null;
   return commentBody.replace(MENTION_RE, '').trim();
 }
