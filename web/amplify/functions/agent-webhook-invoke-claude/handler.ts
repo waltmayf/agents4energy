@@ -57,6 +57,9 @@ export const handler = async (input: InvokeClaudeInput): Promise<{ started: true
   // resumes this paused task itself; the HTTP ack below is just "job accepted".
   const payload = {
     taskToken,
+    // Same id as runtimeSessionId — lets the runtime key the in-flight job so a
+    // later cancel invocation (issue #182) can find and kill this exact run.
+    runId,
     prompt,
     repo: repo ?? undefined,
     issueNumber: issueNumber ?? undefined,
