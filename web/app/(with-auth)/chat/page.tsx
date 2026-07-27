@@ -24,6 +24,7 @@ import {
 import { WrenchIcon, Loader2Icon } from 'lucide-react';
 import { listMcpToolsForServer } from '@/lib/list-mcp-tools';
 import { ToolCallRenderer } from './tool-call-renderer';
+import { UserMessageMarkdown } from './user-message-renderer';
 
 type McpTool = {
   name: string;
@@ -210,6 +211,9 @@ function ChatView({
             threadId={sessionId}
             labels={{
               chatInputPlaceholder: 'Type a message…',
+            }}
+            messageView={{
+              userMessage: { messageRenderer: UserMessageMarkdown },
             }}
           />
         </div>

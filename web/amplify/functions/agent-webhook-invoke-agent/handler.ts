@@ -297,10 +297,15 @@ async function buildGithubContextBlock(repo: string, issueNumber: number, token:
   }
 
   if (comments.length > 0) {
-    lines.push('', `Comment thread (${comments.length}${comments.length === MAX_COMMENTS ? '+' : ''}):`);
+    // Wrapped in its own marker (nested inside <github_context>) so the chat
+    // UI can sub-collapse just the comment thread — issue #119 — rather than
+    // heuristically locating the "Comment thread (N):" line within the whole
+    // block.
+    lines.push('', '<comment_thread>', `Comment thread (${comments.length}${comments.length === MAX_COMMENTS ? '+' : ''}):`);
     for (const c of comments) {
       lines.push(`--- @${c.user.login} at ${c.created_at} ---`, truncate(c.body, MAX_COMMENT_CHARS));
     }
+    lines.push('</comment_thread>');
   }
 
   lines.push('</github_context>');
@@ -312,7 +317,13 @@ async function buildGithubContextBlock(repo: string, issueNumber: number, token:
 // invokeHarness task.
 export const handler = async (input: PrepareInput): Promise<PrepareOutput> => {
   const { runId, source, prompt, repo, issueNumber, githubToken, agentsSystemPrompt, logGroupName, logStreamName } = input;
-  const promptWithAgentsMd = agentsSystemPrompt ? [agentsSystemPrompt, prompt].join('\n\n') : prompt;
+  // Wrapped in an explicit marker (rather than left as an unmarked prefix) so
+  // the chat UI can reliably detect and collapse it by default (issue #119) —
+  // heuristic detection of "where AGENTS.md ends and the prompt begins" would
+  // be fragile if either side's content changes.
+  const promptWithAgentsMd = agentsSystemPrompt
+    ? [`<agents_md>\n${agentsSystemPrompt}\n</agents_md>`, prompt].join('\n\n')
+    : prompt;
 
   if (source !== 'github' || !githubToken) {
     // Jira (or a GitHub run with no token): nothing to authenticate, pass the
