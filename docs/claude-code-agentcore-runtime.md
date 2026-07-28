@@ -28,10 +28,10 @@ Source: [`agent/default/app/ClaudeCode/`](../agent/default/app/ClaudeCode/).
 On `POST /invocations` ([server.js](../agent/default/app/ClaudeCode/server.js)) the server:
 
 1. **Sets up the workspace.** If the payload carries `repo` + `githubToken`, it configures `git`/`gh` credentials (a git credential store seeded with the short-lived GitHub App token, plus `GH_TOKEN` for the CLI) and clones the repo into the session-storage mount (`/mnt/workspace`, persistent across stop/resume so a follow-up comment reuses the clone). No repo → a throwaway temp dir.
-2. **Runs Claude Code headlessly** — `claude -p "<prompt>" --model <bedrock model> --output-format json --permission-mode acceptEdits --dangerously-skip-permissions`, with an `--append-system-prompt` telling it the repo is cloned, `git`/`gh` are authenticated, and to open a PR with `gh` if it makes changes. `CLAUDE_CODE_USE_BEDROCK=1` routes the model through Bedrock using the runtime execution role's credentials.
+2. **Runs Claude Code headlessly** — `claude -p "<prompt>" --model <bedrock model> --output-format stream-json --verbose --permission-mode acceptEdits --dangerously-skip-permissions`, with an `--append-system-prompt` telling it the repo is cloned, `git`/`gh` are authenticated, and to open a PR with `gh` if it makes changes. `CLAUDE_CODE_USE_BEDROCK=1` routes the model through Bedrock using the runtime execution role's credentials.
 
    > **Root + `--dangerously-skip-permissions`.** The container image runs as `root`, and the CLI otherwise **refuses** `--dangerously-skip-permissions` under root (*"cannot be used with root/sudo privileges for security reasons"*, exit 1) — which manifests as an HTTP 500 from the runtime with that line in CloudWatch. The fix is `IS_SANDBOX=1` in the spawn env (set in `server.js`): AgentCore Runtime already executes each session in an isolated Firecracker microVM, so declaring the sandbox is accurate and lets the headless run proceed as root (keeping the `/mnt/workspace` mount writable). Do **not** drop `--dangerously-skip-permissions` — it's required for non-interactive operation, not a security toggle to remove.
-3. **Returns the final text** — parses the CLI's JSON result object (`--output-format json`) and returns `{ result, repo, issueNumber }`. A non-zero CLI exit becomes a 500 with the tail of stderr (tokens redacted).
+3. **Streams each turn to AgentCore Memory** as the CLI runs (see [Memory persistence](#memory-persistence-agentcore-claude-turns-in-the-chat-ui) below) and **returns the final text** — the last `stream-json` line is a `result` event whose `result` field is the final assistant text; the server returns `{ result, repo, issueNumber }`. A non-zero CLI exit becomes a 500 with the tail of stderr (tokens redacted).
 
 > **`/mnt/workspace`'s disk quota and `pnpm install` (issue #180).** The session-storage mount is small — observed **1GB** — and `AWS::BedrockAgentCore::Runtime`'s `SessionStorageConfigurationProperty` (checked in the CloudFormation resource spec and the `@aws/agentcore-cdk` schema) exposes only `mountPath`, no size/quota field, so the limit isn't configurable from `agentcore.json`. On a repo the size of this one, `pnpm install`'s **virtual store** (`node_modules/.pnpm` — a symlink farm with one entry per resolved package, the actual bulk of `node_modules`) defaults to *inside the project directory*, i.e. onto that 1GB mount, and blows the quota with `ENOSPC` even though the container's root filesystem has several GB free. pnpm's content-addressable *store* was already fine — it lives under `HOME` (`/root`, root fs) — only the virtual store needed to move. `server.js` sets `npm_config_virtual_store_dir` (pnpm's env-var form of `--virtual-store-dir`) to `$HOME/.pnpm-virtual-store` in the spawned `claude` process's env, so any `pnpm install` Claude Code runs lands `node_modules/.pnpm` on the root fs while `/mnt/workspace` keeps holding only the git clone (source-only, as the issue's Option 2 suggested) — no separate re-clone under `/root` needed. `setupWorkspace` already deletes and re-clones the repo on every run, so nothing that would benefit from mount persistence is lost. `setupWorkspace` also logs `df -h /mnt/workspace` right after cloning, so a future quota regression shows up in CloudWatch instead of only surfacing as an `ENOSPC` deep inside `pnpm install`.
 
@@ -112,6 +112,37 @@ Because the construct runs at CDK **synth** time inside the Amplify stack, the r
 Physical names follow the construct's `${projectName}_${name}` scheme (with `projectName` made unique per deployment), so the runtime is `default_web_<branch>_ClaudeCode` and concurrent branches/sandboxes don't collide. Runtimes are optional: if `agentcore.json` has no `ClaudeCode` runtime, `AGENTCORE_CLAUDE_CODE_RUNTIME_ARN` resolves to `''` and every consumer tolerates the empty ARN (the invoke Lambda throws a clean *"runtime not deployed on this branch"* at call time rather than failing synth).
 
 > The `agentcore_code_interpreter` sandbox tool was removed (#191); Claude Code runs shell commands directly in the container. The container is a Runtime, **not** a harness — the CMD (`node server.js`) is honored as-is.
+
+## Memory persistence: Claude Code turns in the chat UI
+
+(issue #186) Claude Code's own turns are written into the **same `MyHarnessMemory` resource** the harness uses, so a run started via `@agentcore-claude` (or a direct `InvokeAgentRuntime` call) shows up in the chat UI exactly like a harness run — same `listSessionMessages` query, same `converse-to-agui.ts` mapping, no separate read path.
+
+### Why `stream-json`, not `json`
+
+The CLI invocation changed from `--output-format json` (one result object at the end) to `--output-format stream-json --verbose` (one JSON object per line as the run progresses: `system` init, `assistant` turns, `user` turns carrying tool results, and a final `result` summary). `server.js` buffers stdout and processes it line-by-line as NDJSON — persisting each `assistant`/`user` line to memory as it arrives — while still resolving the invocation's return value from the final `result` line's `result` field, so callers (the sync smoke-test path and the SFN callback path) see no change in behavior.
+
+### Event shape — matching the harness exactly
+
+[`memory.js`](../agent/default/app/ClaudeCode/memory.js) translates each `stream-json` line into the same shape the harness SDK writes: a `CreateEvent` call whose `payload[0].conversational` is `{ role, content: { text: JSON.stringify(contentBlocks) } }`, where `contentBlocks` is a Bedrock Converse `ContentBlock[]`:
+
+| `stream-json` block | Converse block written |
+|---|---|
+| `assistant` → `{ type: "text", text }` | `{ text }` |
+| `assistant` → `{ type: "thinking", thinking }` | `{ reasoningContent: { reasoningText: { text: thinking } } }` |
+| `assistant` → `{ type: "tool_use", id, name, input }` | `{ toolUse: { toolUseId: id, name, input } }` |
+| `user` → `{ type: "tool_result", tool_use_id, content, is_error }` | `{ toolResult: { toolUseId: tool_use_id, status, content: [{ text }] } }` |
+
+Empty blocks (e.g. a `thinking` block with no text — the CLI emits these as signature-only placeholders) are dropped before the `CreateEvent` call rather than persisted as noise. The initiating request's prompt is persisted as its own `USER` turn (via `persistUserPrompt`) before the CLI even starts, so the transcript opens on the original request the same way a harness session does.
+
+This is exactly the shape [`list-session-messages/handler.ts`](../web/amplify/functions/list-session-messages/handler.ts) already parses (`extractContentBlocks` / `flattenBlocksToText`) and [`converse-to-agui.ts`](../web/lib/converse-to-agui.ts) already maps to AG-UI messages — no changes were needed on the read side.
+
+### Session id and wiring
+
+- **Session id**: `InvokeAgentRuntime` forwards `runtimeSessionId` to the container as the `X-Amzn-Bedrock-AgentCore-Runtime-Session-Id` request header (not in the JSON body); `server.js` reads it via `req.get(...)`, falling back to `payload.runId`. This is the same id `agent-webhook-invoke-claude` already sets to the Step Function's `runId`, so a GitHub-triggered run's memory events land under the exact session id `?sessionId=<runId>` opens in the chat UI (see the initial-comment link in [`agent-webhook-post-comment/handler.ts`](../web/amplify/functions/agent-webhook-post-comment/handler.ts)).
+- **Actor id**: hardcoded `'default'`, matching `list-session-messages`/`harness-agent.ts` (memory is keyed by agent name, not per-GitHub-user identity).
+- **Memory id/region**: the runtime discovers these via `AGENTCORE_MEMORY_ID`/`AGENTCORE_MEMORY_REGION` env vars, set in [`backend.ts`](../web/amplify/backend.ts) through a new `agentCoreApp.addRuntimeEnvironmentVariable('ClaudeCode', ...)` accessor — the memory id is a deploy-time CDK token, so it can't be hardcoded in `agentcore.json`'s static `envVars`.
+- **IAM**: `backend.ts` grants the runtime's execution role `bedrock-agentcore:CreateEvent` on the memory ARN, guarded on both the runtime and the memory being deployed on the branch (mirrors the `states:SendTask*` grant pattern already used for the callback path).
+- **Failure mode**: every `CreateEvent` call is best-effort — a failure is logged and swallowed (`memory.js`), never thrown. Memory persistence must never fail, delay, or retry into the actual Claude Code run.
 
 ## The invoke path (GitHub issue → Claude Code)
 

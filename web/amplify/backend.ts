@@ -635,6 +635,22 @@ if (claudeCodeRuntimeName) {
   }));
 }
 
+// Persist Claude Code's own turns into the same MyHarnessMemory resource the
+// harness half uses (issue #186), so a run started via @agentcore-claude shows
+// up in the chat UI (HarnessAgent.loadHistory reads the same memory/session).
+// The runtime discovers the memory id/region via env vars (it calls CreateEvent
+// itself — see agent/default/app/ClaudeCode/server.js) rather than through the
+// agentcore.json envVars list, because the memory id is a deploy-time CDK token,
+// not something that can be hardcoded in that static config file.
+if (claudeCodeRuntimeName && AGENTCORE_MEMORY_ID) {
+  agentCoreApp.addRuntimeEnvironmentVariable(claudeCodeRuntimeName, 'AGENTCORE_MEMORY_ID', AGENTCORE_MEMORY_ID);
+  agentCoreApp.addRuntimeEnvironmentVariable(claudeCodeRuntimeName, 'AGENTCORE_MEMORY_REGION', AGENTCORE_REGION);
+  agentCoreApp.addRuntimeRolePolicy(claudeCodeRuntimeName, new PolicyStatement({
+    actions: ['bedrock-agentcore:CreateEvent'],
+    resources: [AGENTCORE_MEMORY_ARN],
+  }));
+}
+
 // ============================================================================
 // E2E TEST USER — Cognito user + SSM-stored credentials for Playwright auth.
 //

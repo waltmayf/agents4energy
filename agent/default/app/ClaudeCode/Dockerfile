@@ -35,7 +35,7 @@ RUN npm install -g @anthropic-ai/claude-code@latest
 WORKDIR /app
 COPY package.json ./
 RUN npm install --omit=dev
-COPY server.js browser-mcp.js ./
+COPY server.js memory.js browser-mcp.js ./
 
 # The harness overrides ENTRYPOINT/CMD when this image backs a *harness*, but
 # for a Runtime the CMD is honored — start the invocation server.
