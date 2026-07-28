@@ -208,7 +208,13 @@ export const handler = async (input: PostCommentInput): Promise<PostCommentOutpu
       await postJiraComment(input.issueKey, body);
     }
 
-    return { logGroupName: groupName, logStreamName: streamName, githubToken, githubTokenExpiresAt, agentsSystemPrompt };
+    // Always emit agentsSystemPrompt as a string (never undefined): the
+    // downstream PrepareGitAuth step reads it with JsonPath.stringAt(), which
+    // throws "could not be found in the input" if the field is absent from the
+    // JSON. That happens whenever the target repo has no root AGENTS.md (e.g.
+    // aws-samples/sample-edge-to-cloud-digital-ops-workshop), which previously
+    // failed the whole execution. Consumers already treat '' as "no prompt".
+    return { logGroupName: groupName, logStreamName: streamName, githubToken, githubTokenExpiresAt, agentsSystemPrompt: agentsSystemPrompt ?? '' };
   }
 
   // Final stage — post the agent's response as a follow-up comment.
