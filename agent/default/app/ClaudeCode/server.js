@@ -37,6 +37,8 @@ import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SFNClient, SendTaskSuccessCommand, SendTaskFailureCommand } from '@aws-sdk/client-sfn';
+import { BedrockAgentCoreClient } from '@aws-sdk/client-bedrock-agentcore';
+import { persistClaudeStreamEvent, persistUserPrompt } from './memory.js';
 
 const PORT = 8080;
 // SendTaskSuccess/Failure need only the token + a client in the SAME region and
@@ -50,6 +52,14 @@ const MODEL = process.env.ANTHROPIC_MODEL || 'us.anthropic.claude-sonnet-5';
 // Session storage mount (see agentcore.json filesystemConfigurations). Persists
 // across stop/resume so a follow-up comment on the same issue reuses the clone.
 const WORKSPACE_ROOT = process.env.WORKSPACE_ROOT || '/mnt/workspace';
+
+// AgentCore Memory (MyHarnessMemory, shared with the harness — issue #186).
+// Both env vars are set by backend.ts (agentCoreApp.addRuntimeEnvironmentVariable);
+// empty on a branch where the memory isn't wired up, in which case persistence
+// is skipped (see memory.js) rather than failing the run.
+const MEMORY_ID = process.env.AGENTCORE_MEMORY_ID || '';
+const MEMORY_REGION = process.env.AGENTCORE_MEMORY_REGION || process.env.AWS_REGION;
+const memoryClient = MEMORY_ID ? new BedrockAgentCoreClient({ region: MEMORY_REGION }) : null;
 
 const app = express();
 // InvokeAgentRuntime passes the payload through verbatim; it can be large
@@ -144,11 +154,21 @@ app.post('/invocations', async (req, res) => {
   const systemAppend = typeof payload.systemAppend === 'string' ? payload.systemAppend : '';
   // Present only on the Step Functions callback path (issue #175).
   const taskToken = typeof payload.taskToken === 'string' ? payload.taskToken : '';
+  // InvokeAgentRuntime forwards runtimeSessionId as this header (not the JSON
+  // body) — see the SDK's schema for InvokeAgentRuntimeRequest. It's the same
+  // id every caller here already passes as runtimeSessionId (agent-webhook-
+  // invoke-claude sets it to runId), so memory events land in the exact
+  // session the chat UI's HarnessAgent reads (issue #186).
+  const memorySessionId = req.get('X-Amzn-Bedrock-AgentCore-Runtime-Session-Id') || runId || '';
 
   const log = (...args) => console.log(`[invocations]`, ...args);
   log(`runId=${runId || '(none)'} repo=${repo || '(none)'} issue=${issueNumber ?? '(none)'} promptChars=${prompt.length} mode=${taskToken ? 'callback' : 'sync'}`);
 
-  const runJob = (onSpawn) => runManagedJob({ prompt, repo, issueNumber, githubToken, baseBranch, systemAppend, log, onSpawn });
+  if (memoryClient) {
+    await persistUserPrompt(memoryClient, { memoryId: MEMORY_ID, sessionId: memorySessionId, prompt, log });
+  }
+
+  const runJob = (onSpawn) => runManagedJob({ prompt, repo, issueNumber, githubToken, baseBranch, systemAppend, memorySessionId, log, onSpawn });
 
   // CALLBACK PATH: a Claude Code run can outlast the 15-min invoke ceiling, so
   // ack immediately and drive the (possibly hours-long) job in the background,
@@ -248,9 +268,9 @@ app.post('/invocations', async (req, res) => {
 // Shared job body for both invocation paths: set up the workspace, then run
 // Claude Code to completion. Kept separate so the sync and callback paths never
 // drift. Leaves the git clone under WORKSPACE_ROOT (persistent) for reuse.
-async function runManagedJob({ prompt, repo, issueNumber, githubToken, baseBranch, systemAppend, log, onSpawn }) {
+async function runManagedJob({ prompt, repo, issueNumber, githubToken, baseBranch, systemAppend, memorySessionId, log, onSpawn }) {
   const workDir = await setupWorkspace({ repo, githubToken, baseBranch, log });
-  return await runClaudeCode({ prompt, workDir, repo, issueNumber, systemAppend, githubToken, log, onSpawn });
+  return await runClaudeCode({ prompt, workDir, repo, issueNumber, systemAppend, githubToken, memorySessionId, log, onSpawn });
 }
 
 // Strip any GitHub token that may have leaked into an error/clone URL before it
@@ -296,9 +316,13 @@ async function setupWorkspace({ repo, githubToken, baseBranch, log }) {
   return dest;
 }
 
-// Drive the Claude Code CLI headlessly. `-p` runs a single prompt to completion;
-// `--output-format json` yields a final result object we can return.
-function runClaudeCode({ prompt, workDir, repo, issueNumber, systemAppend, githubToken, log, onSpawn }) {
+// Drive the Claude Code CLI headlessly. `-p` runs a single prompt to
+// completion. `--output-format stream-json --verbose` prints one JSON object
+// per line (system/assistant/user/result) as the run progresses — needed
+// (rather than the simpler `--output-format json`) so each assistant/tool turn
+// can be persisted to AgentCore Memory as it happens (issue #186), not just
+// the final text.
+function runClaudeCode({ prompt, workDir, repo, issueNumber, systemAppend, githubToken, memorySessionId, log, onSpawn }) {
   const appendParts = [];
   if (repo) {
     appendParts.push(
@@ -315,7 +339,8 @@ function runClaudeCode({ prompt, workDir, repo, issueNumber, systemAppend, githu
   const args = [
     '-p', prompt,
     '--model', MODEL,
-    '--output-format', 'json',
+    '--output-format', 'stream-json',
+    '--verbose',
     '--permission-mode', 'acceptEdits',
     '--dangerously-skip-permissions',
   ];
@@ -346,24 +371,45 @@ function runClaudeCode({ prompt, workDir, repo, issueNumber, systemAppend, githu
     const child = spawn('claude', args, { cwd: workDir, env });
     // Hand the child back so a cancel invocation (issue #182) can kill it.
     if (typeof onSpawn === 'function') onSpawn(child);
-    let stdout = '';
+    let resultText = null;
     let stderr = '';
-    child.stdout.on('data', (d) => { stdout += d.toString(); });
+    let buffered = '';
+
+    const handleLine = (line) => {
+      if (!line.trim()) return;
+      let event;
+      try {
+        event = JSON.parse(line);
+      } catch {
+        return; // A non-JSON stdout line (shouldn't happen under stream-json) — ignore.
+      }
+      if (event.type === 'result') {
+        resultText = typeof event.result === 'string' ? event.result : '';
+        return;
+      }
+      if (memoryClient) {
+        persistClaudeStreamEvent(memoryClient, { memoryId: MEMORY_ID, sessionId: memorySessionId, event, log });
+      }
+    };
+
+    child.stdout.on('data', (d) => {
+      buffered += d.toString();
+      let newlineIndex;
+      // eslint-disable-next-line no-cond-assign
+      while ((newlineIndex = buffered.indexOf('\n')) !== -1) {
+        handleLine(buffered.slice(0, newlineIndex));
+        buffered = buffered.slice(newlineIndex + 1);
+      }
+    });
     child.stderr.on('data', (d) => { stderr += d.toString(); log('claude:', d.toString().trimEnd()); });
     child.on('error', reject);
     child.on('close', (code) => {
+      if (buffered.trim()) handleLine(buffered);
       if (code !== 0) {
         reject(new Error(`claude exited ${code}: ${stderr.slice(-2000)}`));
         return;
       }
-      // --output-format json prints a single JSON result object with a `result`
-      // string (the final assistant text). Fall back to raw stdout if parsing fails.
-      try {
-        const parsed = JSON.parse(stdout);
-        resolve(parsed.result ?? parsed.text ?? stdout);
-      } catch {
-        resolve(stdout.trim());
-      }
+      resolve(resultText ?? '');
     });
   });
 }

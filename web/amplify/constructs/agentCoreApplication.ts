@@ -175,6 +175,18 @@ export class AgentCoreApplication extends Construct {
     env.runtime.addToPolicy(statement);
   }
 
+  /**
+   * Set an environment variable on an AgentCore Runtime's container (merges with
+   * any envVars already declared in agentcore.json). Used to hand the ClaudeCode
+   * runtime the memory id/region — resolved post-synth from the same-stack
+   * `AgentCoreMemory` construct, so it can't be hardcoded in agentcore.json.
+   */
+  public addRuntimeEnvironmentVariable(name: string, key: string, value: string): void {
+    const env = this.app.environments.get(name);
+    if (!env) throw new Error(`Runtime "${name}" not found in AgentCoreApplication`);
+    env.runtime.addEnvironmentVariable(key, value);
+  }
+
   public memoryArn(name: string): string {
     const memory = this.app.memories.get(name);
     if (!memory) throw new Error(`Memory "${name}" not found in AgentCoreApplication`);
