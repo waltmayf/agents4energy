@@ -29,6 +29,14 @@
           "name": "ANTHROPIC_MODEL",
           "value": "us.anthropic.claude-sonnet-5"
         }
+      ],
+      "connections": [
+        {
+          "id": "browser",
+          "to": {
+            "type": "browser"
+          }
+        }
       ]
     }
   ],

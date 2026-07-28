@@ -7,6 +7,8 @@
   "main": "server.js",
   "dependencies": {
     "@aws-sdk/client-sfn": "^3.1075.0",
+    "@playwright/mcp": "^0.0.78",
+    "bedrock-agentcore": "^0.4.1",
     "express": "^4.21.2"
   }
 }
