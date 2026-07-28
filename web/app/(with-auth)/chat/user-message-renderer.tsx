@@ -18,10 +18,11 @@ import { cn } from '@/lib/utils';
  * display properly. Wired into `<CopilotChat>` via the
  * `messageView.userMessage.messageRenderer` slot (see chat/page.tsx).
  *
- * Before rendering, `collapseWebhookSections` rewrites the AGENTS.md/prior-
- * comment-thread/github-access marker blocks into collapsed-by-default
- * `<details>` widgets (issue #119), so the actual request stays the first
- * thing visible. It's a no-op on plain (non-webhook) messages.
+ * Before rendering, `collapseWebhookSections` rewrites the AGENTS.md /
+ * prior-comment-thread / github-access / github-context marker blocks into
+ * collapsed-by-default `<details>` widgets (issues #119, #120), so the actual
+ * request stays the first thing visible and the bulky GitHub context doesn't
+ * dominate the bubble. It's a no-op on plain (non-webhook) messages.
  *
  * The wrapper keeps the bubble chrome from CopilotKit's default renderer
  * (`bg-muted`, rounded, padded) but drops `whitespace-pre-wrap` — Markdown
