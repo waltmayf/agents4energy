@@ -704,33 +704,21 @@ backend.addOutput({
 });
 
 // ============================================================================
-// E2E CONFIG — CDK-owned SSM parameter read by scripts/fetch-e2e-config.ts.
-// Path must match that script's slugRepo/slugBranch derivation exactly:
-// /outputs/<repoSlug>/<branchSlug>/e2e-config (repoSlug = lowercased
-// "owner/repo"; branchSlug = backendName, already lowercased+truncated to 14
-// chars by scripts/build.sh's BRANCH_SLUG before it's passed to `ampx sandbox
-// --identifier`). Placed after addOutput/agentWebhookStack above because it
-// references AGENTCORE_REGION, E2E_TEST_USER_*_SSM_PATH, and
-// agentWebhookStack — all declared earlier in this file. GITHUB_REPOSITORY is
-// set automatically in GitHub Actions but not in a local `pnpm deploy`; skip
-// creating the parameter when it's unset rather than publishing a config at a
-// path fetch-e2e-config.ts (which requires GITHUB_REPOSITORY or a git remote)
-// wouldn't derive the same way.
+// E2E CONFIG — this used to be a CDK-owned SSM StringParameter with a fixed
+// name (/outputs/<repoSlug>/<branchSlug>/e2e-config). A fixed logical name on
+// a resource CloudFormation doesn't fully own is fragile: if a deploy that
+// first creates it later rolls back for an unrelated reason, CFN can leave
+// the SSM parameter orphaned (exists in Parameter Store, owned by no stack),
+// and every subsequent deploy's CREATE of that resource then fails with
+// AlreadyExists — a self-perpetuating wedge (see issue #192).
+//
+// scripts/fetch-e2e-config.ts only ever reads this parameter — nothing
+// requires CloudFormation to own it. So it's now published by
+// `aws ssm put-parameter --overwrite` in scripts/build.sh, run after this
+// stack deploys, sourced from this stack's own outputs (amplify_outputs.json)
+// — idempotent, self-healing after a rollback, no orphan possible. See that
+// script for the write, and docs/e2e-testing.md for the full flow.
+//
+// The values below stay part of the custom outputs mainly so build.sh can
+// read them back out of amplify_outputs.json without re-deriving anything.
 // ============================================================================
-
-const e2eConfigRepoSlug = process.env.GITHUB_REPOSITORY?.toLowerCase().replace(/[^a-z0-9-/]+/g, '-');
-if (e2eConfigRepoSlug && backendName) {
-  new StringParameter(agentStack, 'E2eConfig', {
-    parameterName: `/outputs/${e2eConfigRepoSlug}/${backendName}/e2e-config`,
-    stringValue: JSON.stringify({
-      appUrl: `https://${hosting.distributionDomainName}/${backendName}/`,
-      userPoolId,
-      userPoolClientId: backend.auth.resources.userPoolClient.userPoolClientId,
-      region: AGENTCORE_REGION,
-      testUserEmailSsmPath: E2E_TEST_USER_EMAIL_SSM_PATH,
-      testUserPasswordSsmPath: E2E_TEST_USER_PASSWORD_SSM_PATH,
-      agentWebhookStateMachineArn: agentWebhookStack.stateMachineArn,
-    }),
-    simpleName: false,
-  });
-}
