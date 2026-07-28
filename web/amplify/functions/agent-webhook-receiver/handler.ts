@@ -35,6 +35,18 @@ function json(statusCode: number, body: unknown): APIGatewayProxyStructuredResul
   return { statusCode, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) };
 }
 
+// Step Functions caps execution names at 80 chars. The name is purely a
+// human-readable label (`<prefix>-<runId>`); the trailing runId UUID is what
+// makes it unique, so when a long repo/issue prefix would overflow, truncate
+// the PREFIX and always keep the full runId suffix intact. Without this, long
+// repo names (e.g. aws-samples/sample-edge-to-cloud-digital-ops-workshop)
+// make StartExecution throw ValidationException and the webhook 500s.
+function execName(prefix: string, runId: string): string {
+  const suffix = `-${runId}`;
+  const maxPrefix = 80 - suffix.length;
+  return `${prefix.slice(0, Math.max(0, maxPrefix))}${suffix}`;
+}
+
 interface GithubIssueCommentPayload {
   action: string;
   comment: { id: number; body: string; user: { login: string; type: string } };
@@ -111,7 +123,7 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
       const runId = randomUUID();
       await sfn.send(new StartExecutionCommand({
         stateMachineArn: STATE_MACHINE_ARN,
-        name: `github-${payload.repository.full_name.replace(/\//g, '-')}-${target.number}-${runId}`,
+        name: execName(`github-${payload.repository.full_name.replace(/\//g, '-')}-${target.number}`, runId),
         input: JSON.stringify({
           runId,
           source: 'github',
@@ -153,7 +165,7 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
     const runId = randomUUID();
     await sfn.send(new StartExecutionCommand({
       stateMachineArn: STATE_MACHINE_ARN,
-      name: `github-${payload.repository.full_name.replace(/\//g, '-')}-${payload.issue.number}-${runId}`,
+      name: execName(`github-${payload.repository.full_name.replace(/\//g, '-')}-${payload.issue.number}`, runId),
       input: JSON.stringify({
         runId,
         source: 'github',
@@ -192,7 +204,7 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
     const runId = randomUUID();
     await sfn.send(new StartExecutionCommand({
       stateMachineArn: STATE_MACHINE_ARN,
-      name: `jira-${payload.issue.key}-${runId}`,
+      name: execName(`jira-${payload.issue.key}`, runId),
       input: JSON.stringify({
         runId,
         source: 'jira',
