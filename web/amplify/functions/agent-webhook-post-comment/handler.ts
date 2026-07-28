@@ -12,6 +12,10 @@ const JIRA_API_EMAIL = process.env.JIRA_API_EMAIL ?? '';
 const JIRA_API_TOKEN_SECRET_ARN = process.env.JIRA_API_TOKEN_SECRET_ARN ?? '';
 const HOSTING_DOMAIN = process.env.HOSTING_DOMAIN ?? '';
 const BRANCH_SLUG = process.env.BRANCH_SLUG ?? '';
+// Only used to offer the `agentcore exec` drop-in command (issue #203) on
+// @agentcore-claude runs — empty on branches that don't deploy the ClaudeCode
+// runtime, in which case the command is omitted entirely.
+const CLAUDE_CODE_RUNTIME_ARN = process.env.CLAUDE_CODE_RUNTIME_ARN ?? '';
 
 // Labels the Step Function manages around a label-triggered run (issue #56):
 // `agent-working` while the agent runs, `agent-error` if it fails.
@@ -36,6 +40,12 @@ interface PostCommentInput {
   // @-mention comment. Both GitHub triggers get the agent-working/agent-error
   // label bookkeeping below (issue #77); Jira runs (no repo/issueNumber) skip it.
   trigger?: 'label' | 'comment';
+  // Initial stage only — 'claude' routes to the ClaudeCode AgentCore Runtime,
+  // 'harness' to MyHarness (see agent-webhook-receiver). Determines whether the
+  // initial comment offers an `agentcore exec` command (issue #203): the CLI's
+  // interactive `--it` mode only supports Container-type runtimes, not harness
+  // deployments.
+  agent?: 'claude' | 'harness';
   // Set on the final stage reached via the Step Function's failure Catch, so
   // this stage adds `agent-error` in addition to removing `agent-working`.
   isError?: boolean;
@@ -157,9 +167,23 @@ export const handler = async (input: PostCommentInput): Promise<PostCommentOutpu
     const links = [];
     if (chatUrl) links.push(`[watch live in the chat UI](${chatUrl})`);
     if (liveTailUrl) links.push(`[watch live via CloudWatch Logs Live Tail](${liveTailUrl})`);
-    const body = links.length
+    const header = links.length
       ? `🤖 Working on it — ${links.join(' · ')}`
       : `🤖 Working on it (run \`${input.runId}\`)…`;
+
+    // Ready-to-paste terminal follow-along (issue #203). Interactive `agentcore
+    // exec --it` only supports Container-type runtimes, not harness deployments
+    // (the CLI errors with "Interactive shell (--it) is not supported for
+    // harness deployments yet"), so this is offered only for @agentcore-claude
+    // runs, and only when the ClaudeCode runtime is deployed on this branch.
+    // No `--shell-id` — that id is assigned by the server on first connect and
+    // is only used to *reconnect* an existing shell, so it isn't knowable yet.
+    const execCommand = input.agent === 'claude' && CLAUDE_CODE_RUNTIME_ARN
+      ? `agentcore exec --it --runtime ${CLAUDE_CODE_RUNTIME_ARN} --region ${REGION} --session-id ${input.runId}`
+      : null;
+    const body = execCommand
+      ? `${header}\n\nOr attach a terminal directly to the session (requires AWS credentials that can reach the runtime):\n\`\`\`\n${execCommand}\n\`\`\``
+      : header;
 
     let githubToken: string | undefined;
     let githubTokenExpiresAt: string | undefined;

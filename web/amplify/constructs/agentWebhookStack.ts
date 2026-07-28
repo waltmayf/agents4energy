@@ -126,6 +126,11 @@ export class AgentWebhookStack extends Construct {
         repo: sfn.JsonPath.stringAt('$.repo'),
         issueNumber: sfn.JsonPath.numberAt('$.issueNumber'),
         issueKey: sfn.JsonPath.stringAt('$.issueKey'),
+        // 'claude' routes to the ClaudeCode AgentCore Runtime, 'harness' to
+        // MyHarness — the Lambda uses this to decide whether to offer an
+        // `agentcore exec` command (issue #203): interactive exec only works
+        // against Container-type runtimes, not harness deployments.
+        agent: sfn.JsonPath.stringAt('$.agent'),
       }),
       payloadResponseOnly: true,
       resultPath: '$.initialComment',

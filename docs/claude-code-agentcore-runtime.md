@@ -144,6 +144,23 @@ This is exactly the shape [`list-session-messages/handler.ts`](../web/amplify/fu
 - **IAM**: `backend.ts` grants the runtime's execution role `bedrock-agentcore:CreateEvent` on the memory ARN, guarded on both the runtime and the memory being deployed on the branch (mirrors the `states:SendTask*` grant pattern already used for the callback path).
 - **Failure mode**: every `CreateEvent` call is best-effort — a failure is logged and swallowed (`memory.js`), never thrown. Memory persistence must never fail, delay, or retry into the actual Claude Code run.
 
+## Following along in a terminal (issue #203)
+
+Alongside the chat UI and CloudWatch Live Tail links, the initial comment for an `@agentcore-claude` run also posts a ready-to-paste `agentcore exec` command:
+
+```
+agentcore exec --it --runtime <ClaudeCode runtime ARN> --region <region> --session-id <runId>
+```
+
+This drops a developer straight into an interactive PTY shell inside the exact microVM running the job — the same session `runtimeSessionId: runId` designates throughout this pipeline (see [Session id and wiring](#session-id-and-wiring) above), so it's live for the entire duration of the run.
+
+A few things this depends on, all resolved by reading `agentcore exec`'s actual CLI source (`@aws/agentcore`) rather than guessing at the surface:
+
+- **No `--shell-id`.** A shell id is assigned by the server on first connect and is only used to *reconnect* to an existing shell after a disconnect — it isn't knowable at initial-comment time, so the command is posted without one; the CLI creates a fresh shell automatically. (The CLI itself prints a ready-to-paste reconnect command, including `--shell-id`, to stderr when a session detaches.)
+- **Harness deployments don't support `--it`.** The CLI explicitly rejects interactive exec against harness-backed targets ("Interactive shell (--it) is not supported for harness deployments yet"), so [`agent-webhook-post-comment/handler.ts`](../web/amplify/functions/agent-webhook-post-comment/handler.ts) only emits this command when the Step Function input's `$.agent === 'claude'` — a plain `@agentcore` (`MyHarness`) run never gets one.
+- **AWS access required.** Like the CloudWatch Live Tail link, `agentcore exec` needs AWS credentials that can reach the target runtime (`bedrock-agentcore:InvokeAgentRuntime`/exec permissions) — the posted comment notes this.
+- **Runtime must be deployed on the branch.** `CLAUDE_CODE_RUNTIME_ARN` is threaded into `agent-webhook-post-comment`'s environment the same way it's threaded into `agent-webhook-invoke-claude`'s; when empty (branch doesn't deploy the ClaudeCode runtime), the exec command is simply omitted rather than posting a broken one.
+
 ## Cancelling a superseded job (issue #182)
 
 A newer `@agentcore-claude` comment on the same issue/PR supersedes any run still in flight for it — see the "Last-write-wins cancellation" section of [`docs/webhook-stepfunction-integration.md`](./webhook-stepfunction-integration.md) for the control-plane side (the receiver's `cancelPriorRuns()`, run *before* it starts the new execution). This section covers what the runtime does when that control payload arrives.

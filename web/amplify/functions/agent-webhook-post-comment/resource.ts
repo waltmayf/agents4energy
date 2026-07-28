@@ -11,5 +11,9 @@ export const agentWebhookPostComment = defineFunction({
     JIRA_API_TOKEN_SECRET_ARN: process.env.JIRA_API_TOKEN_SECRET_ARN ?? '',
     JIRA_API_EMAIL: process.env.JIRA_API_EMAIL ?? '',
     ACCOUNT_ID: '',
+    // Lets the initial comment offer a copy-paste `agentcore exec` command for
+    // @agentcore-claude runs (issue #203) — empty on branches that don't deploy
+    // the ClaudeCode runtime, in which case that command is simply omitted.
+    CLAUDE_CODE_RUNTIME_ARN: '',
   },
 });

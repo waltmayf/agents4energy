@@ -523,6 +523,7 @@ backend.agentWebhookInvokeAgent.addEnvironment('HARNESS_ARN', AGENTCORE_HARNESS_
 backend.agentWebhookPostComment.addEnvironment('ACCOUNT_ID', backend.stack.account);
 backend.agentWebhookPostComment.addEnvironment('HOSTING_DOMAIN', hosting.distributionDomainName);
 backend.agentWebhookPostComment.addEnvironment('BRANCH_SLUG', backendName ?? '');
+backend.agentWebhookPostComment.addEnvironment('CLAUDE_CODE_RUNTIME_ARN', AGENTCORE_CLAUDE_CODE_RUNTIME_ARN);
 
 const secretArns = [GITHUB_WEBHOOK_SECRET_ARN, JIRA_WEBHOOK_SECRET_ARN].filter(Boolean);
 if (secretArns.length) {
