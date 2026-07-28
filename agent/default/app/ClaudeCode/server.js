@@ -37,6 +37,7 @@ import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SFNClient, SendTaskSuccessCommand, SendTaskFailureCommand } from '@aws-sdk/client-sfn';
+import { startBrowserMcp } from './browser-mcp.js';
 
 const PORT = 8080;
 // SendTaskSuccess/Failure need only the token + a client in the SAME region and
@@ -262,7 +263,23 @@ app.post('/invocations', async (req, res) => {
 // drift. Leaves the git clone under WORKSPACE_ROOT (persistent) for reuse.
 async function runManagedJob({ prompt, repo, issueNumber, githubToken, baseBranch, systemAppend, log, onSpawn }) {
   const workDir = await setupWorkspace({ repo, githubToken, baseBranch, log });
-  return await runClaudeCode({ prompt, workDir, repo, issueNumber, systemAppend, githubToken, log, onSpawn });
+  // Give Claude Code the AgentCore Browser tool as an MCP server for this run
+  // (issue #183). A failure here (e.g. AccessDenied on a role that predates the
+  // browser connection) shouldn't block the whole job — fall back to no browser.
+  let browserMcp = null;
+  try {
+    browserMcp = await startBrowserMcp({ workDir, log });
+  } catch (err) {
+    log('[browser-mcp] failed to start; continuing without browser tool:', err?.message || String(err));
+  }
+  try {
+    return await runClaudeCode({
+      prompt, workDir, repo, issueNumber, systemAppend, githubToken, log, onSpawn,
+      mcpConfigPath: browserMcp?.mcpConfigPath,
+    });
+  } finally {
+    if (browserMcp) await browserMcp.stop();
+  }
 }
 
 // Strip any GitHub token that may have leaked into an error/clone URL before it
@@ -313,7 +330,7 @@ async function setupWorkspace({ repo, githubToken, baseBranch, log }) {
 
 // Drive the Claude Code CLI headlessly. `-p` runs a single prompt to completion;
 // `--output-format json` yields a final result object we can return.
-function runClaudeCode({ prompt, workDir, repo, issueNumber, systemAppend, githubToken, log, onSpawn }) {
+function runClaudeCode({ prompt, workDir, repo, issueNumber, systemAppend, githubToken, log, onSpawn, mcpConfigPath }) {
   const appendParts = [];
   if (repo) {
     appendParts.push(
@@ -336,6 +353,11 @@ function runClaudeCode({ prompt, workDir, repo, issueNumber, systemAppend, githu
   ];
   if (appendParts.length) {
     args.push('--append-system-prompt', appendParts.join('\n'));
+  }
+  // Give Claude Code the AgentCore Browser tool via MCP (issue #183) — see
+  // browser-mcp.js. Absent if the browser session failed to start.
+  if (mcpConfigPath) {
+    args.push('--mcp-config', mcpConfigPath);
   }
 
   const env = {

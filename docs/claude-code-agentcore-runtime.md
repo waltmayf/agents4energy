@@ -50,6 +50,28 @@ Payload shape (sent by `agent-webhook-invoke-claude`):
 
 The Bedrock model is `ANTHROPIC_MODEL` (default `us.anthropic.claude-sonnet-5`), overridable via the runtime's `envVars` in `agentcore.json` — no code change to bump it.
 
+### The AgentCore Browser tool (issue #183)
+
+Claude Code speaks MCP natively but has no built-in browser tool, so `runManagedJob` gives it one for the duration of each job via [`browser-mcp.js`](../agent/default/app/ClaudeCode/browser-mcp.js):
+
+1. **Start a session.** `new Browser({ region }).startSession({ timeout: 28800 })` (the `bedrock-agentcore` npm SDK) starts an AgentCore Browser session on the AWS-managed default browser (8h timeout — long enough for the multi-hour jobs described above).
+2. **Sign a CDP endpoint.** `browser.generateWebSocketUrl()` returns a `wss://` URL plus SigV4 auth headers for the browser's Chrome DevTools Protocol endpoint (same signing the harness's `agentcore_browser` tool call uses under the hood).
+3. **Wrap it in an MCP server.** Rather than teaching Claude Code raw CDP, `@playwright/mcp` (a pinned dependency, not `npx`'d at runtime) is pointed at that endpoint via `--cdp-endpoint`/`--cdp-header` — it becomes a thin MCP wrapper over the already-running remote browser instead of launching its own local Chromium.
+4. **Load it into the CLI.** The `{ mcpServers: { "agentcore-browser": { command, args } } }` config is written to a `.mcp-agentcore-browser.json` in the job's `workDir` and passed to `claude -p` via `--mcp-config`, so the model gets `browser_navigate`/`browser_click`/`browser_type`/`browser_screenshot`/etc. through the standard MCP tool-call surface.
+5. **Tear down.** `runManagedJob`'s `finally` stops the session (`browser.stopSession()`) and deletes the temp MCP config after the job (success or failure) — one browser session per job, not shared across concurrent runs on the same microVM.
+
+If the session fails to start (e.g. a role that predates the browser connection), `runManagedJob` logs and continues **without** `--mcp-config` rather than failing the whole job — a missing browser tool is better than no Claude Code run at all.
+
+This is wired at the infrastructure level in [`agentcore.json`](../agent/default/agentcore/agentcore.json)'s `ClaudeCode` runtime entry:
+
+```jsonc
+"connections": [
+  { "id": "browser", "to": { "type": "browser" } }
+]
+```
+
+`@aws/agentcore-cdk`'s connection wiring (the same mechanism `docs/agentcore-cdk-construct.md` describes) turns that into an IAM grant on the runtime's execution role — `bedrock-agentcore:StartBrowserSession`/`StopBrowserSession`/`GetBrowserSession`/`ConnectBrowserAutomationStream`/etc., scoped to the AWS-managed default browser resource (no `arn` means no customer-owned browser, so no discovery env var is injected either — the SDK defaults to the same `aws.browser.v1` identifier). This is the Runtime-side analog of how `MyHarness` declares `{ type: 'agentcore_browser', ... }` in its `tools[]` (see [`agentic-architecture.md`](./agentic-architecture.md)) — same underlying AgentCore Browser service, reached through MCP instead of a harness built-in tool because Claude Code is a Runtime, not a harness.
+
 ## How it's provisioned (`AgentCoreApplication`)
 
 The runtime is declared in [`agent/default/agentcore/agentcore.json`](../agent/default/agentcore/agentcore.json) under `runtimes[]`:
