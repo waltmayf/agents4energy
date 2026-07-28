@@ -223,6 +223,46 @@ export function eventToMessages(ev: StoredEvent, index: number): Message[] {
   return out;
 }
 
+/** How close two same-content events' timestamps must be to be treated as one re-persisted turn. */
+const DEDUPE_WINDOW_MS = 5000;
+
+/** Key used to recognize "the same turn" for dedup purposes: role + exact stored content. */
+function dedupeKey(e: StoredEvent): string {
+  return `${normalizeRole(e.role)}:${e.contentJson ?? (e.text ?? '').trim()}`;
+}
+
+/**
+ * Drop re-persisted duplicate turns from an already time-sorted event list.
+ *
+ * Root cause (see #116): `harness-agent.ts` `run()` forwards the full
+ * user/assistant message window on every `InvokeHarness` call, and the harness
+ * persists whatever it's sent to AgentCore Memory in addition to what it
+ * already had — so a turn that was included in an earlier invoke's window gets
+ * re-stored as a brand-new event (its own `eventId`, a timestamp a few
+ * seconds/milliseconds after the original). The duplication is in the stored
+ * events themselves, not in this AG-UI mapping step, so we collapse it here
+ * rather than trying to mask it with rendering-side de-duplication.
+ *
+ * Two events collapse into one only when they share role + identical content
+ * AND land within DEDUPE_WINDOW_MS of each other — a user genuinely repeating
+ * the same text in a later, distinct turn (minutes/turns apart) is kept.
+ */
+export function dedupeStoredEvents(events: StoredEvent[]): StoredEvent[] {
+  const lastKeptTs = new Map<string, number>();
+  const out: StoredEvent[] = [];
+  for (const e of events) {
+    const key = dedupeKey(e);
+    const ts = e.timestamp ? new Date(e.timestamp).getTime() : NaN;
+    const prevTs = lastKeptTs.get(key);
+    const isDuplicate =
+      prevTs !== undefined && !Number.isNaN(ts) && Math.abs(ts - prevTs) <= DEDUPE_WINDOW_MS;
+    if (isDuplicate) continue;
+    lastKeptTs.set(key, ts);
+    out.push(e);
+  }
+  return out;
+}
+
 /** Map a full list of stored events (already time-sorted) to AG-UI messages. */
 export function eventsToAguiMessages(events: StoredEvent[]): Message[] {
   const out: Message[] = [];
