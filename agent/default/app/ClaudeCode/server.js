@@ -39,6 +39,7 @@ import { join } from 'node:path';
 import { SFNClient, SendTaskSuccessCommand, SendTaskFailureCommand } from '@aws-sdk/client-sfn';
 import { BedrockAgentCoreClient } from '@aws-sdk/client-bedrock-agentcore';
 import { persistClaudeStreamEvent, persistUserPrompt } from './memory.js';
+import { startBrowserMcp } from './browser-mcp.js';
 
 const PORT = 8080;
 // SendTaskSuccess/Failure need only the token + a client in the SAME region and
@@ -51,7 +52,19 @@ const sfn = new SFNClient({ region: process.env.AWS_REGION });
 const MODEL = process.env.ANTHROPIC_MODEL || 'us.anthropic.claude-sonnet-5';
 // Session storage mount (see agentcore.json filesystemConfigurations). Persists
 // across stop/resume so a follow-up comment on the same issue reuses the clone.
+// It's also quota-limited (observed 1GB) — see PNPM_VIRTUAL_STORE_DIR below.
 const WORKSPACE_ROOT = process.env.WORKSPACE_ROOT || '/mnt/workspace';
+// pnpm's content-addressable store already lives under HOME (container root fs,
+// not the mount). But pnpm's *virtual store* (node_modules/.pnpm — a symlink farm
+// with one entry per resolved package, the actual bulk of node_modules) defaults
+// to inside the project directory, i.e. onto WORKSPACE_ROOT. On a large repo that
+// exceeds the mount's quota (issue #180) — `pnpm install` fails with ENOSPC even
+// though the container root fs has plenty of room. Point it at root fs instead via
+// the npm_config_ environment convention pnpm reads (equivalent to
+// `--virtual-store-dir`); repo clones are deleted and recreated on every run (see
+// setupWorkspace), so nothing here needs to persist on the mount.
+const PNPM_VIRTUAL_STORE_DIR =
+  process.env.PNPM_VIRTUAL_STORE_DIR || join(process.env.HOME || '/root', '.pnpm-virtual-store');
 
 // AgentCore Memory (MyHarnessMemory, shared with the harness — issue #186).
 // Both env vars are set by backend.ts (agentCoreApp.addRuntimeEnvironmentVariable);
@@ -270,7 +283,23 @@ app.post('/invocations', async (req, res) => {
 // drift. Leaves the git clone under WORKSPACE_ROOT (persistent) for reuse.
 async function runManagedJob({ prompt, repo, issueNumber, githubToken, baseBranch, systemAppend, memorySessionId, log, onSpawn }) {
   const workDir = await setupWorkspace({ repo, githubToken, baseBranch, log });
-  return await runClaudeCode({ prompt, workDir, repo, issueNumber, systemAppend, githubToken, memorySessionId, log, onSpawn });
+  // Give Claude Code the AgentCore Browser tool as an MCP server for this run
+  // (issue #183). A failure here (e.g. AccessDenied on a role that predates the
+  // browser connection) shouldn't block the whole job — fall back to no browser.
+  let browserMcp = null;
+  try {
+    browserMcp = await startBrowserMcp({ workDir, log });
+  } catch (err) {
+    log('[browser-mcp] failed to start; continuing without browser tool:', err?.message || String(err));
+  }
+  try {
+    return await runClaudeCode({
+      prompt, workDir, repo, issueNumber, systemAppend, githubToken, memorySessionId, log, onSpawn,
+      mcpConfigPath: browserMcp?.mcpConfigPath,
+    });
+  } finally {
+    if (browserMcp) await browserMcp.stop();
+  }
 }
 
 // Strip any GitHub token that may have leaked into an error/clone URL before it
@@ -313,6 +342,9 @@ async function setupWorkspace({ repo, githubToken, baseBranch, log }) {
   if (baseBranch) cloneArgs.push('--branch', baseBranch);
   cloneArgs.push(authRepoUrl, dest);
   await run('git', cloneArgs, { log });
+  // Log the mount's actual free space so a quota regression (issue #180) shows
+  // up in CloudWatch instead of only surfacing as an ENOSPC deep in `pnpm install`.
+  await logDiskUsage(WORKSPACE_ROOT, log).catch(() => {});
   return dest;
 }
 
@@ -322,7 +354,7 @@ async function setupWorkspace({ repo, githubToken, baseBranch, log }) {
 // (rather than the simpler `--output-format json`) so each assistant/tool turn
 // can be persisted to AgentCore Memory as it happens (issue #186), not just
 // the final text.
-function runClaudeCode({ prompt, workDir, repo, issueNumber, systemAppend, githubToken, memorySessionId, log, onSpawn }) {
+function runClaudeCode({ prompt, workDir, repo, issueNumber, systemAppend, githubToken, memorySessionId, log, onSpawn, mcpConfigPath }) {
   const appendParts = [];
   if (repo) {
     appendParts.push(
@@ -347,6 +379,11 @@ function runClaudeCode({ prompt, workDir, repo, issueNumber, systemAppend, githu
   if (appendParts.length) {
     args.push('--append-system-prompt', appendParts.join('\n'));
   }
+  // Give Claude Code the AgentCore Browser tool via MCP (issue #183) — see
+  // browser-mcp.js. Absent if the browser session failed to start.
+  if (mcpConfigPath) {
+    args.push('--mcp-config', mcpConfigPath);
+  }
 
   const env = {
     ...process.env,
@@ -355,6 +392,9 @@ function runClaudeCode({ prompt, workDir, repo, issueNumber, systemAppend, githu
     CLAUDE_CODE_USE_BEDROCK: '1',
     ANTHROPIC_MODEL: MODEL,
     HOME: process.env.HOME || '/root',
+    // Keep pnpm's virtual store (node_modules/.pnpm) off the quota-limited
+    // session-storage mount — see PNPM_VIRTUAL_STORE_DIR above (issue #180).
+    npm_config_virtual_store_dir: PNPM_VIRTUAL_STORE_DIR,
     // The container runs as root, and the CLI otherwise refuses
     // `--dangerously-skip-permissions` under root ("cannot be used with
     // root/sudo privileges for security reasons"). AgentCore Runtime executes
@@ -410,6 +450,21 @@ function runClaudeCode({ prompt, workDir, repo, issueNumber, systemAppend, githu
         return;
       }
       resolve(resultText ?? '');
+    });
+  });
+}
+
+// `df -h <path>` for CloudWatch visibility into the session-storage mount's
+// actual quota (issue #180) — `run()` discards stdout, so this logs it directly.
+function logDiskUsage(path, log) {
+  return new Promise((resolve, reject) => {
+    const child = spawn('df', ['-h', path], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    child.stdout.on('data', (d) => { stdout += d.toString(); });
+    child.on('error', reject);
+    child.on('close', (code) => {
+      if (code === 0) log(`disk usage:\n${stdout.trimEnd()}`);
+      resolve();
     });
   });
 }

@@ -33,6 +33,8 @@ On `POST /invocations` ([server.js](../agent/default/app/ClaudeCode/server.js)) 
    > **Root + `--dangerously-skip-permissions`.** The container image runs as `root`, and the CLI otherwise **refuses** `--dangerously-skip-permissions` under root (*"cannot be used with root/sudo privileges for security reasons"*, exit 1) — which manifests as an HTTP 500 from the runtime with that line in CloudWatch. The fix is `IS_SANDBOX=1` in the spawn env (set in `server.js`): AgentCore Runtime already executes each session in an isolated Firecracker microVM, so declaring the sandbox is accurate and lets the headless run proceed as root (keeping the `/mnt/workspace` mount writable). Do **not** drop `--dangerously-skip-permissions` — it's required for non-interactive operation, not a security toggle to remove.
 3. **Streams each turn to AgentCore Memory** as the CLI runs (see [Memory persistence](#memory-persistence-agentcore-claude-turns-in-the-chat-ui) below) and **returns the final text** — the last `stream-json` line is a `result` event whose `result` field is the final assistant text; the server returns `{ result, repo, issueNumber }`. A non-zero CLI exit becomes a 500 with the tail of stderr (tokens redacted).
 
+> **`/mnt/workspace`'s disk quota and `pnpm install` (issue #180).** The session-storage mount is small — observed **1GB** — and `AWS::BedrockAgentCore::Runtime`'s `SessionStorageConfigurationProperty` (checked in the CloudFormation resource spec and the `@aws/agentcore-cdk` schema) exposes only `mountPath`, no size/quota field, so the limit isn't configurable from `agentcore.json`. On a repo the size of this one, `pnpm install`'s **virtual store** (`node_modules/.pnpm` — a symlink farm with one entry per resolved package, the actual bulk of `node_modules`) defaults to *inside the project directory*, i.e. onto that 1GB mount, and blows the quota with `ENOSPC` even though the container's root filesystem has several GB free. pnpm's content-addressable *store* was already fine — it lives under `HOME` (`/root`, root fs) — only the virtual store needed to move. `server.js` sets `npm_config_virtual_store_dir` (pnpm's env-var form of `--virtual-store-dir`) to `$HOME/.pnpm-virtual-store` in the spawned `claude` process's env, so any `pnpm install` Claude Code runs lands `node_modules/.pnpm` on the root fs while `/mnt/workspace` keeps holding only the git clone (source-only, as the issue's Option 2 suggested) — no separate re-clone under `/root` needed. `setupWorkspace` already deletes and re-clones the repo on every run, so nothing that would benefit from mount persistence is lost. `setupWorkspace` also logs `df -h /mnt/workspace` right after cloning, so a future quota regression shows up in CloudWatch instead of only surfacing as an `ENOSPC` deep inside `pnpm install`.
+
 Payload shape (sent by `agent-webhook-invoke-claude`):
 
 ```jsonc
@@ -47,6 +49,28 @@ Payload shape (sent by `agent-webhook-invoke-claude`):
 ```
 
 The Bedrock model is `ANTHROPIC_MODEL` (default `us.anthropic.claude-sonnet-5`), overridable via the runtime's `envVars` in `agentcore.json` — no code change to bump it.
+
+### The AgentCore Browser tool (issue #183)
+
+Claude Code speaks MCP natively but has no built-in browser tool, so `runManagedJob` gives it one for the duration of each job via [`browser-mcp.js`](../agent/default/app/ClaudeCode/browser-mcp.js):
+
+1. **Start a session.** `new Browser({ region }).startSession({ timeout: 28800 })` (the `bedrock-agentcore` npm SDK) starts an AgentCore Browser session on the AWS-managed default browser (8h timeout — long enough for the multi-hour jobs described above).
+2. **Sign a CDP endpoint.** `browser.generateWebSocketUrl()` returns a `wss://` URL plus SigV4 auth headers for the browser's Chrome DevTools Protocol endpoint (same signing the harness's `agentcore_browser` tool call uses under the hood).
+3. **Wrap it in an MCP server.** Rather than teaching Claude Code raw CDP, `@playwright/mcp` (a pinned dependency, not `npx`'d at runtime) is pointed at that endpoint via `--cdp-endpoint`/`--cdp-header` — it becomes a thin MCP wrapper over the already-running remote browser instead of launching its own local Chromium.
+4. **Load it into the CLI.** The `{ mcpServers: { "agentcore-browser": { command, args } } }` config is written to a `.mcp-agentcore-browser.json` in the job's `workDir` and passed to `claude -p` via `--mcp-config`, so the model gets `browser_navigate`/`browser_click`/`browser_type`/`browser_screenshot`/etc. through the standard MCP tool-call surface.
+5. **Tear down.** `runManagedJob`'s `finally` stops the session (`browser.stopSession()`) and deletes the temp MCP config after the job (success or failure) — one browser session per job, not shared across concurrent runs on the same microVM.
+
+If the session fails to start (e.g. a role that predates the browser connection), `runManagedJob` logs and continues **without** `--mcp-config` rather than failing the whole job — a missing browser tool is better than no Claude Code run at all.
+
+This is wired at the infrastructure level in [`agentcore.json`](../agent/default/agentcore/agentcore.json)'s `ClaudeCode` runtime entry:
+
+```jsonc
+"connections": [
+  { "id": "browser", "to": { "type": "browser" } }
+]
+```
+
+`@aws/agentcore-cdk`'s connection wiring (the same mechanism `docs/agentcore-cdk-construct.md` describes) turns that into an IAM grant on the runtime's execution role — `bedrock-agentcore:StartBrowserSession`/`StopBrowserSession`/`GetBrowserSession`/`ConnectBrowserAutomationStream`/etc., scoped to the AWS-managed default browser resource (no `arn` means no customer-owned browser, so no discovery env var is injected either — the SDK defaults to the same `aws.browser.v1` identifier). This is the Runtime-side analog of how `MyHarness` declares `{ type: 'agentcore_browser', ... }` in its `tools[]` (see [`agentic-architecture.md`](./agentic-architecture.md)) — same underlying AgentCore Browser service, reached through MCP instead of a harness built-in tool because Claude Code is a Runtime, not a harness.
 
 ## How it's provisioned (`AgentCoreApplication`)
 
