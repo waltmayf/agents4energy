@@ -1,13 +1,26 @@
 import type { APIGatewayProxyEventV2, APIGatewayProxyStructuredResultV2 } from 'aws-lambda';
-import { randomUUID } from 'crypto';
+import { randomUUID, createHash } from 'crypto';
 import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-secrets-manager';
-import { SFNClient, StartExecutionCommand } from '@aws-sdk/client-sfn';
+import {
+  SFNClient,
+  StartExecutionCommand,
+  ListExecutionsCommand,
+  DescribeExecutionCommand,
+  StopExecutionCommand,
+} from '@aws-sdk/client-sfn';
+import { BedrockAgentCoreClient, InvokeAgentRuntimeCommand } from '@aws-sdk/client-bedrock-agentcore';
 import { verifyGithubSignature, verifyJiraSharedSecret, extractPromptAfterMention, parseMention } from '../_shared/webhookVerify';
 
 const REGION = process.env.AWS_REGION ?? 'us-east-1';
 const GITHUB_WEBHOOK_SECRET_ARN = process.env.GITHUB_WEBHOOK_SECRET_ARN ?? '';
 const JIRA_WEBHOOK_SECRET_ARN = process.env.JIRA_WEBHOOK_SECRET_ARN ?? '';
 const STATE_MACHINE_ARN = process.env.STATE_MACHINE_ARN ?? '';
+// Lets the receiver reach into the Claude Code runtime and kill a superseded
+// background job (issue #182's data plane, already built in server.js — see
+// agent/default/app/ClaudeCode/server.js). Empty on branches that don't deploy
+// the runtime, in which case cancelRuntimeJob is a no-op and cancelPriorRuns
+// falls back to StopExecution only.
+const CLAUDE_CODE_RUNTIME_ARN = process.env.CLAUDE_CODE_RUNTIME_ARN ?? '';
 
 // Applying this label to a GitHub issue/PR triggers the agent, exactly like an
 // `@agentcore` comment does — but the Step Function additionally manages the
@@ -17,6 +30,10 @@ const TRIGGER_LABEL = 'agentcore';
 
 const secretsManager = new SecretsManagerClient({ region: REGION });
 const sfn = new SFNClient({ region: REGION });
+// Only used to fire the cancel control payload at the Claude Code runtime
+// (issue #182's data plane, see agent/default/app/ClaudeCode/server.js) before
+// stopping a superseded execution. Same runtime the invoke-claude Lambda calls.
+const agentCore = new BedrockAgentCoreClient({ region: REGION });
 
 // Cached across warm invocations — secrets don't change between requests.
 const secretCache = new Map<string, string>();
@@ -36,15 +53,168 @@ function json(statusCode: number, body: unknown): APIGatewayProxyStructuredResul
 }
 
 // Step Functions caps execution names at 80 chars. The name is purely a
-// human-readable label (`<prefix>-<runId>`); the trailing runId UUID is what
-// makes it unique, so when a long repo/issue prefix would overflow, truncate
-// the PREFIX and always keep the full runId suffix intact. Without this, long
-// repo names (e.g. aws-samples/sample-edge-to-cloud-digital-ops-workshop)
-// make StartExecution throw ValidationException and the webhook 500s.
+// human-readable label (`<prefix>-<runId>`), but the PREFIX also doubles as
+// the shared match key cancelPriorRuns uses (via ListExecutions) to find
+// every run for the same repo/issue — so unlike the original fix (#200, which
+// truncated the prefix), we must now keep the full `<prefix>-` intact and
+// shorten the runId side instead. Hash the runId down to a short, still-
+// effectively-unique suffix when the full name would overflow. Without some
+// truncation, long repo names (e.g.
+// aws-samples/sample-edge-to-cloud-digital-ops-workshop) make StartExecution
+// throw ValidationException and the webhook 500s.
 function execName(prefix: string, runId: string): string {
-  const suffix = `-${runId}`;
-  const maxPrefix = 80 - suffix.length;
-  return `${prefix.slice(0, Math.max(0, maxPrefix))}${suffix}`;
+  const full = `${prefix}-${runId}`;
+  if (full.length <= 80) return full;
+
+  const MIN_SUFFIX_LEN = 8;
+  const hashedRunId = createHash('sha256').update(runId).digest('hex');
+  if (prefix.length + 1 + MIN_SUFFIX_LEN <= 80) {
+    const suffixLen = 80 - prefix.length - 1;
+    return `${prefix}-${hashedRunId.slice(0, suffixLen)}`;
+  }
+  // Pathological case: the prefix alone doesn't leave room for even the
+  // minimum suffix. Truncating the prefix is unavoidable here (no naming
+  // scheme fits both under 80 chars) — cancelPriorRuns' prefix match then only
+  // degrades for this one execution, not the general case.
+  const suffix = `-${hashedRunId.slice(0, MIN_SUFFIX_LEN)}`;
+  return `${prefix.slice(0, 80 - suffix.length)}${suffix}`;
+}
+
+// The shared match key for every execution started for the same target
+// (repo+issueNumber, or Jira issueKey) — always `${base}-`, and always kept
+// fully intact by execName above regardless of truncation. cancelPriorRuns
+// uses this to find every RUNNING execution for the same target before
+// starting a new one (last-write-wins, issue #182).
+function sharedNamePrefix(base: string): string {
+  return `${base}-`;
+}
+
+// Best-effort: fetch a RUNNING execution's original StartExecution input so we
+// can recover its runId/agent (the name alone may have a hashed/truncated
+// runId — see execName — so it can't be parsed back out reliably).
+async function describeExecutionInput(executionArn: string): Promise<{ runId?: string; agent?: string } | null> {
+  try {
+    const resp = await sfn.send(new DescribeExecutionCommand({ executionArn }));
+    if (!resp.input) return null;
+    return JSON.parse(resp.input);
+  } catch {
+    return null;
+  }
+}
+
+// Cause reported (via SendTaskFailure) when a run is cancelled. Mirrors the
+// runtime's own SUPERSEDED_CAUSE (agent/default/app/ClaudeCode/server.js) —
+// deliberately contains no raw "@" mention so the PostFailureComment note it
+// produces can never re-trigger the webhook.
+const SUPERSEDED_ERROR = 'SupersededByNewerComment';
+
+// Reach into the Claude Code AgentCore Runtime and abort the in-flight job for
+// a prior run (issue #182's data plane — see server.js's `action: 'cancel'`
+// handler). SIGTERMs the spawned CLI; the runtime then calls SendTaskFailure
+// itself (asynchronously, after the process actually exits), which resumes the
+// prior run's PAUSED Step Functions task through its existing Catch →
+// PostFailureComment wiring — so the superseded run still posts a clean
+// terminal comment. Returns true once the runtime has ACCEPTED the cancel
+// request (not once the job has actually died) — callers must not also call
+// StopExecution in that case: since the actual kill+SendTaskFailure happens
+// after this returns, StopExecution racing it would abort the execution before
+// Catch → PostFailureComment fires, and the superseded run would post no
+// comment at all. Only fall back to StopExecution when this returns false —
+// runtime not deployed, session already reclaimed, or the invoke itself
+// failed — since then nothing else will ever stop the prior execution.
+async function cancelRuntimeJob(runId: string, log: (msg: string) => void): Promise<boolean> {
+  if (!CLAUDE_CODE_RUNTIME_ARN) return false;
+  try {
+    const resp = await agentCore.send(new InvokeAgentRuntimeCommand({
+      agentRuntimeArn: CLAUDE_CODE_RUNTIME_ARN,
+      // Same session id the run itself used (agent-webhook-invoke-claude sets
+      // runtimeSessionId = runId), so this control payload lands on the exact
+      // microVM running the job to kill.
+      runtimeSessionId: runId,
+      contentType: 'application/json',
+      accept: 'application/json',
+      payload: new TextEncoder().encode(JSON.stringify({ action: 'cancel', runId })),
+    }));
+    if (resp.statusCode && resp.statusCode >= 400) {
+      log(`cancelRuntimeJob for runId=${runId} got HTTP ${resp.statusCode}`);
+      return false;
+    }
+    const raw = resp.response ? await resp.response.transformToString() : '';
+    const body = raw ? JSON.parse(raw) : {};
+    // `cancelled: false` means the runtime accepted the request but has no
+    // matching in-flight job on this microVM — the run already finished, so
+    // there is nothing to StopExecution either. Treat as "handled".
+    log(`cancelRuntimeJob for runId=${runId}: ${raw || '(empty response)'}`);
+    return body.cancelled !== false;
+  } catch (err) {
+    // Session already reclaimed/gone, AccessDenied, etc. — the runtime never
+    // saw this, so the caller must fall back to StopExecution.
+    log(`cancelRuntimeJob failed for runId=${runId}: ${err instanceof Error ? err.message : String(err)}`);
+    return false;
+  }
+}
+
+// Control plane of issue #182: before starting a new run, find every prior
+// RUNNING execution for the same target (matched by the shared name prefix —
+// ListExecutions has no server-side name filter, so this filters client-side)
+// and cancel it — last-write-wins, not debounce, so a "changed my mind"
+// follow-up comment always supersedes rather than queuing behind stale work.
+// Best-effort throughout: a failure here must never block the NEW run from
+// starting (mirrors the label-bookkeeping best-effort pattern elsewhere in
+// this pipeline).
+async function cancelPriorRuns(namePrefix: string, log: (msg: string) => void): Promise<void> {
+  if (!STATE_MACHINE_ARN) return;
+  const prior: Array<{ executionArn: string; name: string }> = [];
+  let nextToken: string | undefined;
+  try {
+    do {
+      const resp = await sfn.send(new ListExecutionsCommand({
+        stateMachineArn: STATE_MACHINE_ARN,
+        statusFilter: 'RUNNING',
+        nextToken,
+      }));
+      for (const exec of resp.executions ?? []) {
+        if (exec.executionArn && exec.name?.startsWith(namePrefix)) {
+          prior.push({ executionArn: exec.executionArn, name: exec.name });
+        }
+      }
+      nextToken = resp.nextToken;
+    } while (nextToken);
+  } catch (err) {
+    log(`ListExecutions failed for prefix "${namePrefix}": ${err instanceof Error ? err.message : String(err)}`);
+    return;
+  }
+  if (!prior.length) return;
+
+  log(`found ${prior.length} prior RUNNING execution(s) matching prefix "${namePrefix}"; cancelling (last-write-wins)`);
+  await Promise.all(prior.map(async ({ executionArn, name }) => {
+    try {
+      const input = await describeExecutionInput(executionArn);
+      const priorRunId = typeof input?.runId === 'string' ? input.runId : '';
+      if (priorRunId && input?.agent === 'claude') {
+        // Kills the background job; the runtime resumes/fails its own paused
+        // SFN task, so the execution finishes on its own via the existing
+        // Catch wiring — see cancelRuntimeJob's doc for why StopExecution must
+        // be skipped on this path. Only fall back to StopExecution if the
+        // runtime never got the message (e.g. session already reclaimed).
+        const handled = await cancelRuntimeJob(priorRunId, log);
+        if (handled) return;
+        log(`runtime cancel did not land for ${name}; falling back to StopExecution`);
+      }
+      // Harness/Jira runs have no detached background job (the native
+      // invokeHarness task is bounded to its own 840s timeout and holds no
+      // task token) — StopExecution alone is sufficient here. Also the
+      // fallback for a claude run whose runtime cancel failed above.
+      await sfn.send(new StopExecutionCommand({
+        executionArn,
+        error: SUPERSEDED_ERROR,
+        cause: 'Cancelled: superseded by a newer agentcore comment on the same issue.',
+      }));
+      log(`stopped prior execution ${name}`);
+    } catch (err) {
+      log(`failed to cancel prior execution ${name}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }));
 }
 
 interface GithubIssueCommentPayload {
@@ -121,9 +291,13 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
       if (!target) return json(200, { skipped: 'no issue/pull_request in payload' });
 
       const runId = randomUUID();
+      const namePrefixBase = `github-${payload.repository.full_name.replace(/\//g, '-')}-${target.number}`;
+      // Last-write-wins (issue #182): cancel any run already in flight for
+      // this issue/PR before starting the new one.
+      await cancelPriorRuns(sharedNamePrefix(namePrefixBase), (msg) => console.log(`[cancelPriorRuns][runId=${runId}]`, msg));
       await sfn.send(new StartExecutionCommand({
         stateMachineArn: STATE_MACHINE_ARN,
-        name: execName(`github-${payload.repository.full_name.replace(/\//g, '-')}-${target.number}`, runId),
+        name: execName(namePrefixBase, runId),
         input: JSON.stringify({
           runId,
           source: 'github',
@@ -163,9 +337,13 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
     if (mention === null) return json(200, { skipped: 'no trigger mention' });
 
     const runId = randomUUID();
+    const namePrefixBase = `github-${payload.repository.full_name.replace(/\//g, '-')}-${payload.issue.number}`;
+    // Last-write-wins (issue #182): a newer @agentcore(-claude) comment on the
+    // same issue/PR supersedes any run already in flight for it.
+    await cancelPriorRuns(sharedNamePrefix(namePrefixBase), (msg) => console.log(`[cancelPriorRuns][runId=${runId}]`, msg));
     await sfn.send(new StartExecutionCommand({
       stateMachineArn: STATE_MACHINE_ARN,
-      name: execName(`github-${payload.repository.full_name.replace(/\//g, '-')}-${payload.issue.number}`, runId),
+      name: execName(namePrefixBase, runId),
       input: JSON.stringify({
         runId,
         source: 'github',
@@ -202,9 +380,13 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
     if (prompt === null) return json(200, { skipped: 'no trigger mention' });
 
     const runId = randomUUID();
+    const namePrefixBase = `jira-${payload.issue.key}`;
+    // Last-write-wins (issue #182): a newer comment on the same Jira issue
+    // supersedes any run already in flight for it.
+    await cancelPriorRuns(sharedNamePrefix(namePrefixBase), (msg) => console.log(`[cancelPriorRuns][runId=${runId}]`, msg));
     await sfn.send(new StartExecutionCommand({
       stateMachineArn: STATE_MACHINE_ARN,
-      name: execName(`jira-${payload.issue.key}`, runId),
+      name: execName(namePrefixBase, runId),
       input: JSON.stringify({
         runId,
         source: 'jira',
