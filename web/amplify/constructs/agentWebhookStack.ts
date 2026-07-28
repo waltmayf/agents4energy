@@ -87,8 +87,9 @@ export interface AgentWebhookStackProps {
  * (the exec API) has no optimized integration and its stdout/stderr must be logged
  * for debugging.
  *
- * Runs alongside .github/workflows/agent-mention.yml rather than replacing it — see
- * the docs page for why (distinct trigger phrase avoids double-firing on GitHub).
+ * This is now the sole GitHub/Jira mention pipeline — it superseded the
+ * Actions-based .github/workflows/agent-mention.yml flow, which targeted the
+ * since-retired AgUiHandler runtime (#33) and was removed (#191).
  */
 export class AgentWebhookStack extends Construct {
   public readonly httpApi: apigwv2.HttpApi;

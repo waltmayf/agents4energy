@@ -4,12 +4,12 @@ The `anthropics/claude-code-action` lets you `@claude` in any PR or issue commen
 
 ## How it differs from this project's @mention integration
 
-| | This project (`agent-mention.yml`) | Claude GitHub App |
+| | This project (webhook pipeline) | Claude GitHub App |
 |---|---|---|
-| Trigger | `@agent-<slug>` comment | `@claude` comment |
-| Runtime | Your AgentCore Harness | Claude Code (Anthropic-hosted action) |
-| Auth | SigV4 + IAM user credentials | OIDC → IAM role |
-| Action | `scripts/github-agent-invoke.ts` | `anthropics/claude-code-action@v1` |
+| Trigger | `@agentcore` / `@agentcore-claude` comment, or `agentcore` label | `@claude` comment |
+| Runtime | `MyHarness` or the ClaudeCode AgentCore Runtime | Claude Code (Anthropic-hosted action) |
+| Auth | API Gateway webhook + Step Functions (SigV4 internally) | OIDC → IAM role |
+| Action | `docs/webhook-stepfunction-integration.md` | `anthropics/claude-code-action@v1` |
 
 ## Do you need a special IAM role?
 

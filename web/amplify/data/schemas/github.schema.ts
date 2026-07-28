@@ -4,10 +4,9 @@ import { mintGithubToken } from '../../functions/mint-github-token/resource';
 /**
  * GitHub App token minting.
  *
- * Replaces long-lived PAT usage for browser-initiated sessions: the browser
- * calls mintGithubToken(repo) to get a short-lived (~1hr), repo-scoped
- * installation access token, then passes it as `githubToken` on
- * invokeHandler. See docs/github-integration.md for the GitHub App setup
+ * Gets a short-lived (~1hr), repo-scoped installation access token for a
+ * browser-initiated flow that needs to act on GitHub as the App. Currently
+ * has no caller — see docs/github-integration.md for the GitHub App setup
  * this depends on.
  */
 export const githubSchema = a.schema({
