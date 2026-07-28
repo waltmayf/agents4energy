@@ -20,7 +20,7 @@
 
 import { Browser } from 'bedrock-agentcore/browser';
 import { writeFile, rm } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { createRequire } from 'node:module';
 
 const AWS_REGION = process.env.AWS_REGION || 'us-east-1';
@@ -30,8 +30,11 @@ const AWS_REGION = process.env.AWS_REGION || 'us-east-1';
 // build time — see package.json/Dockerfile) rather than shelling out to
 // `npx`, which would hit the network at runtime and could resolve a
 // different version than the one the image was built and tested against.
+// @playwright/mcp's package.json only exports "." and "./package.json" (no
+// "./cli.js" subpath), so resolve the package.json and join cli.js from its
+// directory rather than require.resolve-ing cli.js directly.
 const require = createRequire(import.meta.url);
-const PLAYWRIGHT_MCP_CLI = require.resolve('@playwright/mcp/cli.js');
+const PLAYWRIGHT_MCP_CLI = join(dirname(require.resolve('@playwright/mcp/package.json')), 'cli.js');
 
 // Starts a fresh AgentCore Browser session and returns everything needed to
 // tear it down later plus the `.mcp.json` config Claude Code should load.
