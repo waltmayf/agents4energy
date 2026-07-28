@@ -144,6 +144,21 @@ This is exactly the shape [`list-session-messages/handler.ts`](../web/amplify/fu
 - **IAM**: `backend.ts` grants the runtime's execution role `bedrock-agentcore:CreateEvent` on the memory ARN, guarded on both the runtime and the memory being deployed on the branch (mirrors the `states:SendTask*` grant pattern already used for the callback path).
 - **Failure mode**: every `CreateEvent` call is best-effort — a failure is logged and swallowed (`memory.js`), never thrown. Memory persistence must never fail, delay, or retry into the actual Claude Code run.
 
+## Cancelling a superseded job (issue #182)
+
+A newer `@agentcore-claude` comment on the same issue/PR supersedes any run still in flight for it — see the "Last-write-wins cancellation" section of [`docs/webhook-stepfunction-integration.md`](./webhook-stepfunction-integration.md) for the control-plane side (the receiver's `cancelPriorRuns()`, run *before* it starts the new execution). This section covers what the runtime does when that control payload arrives.
+
+`POST /invocations` with `{ "action": "cancel", "runId": "<prior run's runId>" }` is a **control** invocation, not a work request — `server.js` checks for it before the `prompt` validation, since a cancel carries no prompt. Handling it:
+
+1. **Find the job.** `runningJobs` (a `Map<runId, { child, taskToken, cancelled }>`) is populated when a background (callback-path) job starts and cleaned up in its `.finally()`. If `runId` isn't in the map — the job already finished, was never started here, or the session was reclaimed — the handler responds `{ cancelled: false }` and does nothing further; it's not an error.
+2. **Kill the CLI.** If the job's `child` process exists, `child.kill('SIGTERM')`, with a 5s escalation to `SIGKILL` if the CLI doesn't exit on its own (e.g. stuck in a subprocess it spawned). If the job is still mid-`setupWorkspace` (cloning, before the CLI has even spawned), `job.cancelled = true` is set instead — the `onSpawn` hook checks that flag and kills the child the instant it's created, closing the race where a cancel arrives before there's anything to `kill()`.
+3. **Resolve the paused task as cancelled, not failed or succeeded.** Marking the job `cancelled` changes how its promise settles: whether the CLI exits non-zero (killed) or — in a race — exits 0 anyway, the callback path sends `SendTaskFailure` with `error: 'ClaudeCodeRuntimeCancelled'` and a fixed cause string (`SUPERSEDED_CAUSE`) that deliberately contains **no raw `@` mention**, so the `PostFailureComment` note it produces on the issue/PR can never itself re-trigger the webhook.
+4. **Bookkeeping stays correct.** The same `.finally()` that runs for a normal completion also runs here — `activeJobs--` and `runningJobs.delete(runId)` — so `/ping`'s `HealthyBusy` signal and the tracking map never leak a cancelled job.
+
+The control plane sends this cancel payload via `InvokeAgentRuntime` with `runtimeSessionId` set to the **prior run's** `runId` (not the new run's) — sessions are keyed 1:1 with `runId` throughout this pipeline, so that's what routes the control payload to the exact microVM running the job to kill.
+
+**Why the receiver doesn't also call `StopExecution` on a cancelled claude run.** `SendTaskFailure` above happens asynchronously, after the killed CLI process actually exits — not synchronously inside the cancel request/response. If the control plane called `StopExecution` on the prior execution as well, it could win the race and abort the execution before the runtime's `SendTaskFailure` reaches it, which would silently drop the "superseded" `PostFailureComment` note. So the receiver treats a runtime cancel that's been *accepted* as fully handling that execution's lifecycle, and only falls back to `StopExecution` if the runtime never got the message at all (session already reclaimed, runtime not deployed, etc.).
+
 ## The invoke path (GitHub issue → Claude Code)
 
 `@agentcore-claude` shares the webhook → Step Function pipeline with the harness; only the agent-selection branch differs.

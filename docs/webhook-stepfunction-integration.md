@@ -124,6 +124,23 @@ Unlike the harness, the runtime has **no optimized Step Functions integration** 
 
 > **ChatSession is intentionally NOT created by this pipeline.** A `ChatSession` is created browser-side only, when the user opens the chat page. If the page is opened with a session id that doesn't exist yet, the browser creates it and starts listening for AgentCore-memory messages on it. Keeping session creation out of the Step Function avoids orphan sessions for runs nobody watches.
 
+### Last-write-wins cancellation (issue #182)
+
+A second `@agentcore`/`@agentcore-claude` comment (or relabel) on an issue/PR that already has a run in flight **cancels the prior run** before starting the new one, rather than letting both run concurrently against the shared `/mnt/workspace` clone (issue #180). This is **cancel-then-start, not debounce** — a "changed my mind" follow-up always supersedes stale work instead of queuing behind it.
+
+All runs for one target share a Step Functions execution-name prefix — `github-<repo>-<issueNumber>-` or `jira-<issueKey>-` — set by `execName()` in `agent-webhook-receiver/handler.ts`. Before every `StartExecution`, the receiver's `cancelPriorRuns()`:
+
+1. `ListExecutions` on the state machine filtered to `RUNNING` (no server-side name filter — the AWS API has none — so it filters client-side by that shared prefix).
+2. For each match, `DescribeExecution` to recover the original `StartExecution` input (`runId`, `agent`) — the execution *name* alone can't be trusted to carry those back out, see the truncation note below.
+3. **`agent === 'claude'`**: sends the ClaudeCode runtime the same `{ action: 'cancel', runId }` control payload described in `docs/claude-code-agentcore-runtime.md` (via `InvokeAgentRuntime`, `runtimeSessionId` = the prior run's `runId` so it lands on the exact microVM running the job). The runtime `SIGTERM`s the spawned CLI and calls `SendTaskFailure` itself once the process exits, which resumes the prior execution's *paused* task through its existing `Catch` → `PostFailureComment` wiring — so the superseded run still posts a clean "cancelled" comment rather than vanishing. `StopExecution` is deliberately **not** also called on this path: it would race the runtime's asynchronous `SendTaskFailure` and could stop the execution before `PostFailureComment` runs, silently dropping the superseded-run comment. It's used only as a fallback if the runtime cancel doesn't land (session already reclaimed, runtime not deployed on this branch, etc.).
+4. **`agent === 'harness'`** (or Jira, which always routes to the harness) — no detached background job exists (the native `invokeHarness` task is bounded by its own 840s `TimeoutSeconds` and holds no task token), so `StopExecution` alone is sufficient.
+
+This is best-effort throughout (mirrors the label-bookkeeping pattern elsewhere in this pipeline): any failure in `cancelPriorRuns` is logged and swallowed — it must never block the *new* run from starting.
+
+**IAM.** The receiver role is granted `states:ListExecutions` (scoped to the state machine ARN) and `states:DescribeExecution`/`states:StopExecution` (scoped to execution ARNs under it, in `agentWebhookStack.ts`), plus `bedrock-agentcore:InvokeAgentRuntime` on the ClaudeCode runtime (+ its endpoints) in `backend.ts` — the same grant shape already given to `agent-webhook-invoke-claude`, skipped cleanly when the runtime isn't deployed on a branch.
+
+**Execution-name truncation must keep the shared prefix intact.** `execName()` originally (issue #200) truncated the shared **prefix** to fit Step Functions' 80-char execution-name limit on long repo/issue combinations, keeping the full `runId` suffix. That would have silently broken `cancelPriorRuns`' prefix match for exactly those long-name cases — the very runs most likely to need it. `execName()` now always keeps `<prefix>-` intact and, only when the full name would overflow, shortens the `runId` side instead (a SHA-256 hash of the runId, truncated to as many hex characters as fit — still effectively unique for collision purposes at this scale). Only in the pathological case where the prefix alone doesn't leave room for even a minimal hashed suffix does it fall back to truncating the prefix, degrading the prefix match for that one execution rather than the general case.
+
 ## History: alongside an Actions-based flow, now retired
 
 This pipeline originally ran **alongside** a separate Actions-based flow
@@ -186,7 +203,7 @@ Defined in [`web/amplify/constructs/agentWebhookStack.ts`](../web/amplify/constr
 | Function | Role |
 |---|---|
 | [`agent-webhook-authorizer`](../web/amplify/functions/agent-webhook-authorizer/) | REQUEST authorizer on `POST /webhook` (issue #83). Signature-*format* gate only — see above |
-| [`agent-webhook-receiver`](../web/amplify/functions/agent-webhook-receiver/) | API Gateway target. Verifies signature, detects mention, `StartExecution` |
+| [`agent-webhook-receiver`](../web/amplify/functions/agent-webhook-receiver/) | API Gateway target. Verifies signature, detects mention, cancels any prior in-flight run for the same target (issue #182 — see above), `StartExecution` |
 | [`agent-webhook-post-comment`](../web/amplify/functions/agent-webhook-post-comment/) | Posts initial (Live Tail link) and final comments, mints GitHub tokens |
 | [`agent-webhook-invoke-agent`](../web/amplify/functions/agent-webhook-invoke-agent/) | GitHub context enrichment + git/gh-auth prep: fetches the issue/PR's labels/comments/diffstat and seeds git+gh credentials in the harness session via `InvokeAgentRuntimeCommand`, logs its stdout/stderr, returns the annotated prompt. (Despite the name, it no longer invokes the harness — that's the native SFN task.) |
 | [`agent-webhook-invoke-claude`](../web/amplify/functions/agent-webhook-invoke-claude/) | `@agentcore-claude` branch (`WAIT_FOR_TASK_TOKEN`). Hands the ClaudeCode AgentCore Runtime a Step Functions task token via `InvokeAgentRuntime`, confirms the fast `{ started: true }` ack, and returns while the task stays paused; the runtime later resumes it with the shared `$.agentResult` shape via `SendTaskSuccess`. Only reached when `$.agent == "claude"`. |
