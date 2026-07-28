@@ -494,9 +494,9 @@ if (GITHUB_APP_PRIVATE_KEY_SECRET_ARN) {
 // ============================================================================
 // AGENT WEBHOOK — API Gateway → Step Function pipeline for GitHub/Jira
 // mention comments (see issue #35, docs/webhook-stepfunction-integration.md).
-// Runs alongside .github/workflows/agent-mention.yml, not replacing it — see
-// the docs page for the trigger-phrase separation that keeps them from
-// double-firing on GitHub events.
+// This is now the sole GitHub/Jira mention pipeline — it superseded the
+// Actions-based .github/workflows/agent-mention.yml flow, which targeted the
+// since-retired AgUiHandler runtime (#33) and was removed (#191).
 //
 // All *_SECRET_ARN / *_ARN inputs below are deploy-time inputs (Secrets
 // Manager secrets provisioned manually, same pattern as

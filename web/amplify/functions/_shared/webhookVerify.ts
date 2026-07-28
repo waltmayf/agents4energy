@@ -39,10 +39,10 @@ const HARNESS_MENTION_RE = /@agentcore\b/i;
 export type MentionedAgent = 'harness' | 'claude';
 
 // Returns the addressed agent and the prompt text following the trigger
-// mention, or null if no trigger mention is present. A distinct mention phrase
-// (rather than reusing `@agent-<slug>`) keeps this webhook path from
-// double-firing alongside .github/workflows/agent-mention.yml, which already
-// matches any `@agent[-<slug>]` mention on the same repo.
+// mention, or null if no trigger mention is present. `@agentcore[-claude]` is
+// distinct from the `@agent[-<slug>]` phrase the old Actions-based
+// .github/workflows/agent-mention.yml used before it was retired (#191) —
+// that flow targeted the since-removed AgUiHandler runtime (#33).
 export function parseMention(commentBody: string): { agent: MentionedAgent; prompt: string } | null {
   // Claude first — `@agentcore-claude` also satisfies HARNESS_MENTION_RE.
   if (CLAUDE_MENTION_RE.test(commentBody)) {

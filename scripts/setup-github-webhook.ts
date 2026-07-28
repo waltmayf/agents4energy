@@ -4,10 +4,8 @@
  * API Gateway → Step Function → AgentCore Harness pipeline (see issue #35 and
  * docs/webhook-stepfunction-integration.md).
  *
- * This is the webhook counterpart to scripts/setup-github-integration.ts (which
- * wires the *Actions*-based @agent-<slug> flow). Run it once after a deploy that
- * provisions the webhook stack — it is fully idempotent, so re-running it just
- * updates the existing hook in place.
+ * Run it once after a deploy that provisions the webhook stack — it is fully
+ * idempotent, so re-running it just updates the existing hook in place.
  *
  * Usage:
  *   npx tsx scripts/setup-github-webhook.ts --repo owner/name

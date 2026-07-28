@@ -124,14 +124,23 @@ Unlike the harness, the runtime has **no optimized Step Functions integration** 
 
 > **ChatSession is intentionally NOT created by this pipeline.** A `ChatSession` is created browser-side only, when the user opens the chat page. If the page is opened with a session id that doesn't exist yet, the browser creates it and starts listening for AgentCore-memory messages on it. Keeping session creation out of the Step Function avoids orphan sessions for runs nobody watches.
 
-## Why alongside, not instead
+## History: alongside an Actions-based flow, now retired
 
-The Actions-based flow (`.github/workflows/agent-mention.yml`) already has a correctly-scoped, auto-expiring `GITHUB_TOKEN` for free and works well for GitHub. This webhook path exists because:
+This pipeline originally ran **alongside** a separate Actions-based flow
+(`.github/workflows/agent-mention.yml` → `scripts/github-agent-invoke.ts`), which had a
+correctly-scoped, auto-expiring `GITHUB_TOKEN` for free and worked well for GitHub. It
+existed because:
 
 1. **Jira has no Actions-runner equivalent** — there's no CI system already wired to Jira comments, so a webhook receiver is the only option there.
-2. **A live CloudWatch Logs Live Tail link** is a materially different "watch it work" UX than the AppSync `/chat-handler` live-chat link the Actions flow posts, and this issue asked for it specifically.
+2. **A live CloudWatch Logs Live Tail link** is a materially different "watch it work" UX than the AppSync `/chat-handler` live-chat link the Actions flow posted, and the issue that added it asked for it specifically.
 
-To avoid both paths firing on the same GitHub comment, they use **distinct trigger phrases**: Actions matches `@agent[-<slug>]`, this pipeline matches `@agentcore`. Retiring the Actions flow in favor of this one — once Jira parity isn't the only reason for it to exist — is a follow-up decision, not made here.
+The two paths used **distinct trigger phrases** (Actions matched `@agent[-<slug>]`, this
+pipeline matches `@agentcore`) specifically so they wouldn't double-fire on the same
+GitHub comment. The Actions flow targeted the `AgUiHandler` AgentCore runtime, which was
+retired in #33 — leaving `agent-mention.yml` fully commented out and failing CI on every
+push until it (and its generator, `scripts/setup-github-integration.ts`) were removed in
+#191. This webhook pipeline is now the **sole** GitHub/Jira mention flow; the trigger
+phrase distinction is kept as-is (no reason to rename `@agentcore` back to `@agent`).
 
 ## Signature verification
 
