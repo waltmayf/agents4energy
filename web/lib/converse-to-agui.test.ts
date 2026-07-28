@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { eventToMessages, eventsToAguiMessages, type StoredEvent } from './converse-to-agui.ts';
+import { dedupeStoredEvents, eventToMessages, eventsToAguiMessages, type StoredEvent } from './converse-to-agui.ts';
 
 /** Build a StoredEvent whose contentJson is a Converse ContentBlock[]. */
 function stored(role: string, blocks: unknown[], eventId = 'e1'): StoredEvent {
@@ -212,4 +212,66 @@ test('a genuine user message containing "functions." text is left untouched', ()
   assert.equal(msgs.length, 2);
   assert.equal(msgs[0].role, 'assistant');
   assert.equal(msgs[1].role, 'user');
+});
+
+test('dedupeStoredEvents collapses the #116 fixture to 2 real user turns in send-order', () => {
+  // The exact scenario from #116: two user turns were sent ("...ABC12" then
+  // "...XYZ99"), but re-forwarding the full window on each InvokeHarness call
+  // caused the harness to re-persist turns already in memory. After sorting
+  // chronologically (loadHistory's job, not this test's), the 6 stored events
+  // are: turn 1 (user + assistant, each persisted twice) followed by turn 2
+  // (user once, assistant once — no third invoke happened yet to re-persist it).
+  const events: StoredEvent[] = [
+    { eventId: 'u1', role: 'user', text: 'Reply with exactly the token ABC12', timestamp: '2026-07-28T10:00:00.000Z' },
+    { eventId: 'u1-dup', role: 'user', text: 'Reply with exactly the token ABC12', timestamp: '2026-07-28T10:00:01.000Z' },
+    { eventId: 'a1', role: 'assistant', text: 'User asks: Reply with exactly the token ABC12', timestamp: '2026-07-28T10:00:02.000Z' },
+    { eventId: 'a1-dup', role: 'assistant', text: 'User asks: Reply with exactly the token ABC12', timestamp: '2026-07-28T10:00:03.000Z' },
+    { eventId: 'u2', role: 'user', text: 'Reply with exactly the token XYZ99', timestamp: '2026-07-28T10:05:00.000Z' },
+    { eventId: 'a2', role: 'assistant', text: 'User wants token XYZ99 exactly', timestamp: '2026-07-28T10:05:01.000Z' },
+  ];
+
+  const deduped = dedupeStoredEvents(events);
+
+  assert.equal(deduped.length, 4);
+  assert.deepEqual(deduped.map((e) => e.eventId), ['u1', 'a1', 'u2', 'a2']);
+
+  const msgs = eventsToAguiMessages(deduped);
+  assert.equal(msgs.length, 4);
+  assert.equal(msgs[0].role, 'user');
+  assert.equal(msgs[1].role, 'assistant');
+  assert.equal(msgs[2].role, 'user');
+  assert.equal(msgs[3].role, 'assistant');
+});
+
+test('dedupeStoredEvents preserves a genuinely repeated user message sent minutes apart', () => {
+  // A user can legitimately send the identical text twice as two distinct
+  // turns (e.g. re-asking the same question later). Only collapse duplicates
+  // that land within the re-persist window, not ones far apart in time.
+  const events: StoredEvent[] = [
+    { eventId: 'u1', role: 'user', text: 'ping', timestamp: '2026-07-28T10:00:00.000Z' },
+    { eventId: 'a1', role: 'assistant', text: 'pong', timestamp: '2026-07-28T10:00:01.000Z' },
+    { eventId: 'u2', role: 'user', text: 'ping', timestamp: '2026-07-28T10:10:00.000Z' },
+    { eventId: 'a2', role: 'assistant', text: 'pong again', timestamp: '2026-07-28T10:10:01.000Z' },
+  ];
+
+  const deduped = dedupeStoredEvents(events);
+
+  assert.equal(deduped.length, 4);
+  assert.deepEqual(deduped.map((e) => e.eventId), ['u1', 'a1', 'u2', 'a2']);
+});
+
+test('dedupeStoredEvents dedupes structured (contentJson) events by exact block content', () => {
+  const events: StoredEvent[] = [
+    stored('assistant', [{ toolUse: { toolUseId: 't1', name: 'lookup', input: { q: 'x' } } }], 'a1'),
+    { ...stored('assistant', [{ toolUse: { toolUseId: 't1', name: 'lookup', input: { q: 'x' } } }], 'a1-dup') },
+    stored('user', [{ toolResult: { toolUseId: 't1', content: [{ text: 'result' }] } }], 'b1'),
+  ];
+  // Give them timestamps within the re-persist window.
+  events[0].timestamp = '2026-07-28T10:00:00.000Z';
+  events[1].timestamp = '2026-07-28T10:00:00.500Z';
+  events[2].timestamp = '2026-07-28T10:00:01.000Z';
+
+  const deduped = dedupeStoredEvents(events);
+  assert.equal(deduped.length, 2);
+  assert.deepEqual(deduped.map((e) => e.eventId), ['a1', 'b1']);
 });

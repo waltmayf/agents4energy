@@ -19,7 +19,7 @@ import {
 import { Observable, type Subscriber } from 'rxjs';
 
 import outputs from '../amplify_outputs.json';
-import { eventsToAguiMessages, type StoredEvent } from './converse-to-agui';
+import { dedupeStoredEvents, eventsToAguiMessages, type StoredEvent } from './converse-to-agui';
 import {
   createHarnessStreamState,
   translateHarnessStreamEvent,
@@ -329,5 +329,8 @@ export async function loadHistory(sessionId: string): Promise<Message[]> {
     return Number.isNaN(t) ? 0 : t;
   };
   const sorted = all.sort((a, b) => ts(a) - ts(b));
-  return eventsToAguiMessages(sorted);
+  // Every InvokeHarness call forwards the full user/assistant window, and the
+  // harness re-persists what it's sent — so the same turn can land as more
+  // than one stored event. Collapse those before mapping to AG-UI messages.
+  return eventsToAguiMessages(dedupeStoredEvents(sorted));
 }
