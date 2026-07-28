@@ -383,6 +383,24 @@ export class AgentWebhookStack extends Construct {
       actions: ['states:StartExecution'],
       resources: [this.stateMachineArn],
     }));
+
+    // Control plane of last-write-wins cancellation (issue #182): before
+    // starting a new run, the receiver lists RUNNING executions for this state
+    // machine (client-side filtered by name prefix — ListExecutions has no
+    // server-side name filter) and stops/cancels every prior one for the same
+    // target. ListExecutions is scoped to the state machine ARN;
+    // DescribeExecution/StopExecution act on individual executions, whose ARN
+    // is `<stateMachineArn with "stateMachine:" swapped for "execution:">:<name>`
+    // — grant the wildcard so any execution name under this state machine works.
+    const executionArnPrefix = this.stateMachineArn.replace(':stateMachine:', ':execution:');
+    props.receiverLambda.addToRolePolicy(new PolicyStatement({
+      actions: ['states:ListExecutions'],
+      resources: [this.stateMachineArn],
+    }));
+    props.receiverLambda.addToRolePolicy(new PolicyStatement({
+      actions: ['states:DescribeExecution', 'states:StopExecution'],
+      resources: [`${executionArnPrefix}:*`],
+    }));
   }
 
   public get webhookUrl(): string {

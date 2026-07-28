@@ -594,6 +594,23 @@ webhookInvokeClaudeLambda.addToRolePolicy(new PolicyStatement({
   resources: [`arn:aws:logs:${AGENTCORE_REGION}:${backend.stack.account}:log-group:/agent-webhook/*:log-stream:*`],
 }));
 
+// Last-write-wins cancellation (issue #182): the receiver also calls
+// InvokeAgentRuntime on the ClaudeCode runtime — with a `{ action: 'cancel' }`
+// control payload rather than a real job — to kill a prior in-flight
+// @agentcore-claude job before starting its replacement (see server.js's
+// cancel handler). Same grant shape as webhookInvokeClaudeLambda above. Env +
+// grant skipped cleanly when the runtime isn't deployed on this branch.
+backend.agentWebhookReceiver.addEnvironment('CLAUDE_CODE_RUNTIME_ARN', AGENTCORE_CLAUDE_CODE_RUNTIME_ARN);
+if (AGENTCORE_CLAUDE_CODE_RUNTIME_ARN) {
+  webhookReceiverLambda.addToRolePolicy(new PolicyStatement({
+    actions: ['bedrock-agentcore:InvokeAgentRuntime'],
+    resources: [
+      AGENTCORE_CLAUDE_CODE_RUNTIME_ARN,
+      `${AGENTCORE_CLAUDE_CODE_RUNTIME_ARN}/runtime-endpoint/*`,
+    ],
+  }));
+}
+
 // Own stack (not agentStack) — AgentWebhookStack references the function-stack
 // Lambdas above, which already depend on agentStack (via the HARNESS_ARN
 // env var). Building it inside agentStack would make agentStack depend back
