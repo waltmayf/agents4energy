@@ -41,7 +41,8 @@ test('collapses <comment_thread> with the comment count in the toggle', () => {
   ].join('\n');
   const out = collapseWebhookSections(input);
   assert.ok(out.includes('<summary>Prior GitHub comments (2) ▸</summary>'));
-  assert.ok(out.includes('Repository: foo/bar'), 'issue metadata stays visible (not collapsed)');
+  assert.ok(out.includes('<summary>Issue #1: Something broke ▸</summary>'), 'github_context collapses under the issue title');
+  assert.ok(out.includes('Repository: foo/bar'), 'issue metadata preserved inside the collapse');
   assert.ok(out.includes('first comment') && out.includes('second comment'), 'comment bodies preserved inside the collapse');
   assert.ok(!out.includes('<github_context>') && !out.includes('</github_context>'), 'wrapper marker tags are stripped');
   assert.ok(!out.includes('<comment_thread>'), 'comment_thread marker tag itself is gone');
@@ -92,9 +93,50 @@ test('collapses all three sections together, matching the real handler.ts prompt
   assert.ok(out.includes('<summary>AGENTS.md instructions ▸</summary>'));
   assert.ok(out.includes('<summary>Prior GitHub comments (1) ▸</summary>'));
   assert.ok(out.includes('<summary>GitHub access & delivery instructions ▸</summary>'));
+  assert.ok(out.includes('<summary>Issue #42: Bug ▸</summary>'), 'github_context collapses under the issue title');
   assert.ok(out.includes('Fix issue #42.'), 'the actual request text remains visible and uncollapsed');
-  assert.ok(out.includes('Repository: foo/bar'), 'issue metadata remains visible and uncollapsed');
+  assert.ok(out.includes('Repository: foo/bar'), 'issue metadata preserved inside the github_context collapse');
   for (const tag of ['<agents_md>', '<comment_thread>', '<github_context>', '<github_access>']) {
     assert.ok(!out.includes(tag), `${tag} marker is gone from the output`);
   }
+});
+
+test('collapses <github_context> under a PR title summary, sub-collapsing the comment thread', () => {
+  const input = [
+    'Review this PR.',
+    '',
+    '<github_context>',
+    'Repository: foo/bar',
+    'Pull request #7: Add widget',
+    'State: open',
+    '',
+    'Description:',
+    'Adds a widget.',
+    '',
+    'Base branch: main  Head branch: feat/widget',
+    'Changed files: 1 (+10 / -0)',
+    '  added: src/widget.ts (+10 / -0)',
+    '<comment_thread>',
+    'Comment thread (1):',
+    '--- @dave at t ---',
+    'looks good',
+    '</comment_thread>',
+    '</github_context>',
+  ].join('\n');
+  const out = collapseWebhookSections(input);
+  assert.ok(out.includes('<summary>Pull request #7: Add widget ▸</summary>'), 'uses the PR title as the toggle summary');
+  assert.ok(out.includes('Review this PR.'), 'request text stays visible');
+  assert.ok(out.includes('src/widget.ts'), 'PR file list preserved inside the collapse');
+  assert.ok(out.includes('<summary>Prior GitHub comments (1) ▸</summary>'), 'comment thread stays sub-collapsed');
+  assert.ok(out.includes('looks good'), 'comment body preserved');
+  for (const tag of ['<github_context>', '<comment_thread>']) {
+    assert.ok(!out.includes(tag), `${tag} marker is gone`);
+  }
+});
+
+test('falls back to a generic github_context summary when no title line is present', () => {
+  const input = ['<github_context>', 'Repository: foo/bar', 'State: open', '</github_context>'].join('\n');
+  const out = collapseWebhookSections(input);
+  assert.ok(out.includes('<summary>GitHub context ▸</summary>'), 'generic summary when title line missing');
+  assert.ok(out.includes('Repository: foo/bar'), 'content preserved inside the collapse');
 });

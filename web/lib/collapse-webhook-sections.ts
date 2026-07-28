@@ -22,12 +22,15 @@ function collapseTag(markdown: string, tag: string, summary: string | ((inner: s
 }
 
 const COMMENT_COUNT_RE = /Comment thread \((\d+\+?)\):/;
+// The handler emits a "Pull request #N: <title>" / "Issue #N: <title>" line as
+// the second line of <github_context>; use it as the always-visible summary.
+const GITHUB_CONTEXT_TITLE_RE = /^(?:Pull request|Issue) #\d+:.*$/m;
 
 /**
- * Collapse the AGENTS.md, prior-GitHub-comment-thread, and GitHub-access
- * boilerplate blocks in a webhook-initiated user message into
- * collapsed-by-default `<details>` widgets, leaving the actual request text
- * (and the issue/PR title/state/labels/description in `<github_context>`)
+ * Collapse the AGENTS.md, prior-GitHub-comment-thread, GitHub-access, and
+ * GitHub-context boilerplate blocks in a webhook-initiated user message into
+ * collapsed-by-default `<details>` widgets, leaving only the actual request
+ * text (and, as the github-context toggle's summary, the issue/PR title)
  * visible without expanding anything.
  */
 export function collapseWebhookSections(markdown: string): string {
@@ -52,10 +55,16 @@ export function collapseWebhookSections(markdown: string): string {
   result = collapseTag(result, 'agents_md', 'AGENTS.md instructions ▸');
   result = collapseTag(result, 'github_access', 'GitHub access & delivery instructions ▸');
 
-  // <github_context> itself stays visible (issue/PR title, state, labels,
-  // and description are useful at a glance) — just unwrap the marker tags so
-  // they don't render as literal text.
-  result = result.replace(/<github_context>\n?/g, '').replace(/\n?<\/github_context>/g, '');
+  // Collapse <github_context> too — the repo/state/labels/description (and, for
+  // PRs, the changed-file list) is bulky boilerplate that dominates the bubble.
+  // Keep the "Issue/Pull request #N: <title>" line as the toggle summary so the
+  // session is still identifiable at a glance without expanding. The nested
+  // <comment_thread> was already turned into its own <details> above, so it
+  // stays sub-collapsed inside this one.
+  result = collapseTag(result, 'github_context', (inner) => {
+    const title = inner.match(GITHUB_CONTEXT_TITLE_RE)?.[0]?.trim();
+    return title ? `${title} ▸` : 'GitHub context ▸';
+  });
 
   return result;
 }
