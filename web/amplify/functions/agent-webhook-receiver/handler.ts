@@ -1,5 +1,5 @@
 import type { APIGatewayProxyEventV2, APIGatewayProxyStructuredResultV2 } from 'aws-lambda';
-import { randomUUID, createHash } from 'crypto';
+import { randomUUID } from 'crypto';
 import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-secrets-manager';
 import {
   SFNClient,
@@ -10,6 +10,7 @@ import {
 } from '@aws-sdk/client-sfn';
 import { BedrockAgentCoreClient, InvokeAgentRuntimeCommand } from '@aws-sdk/client-bedrock-agentcore';
 import { verifyGithubSignature, verifyJiraSharedSecret, extractPromptAfterMention, parseMention } from '../_shared/webhookVerify';
+import { execName, sharedNamePrefix } from '../../../lib/exec-name';
 
 const REGION = process.env.AWS_REGION ?? 'us-east-1';
 const GITHUB_WEBHOOK_SECRET_ARN = process.env.GITHUB_WEBHOOK_SECRET_ARN ?? '';
@@ -50,43 +51,6 @@ async function getSecret(arn: string): Promise<string> {
 
 function json(statusCode: number, body: unknown): APIGatewayProxyStructuredResultV2 {
   return { statusCode, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) };
-}
-
-// Step Functions caps execution names at 80 chars. The name is purely a
-// human-readable label (`<prefix>-<runId>`), but the PREFIX also doubles as
-// the shared match key cancelPriorRuns uses (via ListExecutions) to find
-// every run for the same repo/issue — so unlike the original fix (#200, which
-// truncated the prefix), we must now keep the full `<prefix>-` intact and
-// shorten the runId side instead. Hash the runId down to a short, still-
-// effectively-unique suffix when the full name would overflow. Without some
-// truncation, long repo names (e.g.
-// aws-samples/sample-edge-to-cloud-digital-ops-workshop) make StartExecution
-// throw ValidationException and the webhook 500s.
-function execName(prefix: string, runId: string): string {
-  const full = `${prefix}-${runId}`;
-  if (full.length <= 80) return full;
-
-  const MIN_SUFFIX_LEN = 8;
-  const hashedRunId = createHash('sha256').update(runId).digest('hex');
-  if (prefix.length + 1 + MIN_SUFFIX_LEN <= 80) {
-    const suffixLen = 80 - prefix.length - 1;
-    return `${prefix}-${hashedRunId.slice(0, suffixLen)}`;
-  }
-  // Pathological case: the prefix alone doesn't leave room for even the
-  // minimum suffix. Truncating the prefix is unavoidable here (no naming
-  // scheme fits both under 80 chars) — cancelPriorRuns' prefix match then only
-  // degrades for this one execution, not the general case.
-  const suffix = `-${hashedRunId.slice(0, MIN_SUFFIX_LEN)}`;
-  return `${prefix.slice(0, 80 - suffix.length)}${suffix}`;
-}
-
-// The shared match key for every execution started for the same target
-// (repo+issueNumber, or Jira issueKey) — always `${base}-`, and always kept
-// fully intact by execName above regardless of truncation. cancelPriorRuns
-// uses this to find every RUNNING execution for the same target before
-// starting a new one (last-write-wins, issue #182).
-function sharedNamePrefix(base: string): string {
-  return `${base}-`;
 }
 
 // Best-effort: fetch a RUNNING execution's original StartExecution input so we
