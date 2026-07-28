@@ -53,7 +53,12 @@ echo "Deploying Amplify sandbox (including hosting + agent stacks)…"
 # replaced by '-'; branchSlug = $BRANCH_SLUG above (already lowercased +
 # truncated to 14 chars, the same value passed to `ampx sandbox --identifier`).
 if [ -n "${GITHUB_REPOSITORY:-}" ]; then
-  E2E_CONFIG_REPO_SLUG="$(echo "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9-/]+/-/g')"
+  # `-` MUST be last in the bracket class — sed reads `9-/` as a character
+  # range (invalid: '/' < '9') and aborts with "Invalid range end". Use `#` as
+  # the s/// delimiter so the literal '/' in the class isn't taken as the
+  # delimiter. Matches fetch-e2e-config.ts's /[^a-z0-9-/]+/ (JS is lenient
+  # about a mid-class dash; sed is not).
+  E2E_CONFIG_REPO_SLUG="$(echo "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]' | sed -E 's#[^a-z0-9/-]+#-#g')"
   E2E_CONFIG_SSM_PATH="/outputs/$E2E_CONFIG_REPO_SLUG/$BRANCH_SLUG/e2e-config"
 
   echo "Publishing e2e config to SSM: $E2E_CONFIG_SSM_PATH…"
