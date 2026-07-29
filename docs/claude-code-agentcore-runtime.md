@@ -175,8 +175,7 @@ That state machine reads the new field with a `RouteAwaitingInput` Choice insert
 
 [`agent-webhook-post-comment/handler.ts`](../web/amplify/functions/agent-webhook-post-comment/handler.ts) handles the new `stage: 'awaiting_input'` alongside `'initial'`/`'final'`.
 
-Deferred to a follow-up PR (see issue #185):
-- A UI affordance for picking an option, which reads the marker back out of Memory and re-triggers the runtime with the user's answer.
+**The UI re-trigger (final increment):** the chat page reads the marker back out of Memory via the same history-load path every turn already uses (`loadHistory` → `converse-to-agui.ts`), so no persistence format changed. [`web/lib/awaiting-input.ts`](../web/lib/awaiting-input.ts)'s `parseAwaitingInputMarker` recognizes the marker text, [`use-awaiting-input.ts`](../web/app/(with-auth)/chat/use-awaiting-input.ts) derives `{ awaiting, question }` from an agent's most recent message (re-deriving on every `onMessagesChanged`), and [`awaiting-input-banner.tsx`](../web/app/(with-auth)/chat/awaiting-input-banner.tsx) renders the question with an answer box above the chat panel. Submitting calls `agent.addMessage(...)` + `copilotkit.runAgent({ agent })` on the *same* `ClaudeCodeAgent` instance — the same call pattern `CopilotChatInput` uses internally — so the run reuses the agent's unchanged `threadId`, which `ClaudeCodeAgent.run()` sends as `runtimeSessionId`; that's the same id the paused run used, so the runtime resumes against the same session-storage workspace clone and Memory conversation rather than starting fresh.
 
 ## The invoke path (GitHub issue → Claude Code)
 
