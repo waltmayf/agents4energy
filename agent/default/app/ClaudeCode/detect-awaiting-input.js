@@ -4,12 +4,12 @@
 // run path yet, and does not touch memory.js or the SFN contract).
 //
 // Signal keyed on: the caller passes `resultText`, the `result` field of the
-// CLI's final `--output-format stream-json` line (this is exactly the string
-// `runClaudeCode` in server.js assigns from `event.result` and resolves as
-// the run's final text). stream-json has no distinct "asking for input"
-// event type today — an ask-for-input turn is just a normal `assistant` text
-// block — so the only concrete, always-present signal available post-hoc is
-// the final message's own text ending in a question mark. This is a
+// CLI's `--output-format json` final object (this is exactly the string
+// `runClaudeCode` in server.js resolves via `parsed.result` as the run's
+// final text). The CLI output has no distinct "asking for input" event today
+// — an ask-for-input turn is just a normal assistant text block — so the only
+// concrete, always-present signal available post-hoc is the final message's
+// own text ending in a question mark. This is a
 // heuristic (it will miss a question that isn't the very last sentence, and
 // could rarely misfire on a rhetorical closing question) but it's cheap,
 // requires no CLI/model cooperation, and errs toward false negatives (a
