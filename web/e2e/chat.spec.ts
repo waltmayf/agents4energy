@@ -83,6 +83,21 @@ test.describe('Chat page (AG-UI / CopilotKit)', () => {
     });
   });
 
+  test('Claude Code runtime can be selected from the agent picker', async ({ page }) => {
+    // Picking the "Claude Code" entry swaps the transport to ClaudeCodeAgent
+    // (InvokeAgentRuntime) instead of HarnessAgent (InvokeHarness) — see
+    // web/app/(with-auth)/chat/page.tsx. This only verifies the selection
+    // wires through to the URL (agentId persisted for reload/sharing); it
+    // does not invoke the runtime, which is a slow, real container job.
+    const trigger = page.locator('[data-slot="select-trigger"]');
+    await expect(trigger).toBeVisible();
+    await trigger.click();
+    await page.getByRole('option', { name: 'Claude Code' }).click();
+
+    await expect(trigger).toContainText('Claude Code');
+    await page.waitForURL(/[?&]agentId=__claude_code__/, { timeout: 10_000 });
+  });
+
   test('conversation history is restored on reload', async ({ page }) => {
     const textarea = page.getByTestId('copilot-chat-textarea');
     await textarea.fill('Output only this 5-character code, nothing else: Z X Q 4 2 (remove the spaces)');
