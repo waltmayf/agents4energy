@@ -55,13 +55,18 @@ const myHarnessSystemPrompt = readFileSync(
 const harnessSpecs: HarnessSpec[] = [
   {
     name: 'MyHarness',
-    // provider+modelId+apiFormat — the HarnessModelSchema shape. `bedrock` +
-    // `chat_completions` targets the OpenAI-compatible completions API the
-    // gpt-oss model exposes through Bedrock.
+    // provider+modelId+apiFormat — the HarnessModelSchema shape. We use the
+    // Bedrock Converse API (`converse_stream`), NOT the OpenAI-compatible
+    // `chat_completions` path. The latter routes through Bedrock's OpenAI-compat
+    // gateway, which returns a hard `404 not_found_error` ("The model
+    // 'openai.gpt-oss-120b-1:0' does not exist") for this model even though the
+    // exact same id succeeds via Converse and via `bedrock:InvokeModel` — every
+    // harness invoke failed this way from the 2026-07-27 migration deploy until
+    // this switch. Converse is the supported path for the gpt-oss model here.
     model: {
       provider: 'bedrock',
       modelId: 'openai.gpt-oss-120b-1:0',
-      apiFormat: 'chat_completions',
+      apiFormat: 'converse_stream',
     },
     systemPrompt: myHarnessSystemPrompt,
     tools: [
