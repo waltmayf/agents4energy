@@ -336,10 +336,24 @@ function runClaudeCode({ prompt, workDir, repo, issueNumber, systemAppend, githu
     appendParts.push(
       `You are acting on GitHub repository ${repo}${issueNumber ? `, issue/PR #${issueNumber}` : ''}.`,
       `The repository is already cloned at the current working directory.`,
-      `The \`gh\` CLI and \`git\` are authenticated. If you make code changes, create a branch, commit, push, and open a pull request with \`gh\`.`,
+      `The \`gh\` CLI and \`git\` are authenticated — git commit/push and gh pr create all work with no token setup needed.`,
+      // Incremental delivery (issue #166): this job runs under a Step Functions
+      // task with a hard 3h timeout, and anything only in the container (not
+      // pushed) is LOST when the turn is cut off. Mirrors the guidance the
+      // harness path injects in agent-webhook-invoke-agent/handler.ts.
+      'DELIVER INCREMENTALLY — do not save all your work for the end. Your turn can be cut off before you finish, and any work that is only in this container (not pushed) is LOST. So:',
+      '  1. Create your branch and make the first coherent edit EARLY.',
+      '  2. Commit and push that first chunk right away: `git push -u origin <your-branch>`.',
+      `  3. Immediately open a DRAFT PR so the work is durable and resumable: gh pr create --repo ${repo} --draft --base main --head <your-branch> --title "<title>" --body "<body>"`,
+      '  4. Keep committing and pushing to the same branch after each further coherent chunk — every push updates the open PR. Never batch many files into a single final push.',
+      'This way, even if your turn ends mid-task, there is a real PR with real progress to resume from — instead of nothing. Prefer the smallest coherent change that resolves the request; for a large coupled refactor, land what you have and list the remaining edits as a checklist in the PR body rather than trying to finish everything in one turn.',
+      // Bounded tool output (issue #140): a single command that prints tens of
+      // thousands of lines can overflow the model context and kill the run.
+      'KEEP TOOL OUTPUT SMALL — a single command that prints tens of thousands of lines (e.g. `pnpm lint` on generated output, a full `git diff`, or `cat` of a big/generated file) can overflow the model context and kill your run with no result. Never dump unbounded output: pipe through `| tail -n 50` (or `| head`), use quiet/summary flags (`--quiet`, `--silent`), and check size first with `| wc -l` before printing. If a check is inherently noisy, capture it to a file and inspect just the relevant lines (e.g. `... > /tmp/out.txt 2>&1; grep -i error /tmp/out.txt | head -n 50`).',
+      'Before you mark the PR ready for review (`gh pr ready <your-branch>`), verify the change builds: run `pnpm install` at the REPOSITORY ROOT (this is a pnpm workspace with one root lockfile — do NOT run it inside web/), then `cd web && npx tsc --noEmit` and make it pass. Leave the PR as a draft while the type check fails, and do not claim it passed unless you actually ran it and it did.',
       issueNumber
-        ? `When finished, your final message should summarize what you did (a caller posts it as a comment on #${issueNumber}).`
-        : `When finished, summarize what you did in your final message.`,
+        ? `When finished, your final message should summarize what you did and include the confirmed PR URL (a caller posts it as a comment on #${issueNumber}).`
+        : `When finished, summarize what you did and include the confirmed PR URL in your final message.`,
     );
   }
   if (systemAppend) appendParts.push(systemAppend);
