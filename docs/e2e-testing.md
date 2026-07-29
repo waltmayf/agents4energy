@@ -196,6 +196,19 @@ On CI set `CI=true`. This enables:
 
 If `web/e2e-config.json` is absent, the `webServer` block in `playwright.config.ts` spins up `pnpm dev` and waits up to 2 minutes for `https://localhost:3000` to be ready. If present, no server is started — tests run directly against the deployed CloudFront URL. Either way, AWS credentials must be available for the auth setup to read the test user's SSM parameters and sign in.
 
+### Running automatically after every deploy
+
+The `Deploy` workflow (issue #4) runs the full suite immediately after the S3 sync + CloudFront invalidation, against the branch it just deployed:
+
+```bash
+pnpm fetch:e2e-config        # writes web/e2e-config.json from SSM for this branch
+cd web && pnpm test:e2e --project=chromium
+```
+
+It uses the same OIDC-assumed deploy role as the rest of the job (`AWS_ROLE_ARN`) — no separate credentials are configured for the test step. A failing test (including the AG-UI stream assertions from #3) fails the deploy job. On failure, the Playwright HTML report (`web/playwright-report/`) is uploaded as a workflow artifact.
+
+Note: despite what earlier planning docs for this feature said, the test step does **not** consume `TEST_USER_EMAIL`/`TEST_USER_PASSWORD` secrets — [`auth.setup.ts`](../web/e2e/auth.setup.ts) reads the test user's credentials straight from SSM (paths supplied via `web/e2e-config.json`), provisioned by the `E2eTestUser` CDK custom resource (see "Authentication" above). The deploy role needs `ssm:GetParameter` on those paths (`/agentcore/e2e-test-user-*/*`) in addition to the `/outputs/*` grant it already has for `fetch:e2e-config` — see `scripts/setup-deploy-role.ts`.
+
 ## Debugging
 
 ```bash
