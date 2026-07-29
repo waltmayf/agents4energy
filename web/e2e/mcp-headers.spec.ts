@@ -3,7 +3,7 @@ import { test, expect } from '@playwright/test';
 test.describe('MCP Server Header UI', () => {
   test.beforeEach(async ({ page }) => {
     // Navigate to the agents page which includes the MCP server tab
-    await page.goto('/agents');
+    await page.goto('agents');
     // Ensure we are signed in via stored auth state (handled by global setup)
     await expect(page.getByTestId('tab-mcp-servers')).not.toBeHidden();
   });
