@@ -54,12 +54,7 @@ interface PostCommentOutput {
   agentsSystemPrompt?: string;
 }
 
-async function postGithubComment(repo: string, issueNumber: number, body: string): Promise<{ token: string; expiresAt: string }> {
-  if (!GITHUB_APP_PRIVATE_KEY_SECRET_ARN) {
-    throw new Error('GITHUB_APP_PRIVATE_KEY_SECRET_ARN not configured');
-  }
-  const { token, expiresAt } = await mintInstallationToken(repo, GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY_SECRET_ARN);
-
+async function postGithubCommentWithToken(repo: string, issueNumber: number, body: string, token: string): Promise<void> {
   const res = await fetch(`https://api.github.com/repos/${repo}/issues/${issueNumber}/comments`, {
     method: 'POST',
     headers: {
@@ -73,7 +68,70 @@ async function postGithubComment(repo: string, issueNumber: number, body: string
   if (!res.ok) {
     throw new Error(`GitHub createComment failed (HTTP ${res.status}): ${await res.text()}`);
   }
+}
+
+async function postGithubComment(repo: string, issueNumber: number, body: string): Promise<{ token: string; expiresAt: string }> {
+  if (!GITHUB_APP_PRIVATE_KEY_SECRET_ARN) {
+    throw new Error('GITHUB_APP_PRIVATE_KEY_SECRET_ARN not configured');
+  }
+  const { token, expiresAt } = await mintInstallationToken(repo, GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY_SECRET_ARN);
+  await postGithubCommentWithToken(repo, issueNumber, body, token);
   return { token, expiresAt };
+}
+
+// Detect a real PR URL for THIS repo in the agent's own final text — the
+// strongest signal, since the agent is instructed (agent-webhook-invoke-agent's
+// <github_access> block) to report the confirmed `gh pr list` URL. Anchored to
+// the repo so a PR URL for some other project mentioned in passing doesn't
+// count.
+function extractPrUrl(text: string, repo: string): string | null {
+  const escapedRepo = repo.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = text.match(new RegExp(`https://github\\.com/${escapedRepo}/pull/\\d+`));
+  return match ? match[0] : null;
+}
+
+// Fallback ground-truth check (issue #166, direction 4): the agent's final
+// text may have been cut off before it ever mentioned a PR URL (the #165
+// failure mode — a leaked mid-thought fragment), so also ask GitHub directly
+// whether a PR for this task already exists. Two cases count as "a PR
+// exists":
+//   1. The webhook target itself is already a PR (the `agentcore` label can
+//      be applied directly to a PR, per agent-webhook-receiver's
+//      `pull_request` labeled-event path) — the agent was asked to keep
+//      pushing to it, not open a new one.
+//   2. Some other open PR in the repo references this issue/PR number in its
+//      title or body (the normal case — a fresh PR closing the issue).
+// Best-effort: a listing hiccup must not block the normal comment from
+// posting, so callers treat a thrown error the same as "found nothing" — a
+// false positive here just means the run skips posting the clearer message.
+async function hasOpenPrReferencingIssue(repo: string, issueNumber: number, token: string): Promise<boolean> {
+  const targetRes = await fetch(`https://api.github.com/repos/${repo}/pulls/${issueNumber}`, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+    },
+  });
+  if (targetRes.ok) {
+    const target = await targetRes.json() as { state: string };
+    if (target.state === 'open') return true;
+  } else if (targetRes.status !== 404) {
+    throw new Error(`GitHub get pull #${issueNumber} failed (HTTP ${targetRes.status}): ${await targetRes.text()}`);
+  }
+
+  const res = await fetch(`https://api.github.com/repos/${repo}/pulls?state=open&per_page=100`, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+    },
+  });
+  if (!res.ok) {
+    throw new Error(`GitHub list pulls failed (HTTP ${res.status}): ${await res.text()}`);
+  }
+  const pulls = await res.json() as Array<{ title: string; body: string | null }>;
+  const ref = new RegExp(`#${issueNumber}\\b`);
+  return pulls.some((pr) => ref.test(pr.title) || (pr.body ? ref.test(pr.body) : false));
 }
 
 // Add/remove a GitHub label using an already-minted installation token.
@@ -264,13 +322,41 @@ export const handler = async (input: PostCommentInput): Promise<PostCommentOutpu
   // gpt-oss-120b harness can emit into the plain-text block (issue #105) before
   // posting. Applied to both the success text and the failure cause so neither
   // path posts raw model markup. sanitizeHarmony is a no-op on clean text.
-  const responseText = sanitizeHarmony(
+  let responseText = sanitizeHarmony(
     failureText
       ?? (lastBlockText?.trim() || '_The agent finished but produced no text response (it may have ended on a tool action). See the CloudWatch logs linked above._'),
   );
   if (input.source === 'github') {
     if (!input.repo || input.issueNumber === undefined) throw new Error('repo/issueNumber required for github source');
-    const { token } = await postGithubComment(input.repo, input.issueNumber, responseText);
+    if (!GITHUB_APP_PRIVATE_KEY_SECRET_ARN) throw new Error('GITHUB_APP_PRIVATE_KEY_SECRET_ARN not configured');
+    const { token } = await mintInstallationToken(input.repo, GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY_SECRET_ARN);
+
+    // Issue #166, direction 4: every GitHub run is told (agent-webhook-invoke-agent's
+    // <github_access> block) to push a branch and open a PR, so a SUCCEEDED run
+    // that did neither is the "ran out of turn" failure mode — the agent's final
+    // text is often a cut-off chain-of-thought fragment rather than a clear
+    // status, which is confusing on the issue thread. Detect it and replace the
+    // raw text with an unambiguous message. Skipped on the failure path
+    // (isError) — that already gets a distinct, purpose-built message above.
+    if (!input.isError) {
+      const prUrlInText = extractPrUrl(responseText, input.repo);
+      if (!prUrlInText) {
+        try {
+          const prExists = await hasOpenPrReferencingIssue(input.repo, input.issueNumber, token);
+          if (!prExists) {
+            responseText = sanitizeHarmony(
+              'The run ended before pushing a branch (likely hit the per-turn ceiling after editing part of the task); '
+              + 'no PR was created — re-dispatch with a smaller scope.',
+            );
+          }
+        } catch (err) {
+          // Best-effort — a listing hiccup must not block the original comment.
+          console.warn(`Could not check for an existing PR referencing #${input.issueNumber}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+    }
+
+    await postGithubCommentWithToken(input.repo, input.issueNumber, responseText, token);
 
     // Clear agent-working now that the run is done, and flag agent-error if this
     // final stage was reached via the failure Catch. Applied to both label- and
