@@ -92,3 +92,33 @@ export function persistClaudeStreamEvent(client, { memoryId, sessionId, event, l
   }
   return Promise.resolve();
 }
+
+/**
+ * Build the Converse ContentBlock[] for a terminal "awaiting input" marker
+ * turn (issue #185, increment 2). Kept separate from the CreateEvent call so
+ * it's testable without an AWS client — see detect-awaiting-input.test.mjs's
+ * counterpart for this file.
+ */
+export function buildAwaitingInputMarkerBlocks(question) {
+  const text = question
+    ? `[awaiting_input] Run ended waiting for user input: ${question}`
+    : '[awaiting_input] Run ended waiting for user input.';
+  return [{ text }];
+}
+
+/**
+ * Persist a terminal "awaiting_input" marker turn, so a future re-trigger
+ * increment can read back that the conversation stopped mid-question (and
+ * what the question was) rather than completing normally. Reuses the same
+ * CreateEvent path as every other memory write in this file — no new
+ * persistence mechanism — and is equally best-effort (logged and swallowed).
+ */
+export function persistAwaitingInputMarker(client, { memoryId, sessionId, question, log }) {
+  return createEvent(client, {
+    memoryId,
+    sessionId,
+    role: 'ASSISTANT',
+    blocks: buildAwaitingInputMarkerBlocks(question),
+    log,
+  });
+}
