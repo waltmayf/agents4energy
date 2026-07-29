@@ -159,6 +159,15 @@ The control plane sends this cancel payload via `InvokeAgentRuntime` with `runti
 
 **Why the receiver doesn't also call `StopExecution` on a cancelled claude run.** `SendTaskFailure` above happens asynchronously, after the killed CLI process actually exits — not synchronously inside the cancel request/response. If the control plane called `StopExecution` on the prior execution as well, it could win the race and abort the execution before the runtime's `SendTaskFailure` reaches it, which would silently drop the "superseded" `PostFailureComment` note. So the receiver treats a runtime cancel that's been *accepted* as fully handling that execution's lifecycle, and only falls back to `StopExecution` if the runtime never got the message at all (session already reclaimed, runtime not deployed, etc.).
 
+## Detecting an ask-for-input final message (issue #185, increment 1)
+
+[`detect-awaiting-input.js`](../agent/default/app/ClaudeCode/detect-awaiting-input.js) exports a pure `detectAwaitingInput(resultText)` helper that inspects the CLI's final `result` text (the same string `runClaudeCode` resolves as the run's return value) and returns `{ awaiting: boolean, question?: string }`. The signal it keys on: `stream-json` has no distinct "asking for input" event — an ask-for-input turn is just a normal `assistant` text block — so the only concrete, always-present post-hoc signal is the final message's own text ending in a question mark; the extracted `question` is that text's last non-empty line (covering the common "here are the options... which one?" shape). It's a heuristic that errs toward false negatives (a missed ask just behaves as a normal completion, as today).
+
+This increment is **detection only** — `detectAwaitingInput` is not called from `runManagedJob`/`runClaudeCode`, so behavior is unchanged. Deferred to follow-up PRs (see issue #185):
+- Persisting a terminal `awaiting_input` marker turn to AgentCore Memory (via `memory.js`) alongside the question/options, so a later re-trigger can resume with context.
+- Exiting the callback-path job via `SendTaskSuccess` with a distinct `status: 'awaiting_input'` payload (instead of the current success/failure binary), so the SFN `PostFailureComment` step doesn't treat it as an error.
+- A UI affordance for picking an option, which re-triggers the runtime with the user's answer.
+
 ## The invoke path (GitHub issue → Claude Code)
 
 `@agentcore-claude` shares the webhook → Step Function pipeline with the harness; only the agent-selection branch differs.
