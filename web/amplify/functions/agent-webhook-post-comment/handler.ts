@@ -21,7 +21,10 @@ const ERROR_LABEL = 'agent-error';
 interface PostCommentInput {
   runId: string;
   source: 'github' | 'jira';
-  stage: 'initial' | 'final';
+  // 'awaiting_input' (issue #185, increment 3): the Claude Code runtime ended
+  // its run asking the user a question rather than finishing the work. Posts
+  // a distinct "paused" comment and does NOT touch the agent-error label.
+  stage: 'initial' | 'final' | 'awaiting_input';
   // github
   repo?: string;
   issueNumber?: number;
@@ -32,6 +35,8 @@ interface PostCommentInput {
   // result's Message.Content array (which may be empty).
   responseText?: string;
   responseContent?: Array<{ Text?: string }>;
+  // awaiting_input stage only — the question extracted by detectAwaitingInput.
+  awaitingQuestion?: string;
   // 'label' when the run was started by the `agentcore` label, 'comment' for an
   // @-mention comment. Both GitHub triggers get the agent-working/agent-error
   // label bookkeeping below (issue #77); Jira runs (no repo/issueNumber) skip it.
@@ -215,6 +220,29 @@ export const handler = async (input: PostCommentInput): Promise<PostCommentOutpu
     // aws-samples/sample-edge-to-cloud-digital-ops-workshop), which previously
     // failed the whole execution. Consumers already treat '' as "no prompt".
     return { logGroupName: groupName, logStreamName: streamName, githubToken, githubTokenExpiresAt, agentsSystemPrompt: agentsSystemPrompt ?? '' };
+  }
+
+  if (input.stage === 'awaiting_input') {
+    const body = sanitizeHarmony(
+      `⏸️ Paused — waiting for your input: ${input.awaitingQuestion || '(no question text captured)'}`,
+    );
+    if (input.source === 'github') {
+      if (!input.repo || input.issueNumber === undefined) throw new Error('repo/issueNumber required for github source');
+      const { token } = await postGithubComment(input.repo, input.issueNumber, body);
+      // Clear agent-working like a normal completion, but never add agent-error —
+      // this is a pause, not a failure. Best-effort, matching the final stage.
+      if (input.trigger === 'label' || input.trigger === 'comment') {
+        try {
+          await removeLabel(input.repo, input.issueNumber, token, WORKING_LABEL);
+        } catch (err) {
+          console.warn(`Could not remove ${WORKING_LABEL} label: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+    } else {
+      if (!input.issueKey) throw new Error('issueKey required for jira source');
+      await postJiraComment(input.issueKey, body);
+    }
+    return {};
   }
 
   // Final stage — post the agent's response as a follow-up comment.

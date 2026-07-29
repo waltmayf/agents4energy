@@ -225,11 +225,12 @@ app.post('/invocations', async (req, res) => {
           }));
           return;
         }
-        // Detect an ask-for-input final message (issue #185, increment 2).
-        // Observe-only for now: we still always SendTaskSuccess with the same
-        // payload shape below — a distinct SFN status is a later increment.
+        // Detect an ask-for-input final message (issue #185, increment 2/3).
         // When detected, persist a marker turn to Memory so a future
-        // re-trigger increment can read back that the run stopped mid-question.
+        // re-trigger increment can read back that the run stopped mid-question,
+        // and (increment 3) tag the SendTaskSuccess output with a distinct
+        // `agentStatus` so the state machine can branch to a dedicated
+        // "awaiting input" comment instead of the normal final comment.
         const { awaiting, question } = detectAwaitingInput(finalText);
         if (awaiting) {
           log(`awaiting_input detected: ${question}`);
@@ -240,11 +241,17 @@ app.post('/invocations', async (req, res) => {
           }
         }
         log(`[callback] job finished (${finalText.length} chars); sending SendTaskSuccess`);
+        // Output.Message.Content stays byte-for-byte identical to the pre-#185
+        // shape (the native invokeHarness task produces the same shape) so
+        // PostFinalComment is unaffected. `agentStatus`/`awaitingQuestion` are
+        // additive top-level fields the SFN Choice below branches on; they are
+        // only ever present when awaiting === true.
         await sfn.send(new SendTaskSuccessCommand({
           taskToken,
-          // Match the synchronous $.agentResult shape the native invokeHarness
-          // task produces so the shared PostFinalComment step reads both alike.
-          output: JSON.stringify({ Output: { Message: { Role: 'assistant', Content: [{ Text: finalText }] } } }),
+          output: JSON.stringify({
+            Output: { Message: { Role: 'assistant', Content: [{ Text: finalText }] } },
+            ...(awaiting ? { agentStatus: 'awaiting_input', awaitingQuestion: question } : {}),
+          }),
         }));
       },
       async (err) => {
