@@ -162,6 +162,21 @@ RUN_WEBHOOK_E2E=1 pnpm test:e2e e2e/webhook-stepfunction.spec.ts
 - The prompt is deliberately read-only (asks the agent to report, not to open a PR), so the test is idempotent. It uses the `comment` trigger, so it also exercises the comment-run label bookkeeping ([#77](https://github.com/waltmayf/agents4energy/issues/77)).
 - No browser/auth is needed — it talks to Step Functions via the AWS SDK, so only AWS credentials with `states:StartExecution`/`states:DescribeExecution` are required.
 
+## Webhook chat-session live view (issue #64)
+
+[`web/e2e/webhook-chat-session-live-view.spec.ts`](../web/e2e/webhook-chat-session-live-view.spec.ts) verifies the browser side of the "watch it work" flow described in [`docs/webhook-stepfunction-integration.md`](./webhook-stepfunction-integration.md#cloudwatch-logs-live-tail-link): a webhook run's initial comment links to `/chat?sessionId=<runId>`, and that page must render turns written to the session by something other than the viewing tab — without a reload.
+
+Actually triggering a webhook run and asserting on it end-to-end would spend real Bedrock time and post real GitHub comments (that's what `webhook-stepfunction.spec.ts` above already covers, for the *pipeline* side). This test instead isolates the *browser* side: it opens `/chat?sessionId=<a fresh uuid>` — the exact state right after a webhook's initial comment is posted, before the agent has produced anything — then writes directly to AgentCore Memory under that same session id via `CreateEventCommand`, the same call `agent/default/app/ClaudeCode/memory.js` makes for its own turns (and what the managed harness does implicitly on every turn). It asserts the write shows up in the open tab via `use-session-message-polling.ts`, with no navigation.
+
+```bash
+cd web
+pnpm test:e2e e2e/webhook-chat-session-live-view.spec.ts
+```
+
+- Needs an AgentCore memory id to write to: reads `custom.agentcore_memory_id` from `web/amplify_outputs.json` if present (a local `pnpm deploy` writes this), else falls back to the `AGENTCORE_MEMORY_ID` env var. Skipped cleanly if neither is set.
+- Needs `bedrock-agentcore:CreateEvent` on the memory ARN — the same action already granted to the ClaudeCode runtime's role in `backend.ts`.
+- Runs in the normal (non-opt-in) suite; it's cheap — one `CreateEventCommand` call each for a user and an assistant turn, no model invocation.
+
 ## PR checks gate
 
 Every pull request runs a fast, credential-free gate (`.github/workflows/checks.yml`, issue #135) that blocks merge when the code doesn't type-check or the unit tests fail:
