@@ -38,7 +38,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SFNClient, SendTaskSuccessCommand, SendTaskFailureCommand } from '@aws-sdk/client-sfn';
 import { BedrockAgentCoreClient } from '@aws-sdk/client-bedrock-agentcore';
-import { persistClaudeStreamEvent, persistUserPrompt } from './memory.js';
+import { persistClaudeStreamEvent, persistUserPrompt, persistAwaitingInputMarker } from './memory.js';
+import { detectAwaitingInput } from './detect-awaiting-input.js';
 import { startBrowserMcp } from './browser-mcp.js';
 
 const PORT = 8080;
@@ -223,6 +224,20 @@ app.post('/invocations', async (req, res) => {
             taskToken, error: 'ClaudeCodeRuntimeCancelled', cause: SUPERSEDED_CAUSE,
           }));
           return;
+        }
+        // Detect an ask-for-input final message (issue #185, increment 2).
+        // Observe-only for now: we still always SendTaskSuccess with the same
+        // payload shape below — a distinct SFN status is a later increment.
+        // When detected, persist a marker turn to Memory so a future
+        // re-trigger increment can read back that the run stopped mid-question.
+        const { awaiting, question } = detectAwaitingInput(finalText);
+        if (awaiting) {
+          log(`awaiting_input detected: ${question}`);
+          if (memoryClient) {
+            await persistAwaitingInputMarker(memoryClient, {
+              memoryId: MEMORY_ID, sessionId: memorySessionId, question, log,
+            });
+          }
         }
         log(`[callback] job finished (${finalText.length} chars); sending SendTaskSuccess`);
         await sfn.send(new SendTaskSuccessCommand({
