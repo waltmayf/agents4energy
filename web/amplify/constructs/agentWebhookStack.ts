@@ -326,8 +326,18 @@ export class AgentWebhookStack extends Construct {
     // same PostFinalComment as the harness branch) or a run that ended asking
     // the user a question (`agentStatus: 'awaiting_input'`, routed to the
     // dedicated PostAwaitingInputComment so it isn't reported as "done").
+    // Guard with isPresent: a normal completion omits `agentStatus` entirely,
+    // and Choice evaluation THROWS on a stringEquals against a missing path
+    // rather than treating it as false — so the `isPresent` conjunct must come
+    // first to short-circuit before the comparison is attempted.
     const routeAwaitingInput = new sfn.Choice(this, 'RouteAwaitingInput')
-      .when(sfn.Condition.stringEquals('$.agentResult.agentStatus', 'awaiting_input'), postAwaitingInputComment)
+      .when(
+        sfn.Condition.and(
+          sfn.Condition.isPresent('$.agentResult.agentStatus'),
+          sfn.Condition.stringEquals('$.agentResult.agentStatus', 'awaiting_input'),
+        ),
+        postAwaitingInputComment,
+      )
       .otherwise(postFinal);
     invokeClaude.next(routeAwaitingInput);
 
