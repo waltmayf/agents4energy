@@ -87,3 +87,37 @@ jobs:
           JIRA_BASE_URL: ${{ vars.AGENT_JIRA_BASE_URL }}
           JIRA_API_EMAIL: ${{ vars.AGENT_JIRA_API_EMAIL }}
         run: ./scripts/build.sh
+
+      - name: Install Playwright browsers
+        if: ${{ !env.ACT }}
+        run: cd web && npx playwright install --with-deps chromium
+
+      # Runs the full suite against the just-deployed CloudFront URL — no local
+      # build/dev-server needed. `pnpm fetch:e2e-config` (root script) reads the
+      # e2e config scripts/build.sh just published to SSM at
+      # /outputs/<repo>/<branch>/e2e-config and writes web/e2e-config.json;
+      # playwright.config.ts picks baseURL up from there (remoteConfig?.appUrl).
+      # A failed chat test (including the AG-UI stream assertions, #3) fails
+      # this job and therefore the whole workflow.
+      #
+      # TEST_USER_EMAIL/TEST_USER_PASSWORD are NOT used here: web/e2e/auth.setup.ts
+      # signs in with credentials it reads directly from SSM (paths included in
+      # e2e-config.json), provisioned by the E2eTestUser CDK custom resource —
+      # see web/amplify/constructs/e2eTestUser/. That superseded the older
+      # env-var-based test user. Skip local pnpm/dev credentials entirely.
+      - name: Run Playwright E2E suite against deployed URL
+        if: ${{ !env.ACT }}
+        env:
+          DEPLOY_BRANCH: ${{ github.ref_name }}
+          CI: true
+        run: |
+          pnpm fetch:e2e-config
+          cd web && pnpm test:e2e --project=chromium
+
+      - name: Upload Playwright report
+        if: ${{ !env.ACT && failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: web/playwright-report/
+          retention-days: 14
