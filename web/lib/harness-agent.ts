@@ -39,7 +39,7 @@ const ACTOR_ID = 'default';
 // credentials, and loads session history for connect().
 const dataClient = generateClient<Schema>({ authMode: 'userPool' });
 
-function makeClient(): BedrockAgentCoreClient {
+export function makeClient(): BedrockAgentCoreClient {
   return new BedrockAgentCoreClient({
     region: DEPLOYMENT_REGION,
     credentials: async () => {
@@ -114,7 +114,7 @@ async function buildTools(mcpServers: McpServerConfig[]): Promise<HarnessTool[] 
 }
 
 /** Extract the plain text of an AG-UI message (user turns are simple text). */
-function messageText(m: Message): string {
+export function messageText(m: Message): string {
   if (typeof m.content === 'string') return m.content;
   if (Array.isArray(m.content)) {
     return m.content

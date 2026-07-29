@@ -394,6 +394,26 @@ if (AGENTCORE_HARNESS_ARN) {
   });
 }
 
+// Grant the same authenticated role permission to invoke the ClaudeCode
+// runtime directly (issue #204) — lets the chat UI drive it the same way the
+// GitHub @agentcore-claude webhook does (see agentWebhookInvokeClaude above).
+// Same resource shape as that Lambda's grant: InvokeAgentRuntime authorizes
+// against the runtime's ENDPOINT sub-resource, not just the bare runtime ARN.
+if (AGENTCORE_CLAUDE_CODE_RUNTIME_ARN) {
+  new Policy(agentStack, 'ClaudeCodeRuntimeInvokeAuthPolicy', {
+    roles: [backend.auth.resources.authenticatedUserIamRole],
+    statements: [
+      new PolicyStatement({
+        actions: ['bedrock-agentcore:InvokeAgentRuntime'],
+        resources: [
+          AGENTCORE_CLAUDE_CODE_RUNTIME_ARN,
+          `${AGENTCORE_CLAUDE_CODE_RUNTIME_ARN}/runtime-endpoint/*`,
+        ],
+      }),
+    ],
+  });
+}
+
 // ============================================================================
 // BASIC AUTH CONFIGURATION
 // ============================================================================

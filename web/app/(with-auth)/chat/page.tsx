@@ -1,6 +1,7 @@
 'use client';
 import { CopilotKitProvider, CopilotChat } from '@copilotkit/react-core/v2';
 import { HarnessAgent, type HarnessAgentConfig } from '@/lib/harness-agent';
+import { ClaudeCodeAgent, CLAUDE_CODE_AGENT_ID } from '@/lib/claude-code-agent';
 import { useChatSession } from './use-chat-session';
 import { useSessionMessagePolling } from './use-session-message-polling';
 import { useAgents } from './use-agents';
@@ -167,6 +168,7 @@ function ChatView({
   onAgentChange: (id: string | null) => void;
 }) {
   const [toolsDialogOpen, setToolsDialogOpen] = useState(false);
+  const isClaudeCode = agentId === CLAUDE_CODE_AGENT_ID;
 
   // Keep the latest selected agent readable from the agent's config callback
   // without recreating the HarnessAgent (which would drop the connection).
@@ -186,18 +188,25 @@ function ChatView({
     })),
   };
 
-  // One HarnessAgent per session. threadId === AgentCore session id, so
+  // One agent transport per session. threadId === AgentCore session id, so
   // CopilotChat resumes history via connect() and streams live turns via run().
+  // Both transports write/read the same shared AgentCore Memory, so switching
+  // the picker mid-session still resumes the same transcript.
   const harnessAgent = useMemo(
     () => new HarnessAgent({ threadId: sessionId, getConfig: () => agentConfigRef.current }),
     [sessionId],
   );
+  const claudeCodeAgent = useMemo(
+    () => new ClaudeCodeAgent({ threadId: sessionId }),
+    [sessionId],
+  );
+  const activeAgent = isClaudeCode ? claudeCodeAgent : harnessAgent;
 
-  const agentsMap = useMemo(() => ({ default: harnessAgent }), [harnessAgent]);
+  const agentsMap = useMemo(() => ({ default: activeAgent }), [activeAgent]);
 
   // Poll AgentCore memory so turns written elsewhere (e.g. a webhook run on the
   // same session) render live, without a page reload. See issue #63.
-  useSessionMessagePolling(harnessAgent);
+  useSessionMessagePolling(activeAgent);
 
   return (
     <CopilotKitProvider selfManagedAgents={agentsMap}>
@@ -219,24 +228,25 @@ function ChatView({
         </div>
 
         <div className="flex items-center justify-end gap-1 border-t px-3 py-2">
-          {agents.length > 0 && (
-            <Select
-              value={agentId ?? '__default__'}
-              onValueChange={(val) => onAgentChange(val === '__default__' ? null : val)}
-            >
-              <SelectTrigger className="h-8 w-auto min-w-40">
-                <SelectValue>{selectedAgent?.name ?? 'Default agent'}</SelectValue>
-              </SelectTrigger>
-              <SelectContent align="end">
-                <SelectItem value="__default__">Default agent</SelectItem>
-                {agents.map((a) => (
-                  <SelectItem key={a.id} value={a.id}>
-                    {a.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          )}
+          <Select
+            value={agentId ?? '__default__'}
+            onValueChange={(val) => onAgentChange(val === '__default__' ? null : val)}
+          >
+            <SelectTrigger className="h-8 w-auto min-w-40">
+              <SelectValue>
+                {isClaudeCode ? 'Claude Code' : selectedAgent?.name ?? 'Default agent'}
+              </SelectValue>
+            </SelectTrigger>
+            <SelectContent align="end">
+              <SelectItem value="__default__">Default agent</SelectItem>
+              {agents.map((a) => (
+                <SelectItem key={a.id} value={a.id}>
+                  {a.name}
+                </SelectItem>
+              ))}
+              <SelectItem value={CLAUDE_CODE_AGENT_ID}>Claude Code</SelectItem>
+            </SelectContent>
+          </Select>
           {selectedAgent && (
             <>
               <Button

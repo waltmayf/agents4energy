@@ -1,6 +1,10 @@
 'use client';
 import { useEffect } from 'react';
-import type { HarnessAgent } from '@/lib/harness-agent';
+
+/** Either agent transport exposes the same poll-friendly refreshHistory() contract. */
+interface PollableAgent {
+  refreshHistory(): Promise<number>;
+}
 
 /**
  * Polls AgentCore memory so the chat renders messages as they arrive, not just
@@ -25,7 +29,7 @@ import type { HarnessAgent } from '@/lib/harness-agent';
  *    grows the transcript, so polling can never clobber optimistic messages.
  */
 export function useSessionMessagePolling(
-  agent: HarnessAgent | null,
+  agent: PollableAgent | null,
   activeIntervalMs = 3000,
   idleIntervalMs = 15000,
   idleThreshold = 5,
