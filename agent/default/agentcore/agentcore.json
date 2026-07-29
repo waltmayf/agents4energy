@@ -38,6 +38,22 @@
           }
         }
       ]
+    },
+    {
+      "name": "AguiAgent",
+      "description": "AG-UI-native AgentCore Runtime (issue #176) — emits AG-UI events directly (no Bedrock Converse translation) and persists turns to MyHarnessMemory.",
+      "build": "Container",
+      "codeLocation": "app/AguiAgent",
+      "dockerfile": "Dockerfile",
+      "entrypoint": "server.ts",
+      "protocol": "AGUI",
+      "networkMode": "PUBLIC",
+      "envVars": [
+        {
+          "name": "BEDROCK_MODEL_ID",
+          "value": "us.anthropic.claude-sonnet-5"
+        }
+      ]
     }
   ],
   "memories": [
