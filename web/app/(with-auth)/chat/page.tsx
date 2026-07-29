@@ -26,6 +26,7 @@ import { WrenchIcon, Loader2Icon } from 'lucide-react';
 import { listMcpToolsForServer } from '@/lib/list-mcp-tools';
 import { ToolCallRenderer } from './tool-call-renderer';
 import { UserMessageMarkdown } from './user-message-renderer';
+import { AwaitingInputBanner } from './awaiting-input-banner';
 
 type McpTool = {
   name: string;
@@ -214,6 +215,7 @@ function ChatView({
           renders as a collapsible card instead of an empty bubble. Side-effect only. */}
       <ToolCallRenderer />
       <div className="flex flex-col h-full min-h-0">
+        <AwaitingInputBanner agent={activeAgent} />
         <div className="flex-1 min-h-0">
           <CopilotChat
             agentId="default"
