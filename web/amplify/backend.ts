@@ -331,6 +331,17 @@ const AGENTCORE_CLAUDE_CODE_RUNTIME_ARN = claudeCodeRuntimeName
   ? agentCoreApp.runtimeArn(claudeCodeRuntimeName)
   : '';
 
+// AguiAgent AgentCore Runtime — the AG-UI-native runtime (issue #176) that
+// emits AG-UI events directly instead of Bedrock Converse (see
+// agent/default/app/AguiAgent). Additive alongside ClaudeCode/MyHarness;
+// '' when not configured on this branch.
+const aguiRuntimeName = (projectSpec.runtimes ?? []).find(
+  (r: { name: string }) => r.name === 'AguiAgent',
+)?.name;
+const AGENTCORE_AGUI_RUNTIME_ARN = aguiRuntimeName
+  ? agentCoreApp.runtimeArn(aguiRuntimeName)
+  : '';
+
 // MyHarness now authorizes with AWS_IAM, so the browser signs InvokeHarness
 // requests with Cognito Identity Pool credentials (see web/lib/agentcore-transport.ts).
 
@@ -365,6 +376,7 @@ putAgentcoreParam('SsmAgentcoreHarnessArn', 'harness_arn', AGENTCORE_HARNESS_ARN
 putAgentcoreParam('SsmAgentcoreHarnessRoleArn', 'harness_role_arn', AGENTCORE_HARNESS_ROLE_ARN);
 putAgentcoreParam('SsmAgentcoreRegion', 'region', AGENTCORE_REGION);
 putAgentcoreParam('SsmAgentcoreClaudeCodeRuntimeArn', 'claude_code_runtime_arn', AGENTCORE_CLAUDE_CODE_RUNTIME_ARN);
+putAgentcoreParam('SsmAgentcoreAguiRuntimeArn', 'agui_runtime_arn', AGENTCORE_AGUI_RUNTIME_ARN);
 
 // Grant the pool's authenticated role permission to invoke the harness.
 //
@@ -408,6 +420,25 @@ if (AGENTCORE_CLAUDE_CODE_RUNTIME_ARN) {
         resources: [
           AGENTCORE_CLAUDE_CODE_RUNTIME_ARN,
           `${AGENTCORE_CLAUDE_CODE_RUNTIME_ARN}/runtime-endpoint/*`,
+        ],
+      }),
+    ],
+  });
+}
+
+// Grant the same authenticated role permission to invoke the AguiAgent
+// runtime directly (issue #176) — frontend wiring to actually use it is a
+// separate follow-up, but the grant is additive and harmless to land now.
+// Same resource shape as the ClaudeCode grant above.
+if (AGENTCORE_AGUI_RUNTIME_ARN) {
+  new Policy(agentStack, 'AguiRuntimeInvokeAuthPolicy', {
+    roles: [backend.auth.resources.authenticatedUserIamRole],
+    statements: [
+      new PolicyStatement({
+        actions: ['bedrock-agentcore:InvokeAgentRuntime'],
+        resources: [
+          AGENTCORE_AGUI_RUNTIME_ARN,
+          `${AGENTCORE_AGUI_RUNTIME_ARN}/runtime-endpoint/*`,
         ],
       }),
     ],
@@ -683,6 +714,19 @@ if (claudeCodeRuntimeName && AGENTCORE_MEMORY_ID) {
   agentCoreApp.addRuntimeEnvironmentVariable(claudeCodeRuntimeName, 'AGENTCORE_MEMORY_ID', AGENTCORE_MEMORY_ID);
   agentCoreApp.addRuntimeEnvironmentVariable(claudeCodeRuntimeName, 'AGENTCORE_MEMORY_REGION', AGENTCORE_REGION);
   agentCoreApp.addRuntimeRolePolicy(claudeCodeRuntimeName, new PolicyStatement({
+    actions: ['bedrock-agentcore:CreateEvent'],
+    resources: [AGENTCORE_MEMORY_ARN],
+  }));
+}
+
+// Same wiring for the AguiAgent runtime (issue #176) — it writes its own
+// turns into the same MyHarnessMemory resource (see
+// agent/default/app/AguiAgent/memory.ts) so a run through this runtime shows
+// up in the chat UI's session history alongside harness/ClaudeCode runs.
+if (aguiRuntimeName && AGENTCORE_MEMORY_ID) {
+  agentCoreApp.addRuntimeEnvironmentVariable(aguiRuntimeName, 'AGENTCORE_MEMORY_ID', AGENTCORE_MEMORY_ID);
+  agentCoreApp.addRuntimeEnvironmentVariable(aguiRuntimeName, 'AGENTCORE_MEMORY_REGION', AGENTCORE_REGION);
+  agentCoreApp.addRuntimeRolePolicy(aguiRuntimeName, new PolicyStatement({
     actions: ['bedrock-agentcore:CreateEvent'],
     resources: [AGENTCORE_MEMORY_ARN],
   }));
