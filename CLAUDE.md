@@ -35,6 +35,15 @@ If you discover a bug:
 1. Check the current github issues cover the bug, and if so make sure the issue has sufficient context
 2. If not, create a github issue. Use the github native relationships feature to describe blocking relationships with other issues.
 
+### GitHub Pull Requests
+
+Every PR that resolves an issue **must** include a GitHub auto-closing keyword in its body so the issue closes automatically on merge. Use one of `Closes #<issue>`, `Fixes #<issue>`, or `Resolves #<issue>` (each on its own line). Use `Relates to #<issue>` only for a non-closing reference.
+
+- The closing keyword must be in the PR **body**, not just the title — GitHub only auto-closes from the body/commit messages.
+- One keyword per issue: to close several, list them separately (`Closes #12\nCloses #34`); a comma-joined `Closes #12, #34` closes only the first.
+- The referenced issue must be in the **same repo** as the PR (`waltmayf/agents4energy`); a cross-repo reference won't auto-close.
+- This applies to PRs opened by dispatched agents too — include the closing line in the dispatch instructions, and if a PR arrives without it, add it (`gh pr edit <n> --body ...`) before merging.
+
 ### Docuemntation
 Be sure to keep the documentation in the `./docs` folder fresh. After you make a change, make sure the relevant docs are still correct, and create a new doc if it's something either a developer or user would want to know about.
 
