@@ -22,6 +22,7 @@ export interface McpCredential {
   tokenType: string;
   expiresAt?: string | null;
   refreshToken?: string | null;
+  scope?: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -46,6 +47,7 @@ export async function fetchCredential(mcpServerId: string): Promise<McpCredentia
     tokenType: item.tokenType ?? 'Bearer',
     expiresAt: item.expiresAt ?? null,
     refreshToken: item.refreshToken ?? null,
+    scope: item.scope ?? null,
   };
 }
 
@@ -192,6 +194,7 @@ interface TokenResponse {
   token_type?: string;
   expires_in?: number;
   refresh_token?: string;
+  scope?: string;
 }
 
 async function exchangeCode(
@@ -282,6 +285,7 @@ export async function authenticateViaPkce(opts: {
     tokenType: tokens.token_type ?? 'Bearer',
     expiresAt: expiresAt ?? null,
     refreshToken: tokens.refresh_token ?? null,
+    scope: tokens.scope ?? null,
   });
 
   if (!created.data) {
@@ -295,5 +299,6 @@ export async function authenticateViaPkce(opts: {
     tokenType: tokens.token_type ?? 'Bearer',
     expiresAt: expiresAt ?? null,
     refreshToken: tokens.refresh_token ?? null,
+    scope: tokens.scope ?? null,
   };
 }

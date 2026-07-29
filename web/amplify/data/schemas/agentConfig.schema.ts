@@ -84,6 +84,8 @@ export const agentConfigSchema = a.schema({
     expiresAt: a.string(),
     // Refresh token for silent renewal (if the authorization server issued one).
     refreshToken: a.string(),
+    // Space-delimited scopes actually granted, as returned by the token endpoint.
+    scope: a.string(),
   }).authorization((allow) => [
     allow.owner(),
   ]),
