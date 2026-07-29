@@ -232,6 +232,18 @@ export class HarnessAgent extends AbstractAgent {
   }
 
   /**
+   * Stop button wiring: AbstractAgent.abortRun() is a no-op by default, so
+   * CopilotChat's built-in Stop button (rendered whenever isRunning is true)
+   * would otherwise do nothing. detachActiveRun() unsubscribes the active
+   * run's Observable, which runs run()'s teardown below (abort.abort()) and
+   * completes the run — no RUN_ERROR, so the partial assistant message is
+   * left in place rather than rendered as a failure.
+   */
+  abortRun(): void {
+    void this.detachActiveRun();
+  }
+
+  /**
    * Poll-friendly history refresh. Loads the session's persisted history and,
    * when it contains more messages than are currently shown, replaces the
    * transcript via setMessages — which fires onMessagesChanged on CopilotChat's

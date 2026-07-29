@@ -122,6 +122,11 @@ export class ClaudeCodeAgent extends AbstractAgent {
     });
   }
 
+  /** Stop button wiring — see HarnessAgent.abortRun() for details. */
+  abortRun(): void {
+    void this.detachActiveRun();
+  }
+
   /** Same poll-friendly history refresh as HarnessAgent — see harness-agent.ts for details. */
   async refreshHistory(): Promise<number> {
     if (this.isRunning) return this.messages.length;
