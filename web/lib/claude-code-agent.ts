@@ -11,6 +11,7 @@ import { Observable, type Subscriber } from 'rxjs';
 
 import outputs from '../amplify_outputs.json';
 import { makeClient, messageText, loadHistory } from './harness-agent';
+import { parseInvokeResponseText } from './claude-code-invoke-response';
 
 const custom = (outputs as { custom?: { agentcore_claude_code_runtime_arn?: string } }).custom;
 export const CLAUDE_CODE_RUNTIME_ARN = custom?.agentcore_claude_code_runtime_arn as string | undefined;
@@ -91,13 +92,7 @@ export class ClaudeCodeAgent extends AbstractAgent {
             throw new Error(`ClaudeCode runtime returned HTTP ${response.statusCode}: ${raw.slice(0, 2000)}`);
           }
 
-          let text = raw;
-          try {
-            const parsed = JSON.parse(raw) as { result?: string; error?: string };
-            text = parsed.result ?? parsed.error ?? raw;
-          } catch {
-            // Non-JSON body (shouldn't happen) — fall back to the raw text.
-          }
+          const text = parseInvokeResponseText(raw);
 
           const messageId = crypto.randomUUID();
           subscriber.next({ type: EventType.TEXT_MESSAGE_START, messageId, role: 'assistant' } as BaseEvent);
