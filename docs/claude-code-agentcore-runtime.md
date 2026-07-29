@@ -163,12 +163,19 @@ The control plane sends this cancel payload via `InvokeAgentRuntime` with `runti
 
 [`detect-awaiting-input.js`](../agent/default/app/ClaudeCode/detect-awaiting-input.js) exports a pure `detectAwaitingInput(resultText)` helper that inspects the CLI's final `result` text (the same string `runClaudeCode` resolves as the run's return value) and returns `{ awaiting: boolean, question?: string }`. The signal it keys on: `stream-json` has no distinct "asking for input" event — an ask-for-input turn is just a normal `assistant` text block — so the only concrete, always-present post-hoc signal is the final message's own text ending in a question mark; the extracted `question` is that text's last non-empty line (covering the common "here are the options... which one?" shape). It's a heuristic that errs toward false negatives (a missed ask just behaves as a normal completion, as today).
 
-**Wired into the callback path (increment 2):** in `server.js`'s callback (`taskToken`) branch, once `runManagedJob` resolves with the run's final text, `detectAwaitingInput(finalText)` runs before the `SendTaskSuccess` call. This is **observe-only** — the SFN task still resumes exactly as before, with the same `SendTaskSuccess` payload shape, regardless of the detection result. When `awaiting` is `true`:
+**Wired into the callback path (increment 2):** in `server.js`'s callback (`taskToken`) branch, once `runManagedJob` resolves with the run's final text, `detectAwaitingInput(finalText)` runs before the `SendTaskSuccess` call. When `awaiting` is `true`:
 - a `awaiting_input detected: <question>` line is logged, and
 - `memory.js`'s `persistAwaitingInputMarker` writes a terminal ASSISTANT marker turn (`[awaiting_input] Run ended waiting for user input: <question>`) via the same `CreateEvent` path every other memory write in this file uses — no second persistence mechanism. Best-effort like the rest of `memory.js`: a failure is logged and swallowed, never thrown into the run path.
 
-Deferred to follow-up PRs (see issue #185):
-- Exiting the callback-path job via `SendTaskSuccess` with a distinct `status: 'awaiting_input'` payload (instead of the current success/failure binary), so the SFN `PostFailureComment` step doesn't treat it as an error, and so a re-trigger can distinguish "paused for input" from "done."
+**Branching the SFN outcome (increment 3):** the `SendTaskSuccess` call's `output` gets two additive top-level fields when `awaiting` is `true` — `agentStatus: 'awaiting_input'` and `awaitingQuestion: <question>` — alongside the unchanged `Output.Message.Content` block. A non-awaiting run sends the exact same payload as before (no new fields), so [`agentWebhookStack.ts`](../web/amplify/constructs/agentWebhookStack.ts)'s existing `PostFinalComment` path is unaffected.
+
+That state machine reads the new field with a `RouteAwaitingInput` Choice inserted right after the `InvokeClaude` task (the native harness branch has no such distinction and always goes straight to `PostFinalComment`):
+- `$.agentResult.agentStatus == 'awaiting_input'` → a new `PostAwaitingInputComment` `LambdaInvoke` (reusing `postCommentLambda` with `stage: 'awaiting_input'` and the question), which posts `⏸️ Paused — waiting for your input: <question>` and clears the `agent-working` label **without** adding `agent-error` — this is a pause, not a failure.
+- otherwise → the existing `PostFinalComment`, unchanged.
+
+[`agent-webhook-post-comment/handler.ts`](../web/amplify/functions/agent-webhook-post-comment/handler.ts) handles the new `stage: 'awaiting_input'` alongside `'initial'`/`'final'`.
+
+Deferred to a follow-up PR (see issue #185):
 - A UI affordance for picking an option, which reads the marker back out of Memory and re-triggers the runtime with the user's answer.
 
 ## The invoke path (GitHub issue → Claude Code)
@@ -208,9 +215,15 @@ Step Function  (agentWebhookStack.ts)
    │      └▶ on finish, runtime calls SendTaskSuccess (or SendTaskFailure)
    │         with $.agentResult.Output.Message.Content[0].Text, resuming ─┐
    │                                                                      │
-   └─ 4. PostFinalComment ◀───────────────────────────────────────────────┘
+   ├─ 4a. RouteAwaitingInput (Choice on $.agentResult.agentStatus,        │
+   │       InvokeClaude branch only) ◀────────────────────────────────────┘
+   │       == "awaiting_input" ─▶ PostAwaitingInputComment (Lambda)
+   │       otherwise            ─▶ PostFinalComment
+   │
+   └─ 4b. PostFinalComment
           posts the reply as a GitHub comment
-          (both agent branches converge here — identical $.agentResult shape)
+          (InvokeHarness always lands here; InvokeClaude lands here unless
+          RouteAwaitingInput sent it to PostAwaitingInputComment instead)
 ```
 
 ### Receiver: routing the mention
@@ -228,6 +241,19 @@ RouteAgent
 ```
 
 The harness uses the **native** optimized Step Functions integration (it decodes the streamed Converse result). The Claude Code runtime has **no** optimized integration — it streams an HTTP body, not a Converse result — so its branch is a Lambda (`InvokeClaude`). Both branches produce the identical `$.agentResult.Output.Message.Content` array, so the shared `PostFinalComment` step reads them the same way, and both route failures to the same `PostFailureComment` catch.
+
+Only the `InvokeClaude` branch can end with `$.agentResult.agentStatus == 'awaiting_input'` (issue #185) — the native harness integration has no such field. So `InvokeClaude.next(...)` goes through one more `Choice`, `RouteAwaitingInput`, before reaching `PostFinalComment`, while `InvokeHarness.next(postFinal)` goes there directly:
+
+```
+InvokeClaude.next(
+  RouteAwaitingInput
+    .when($.agentResult.agentStatus == "awaiting_input", PostAwaitingInputComment)
+    .otherwise(PostFinalComment)
+)
+InvokeHarness.next(PostFinalComment)
+```
+
+`PostAwaitingInputComment` reuses `postCommentLambda` with `stage: 'awaiting_input'` and `awaitingQuestion: $.agentResult.awaitingQuestion`. It is a sibling of `PostFinalComment`, not a replacement — `PostFailureComment` and its `Catch` wiring are untouched.
 
 ### Why the callback pattern — and how it works
 

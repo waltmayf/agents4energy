@@ -271,6 +271,27 @@ export class AgentWebhookStack extends Construct {
       resultPath: '$.finalComment',
     });
 
+    // Reached only via the RouteAwaitingInput Choice below, when the Claude Code
+    // runtime resumed the paused task with `agentStatus: 'awaiting_input'`
+    // (issue #185, increment 3) — the run ended asking the user a question
+    // rather than finishing the work. Posts a distinct "paused" comment instead
+    // of treating it as a normal completion; does NOT add agent-error.
+    const postAwaitingInputComment = new tasks.LambdaInvoke(this, 'PostAwaitingInputComment', {
+      lambdaFunction: props.postCommentLambda,
+      payload: sfn.TaskInput.fromObject({
+        runId: sfn.JsonPath.stringAt('$.runId'),
+        source: sfn.JsonPath.stringAt('$.source'),
+        stage: 'awaiting_input',
+        trigger: sfn.JsonPath.stringAt('$.trigger'),
+        repo: sfn.JsonPath.stringAt('$.repo'),
+        issueNumber: sfn.JsonPath.numberAt('$.issueNumber'),
+        issueKey: sfn.JsonPath.stringAt('$.issueKey'),
+        awaitingQuestion: sfn.JsonPath.stringAt('$.agentResult.awaitingQuestion'),
+      }),
+      payloadResponseOnly: true,
+      resultPath: '$.finalComment',
+    });
+
     const postFailureComment = new tasks.LambdaInvoke(this, 'PostFailureComment', {
       lambdaFunction: props.postCommentLambda,
       payload: sfn.TaskInput.fromObject({
@@ -296,10 +317,19 @@ export class AgentWebhookStack extends Construct {
     invokeHarness.addCatch(postFailureComment, { resultPath: '$.error' });
     invokeClaude.addCatch(postFailureComment, { resultPath: '$.error' });
 
-    // Both agent branches converge on the same PostFinalComment step (they
-    // produce the identical $.agentResult.Output.Message.Content shape).
+    // The native harness has no way to end a turn "awaiting input" (issue #185
+    // is Claude-Code-only), so it always converges on PostFinalComment.
     invokeHarness.next(postFinal);
-    invokeClaude.next(postFinal);
+
+    // The Claude Code branch can resume the paused task two ways (issue #185,
+    // increment 3): a normal completion (no agentStatus field, routed to the
+    // same PostFinalComment as the harness branch) or a run that ended asking
+    // the user a question (`agentStatus: 'awaiting_input'`, routed to the
+    // dedicated PostAwaitingInputComment so it isn't reported as "done").
+    const routeAwaitingInput = new sfn.Choice(this, 'RouteAwaitingInput')
+      .when(sfn.Condition.stringEquals('$.agentResult.agentStatus', 'awaiting_input'), postAwaitingInputComment)
+      .otherwise(postFinal);
+    invokeClaude.next(routeAwaitingInput);
 
     // After git-auth prep, branch on $.agent (set by agent-webhook-receiver from
     // the mention: 'claude' for @agentcore-claude, else 'harness'). Default to the
