@@ -27,6 +27,7 @@ import { listMcpToolsForServer } from '@/lib/list-mcp-tools';
 import { ToolCallRenderer } from './tool-call-renderer';
 import { UserMessageMarkdown } from './user-message-renderer';
 import { AwaitingInputBanner } from './awaiting-input-banner';
+import { ChatComposerInput } from './chat-composer-input';
 
 type McpTool = {
   name: string;
@@ -226,6 +227,7 @@ function ChatView({
             messageView={{
               userMessage: { messageRenderer: UserMessageMarkdown },
             }}
+            input={ChatComposerInput}
           />
         </div>
 
