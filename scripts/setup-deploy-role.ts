@@ -235,6 +235,19 @@ const inlinePolicy = JSON.stringify({
         `arn:aws:ssm:${awsRegion}:${accountId}:parameter/outputs/*`,
       ],
     },
+    {
+      // CDK hotswap (issue #216): a definition-only change to the webhook state
+      // machine is hotswap-eligible, so `ampx sandbox` calls states:UpdateStateMachine
+      // DIRECTLY with this assumed deploy role — bypassing CloudFormation's admin
+      // cfn-exec role. Without this the deploy fails with an AccessDeniedError on
+      // UpdateStateMachine (a change that also adds/removes a resource isn't
+      // hotswappable → full CFN deploy → works, which is why it only bites
+      // definition-only tweaks). Scoped to the per-branch webhook SM name family.
+      Sid: 'SfnHotswap',
+      Effect: 'Allow',
+      Action: ['states:UpdateStateMachine', 'states:DescribeStateMachine', 'states:TagResource'],
+      Resource: `arn:aws:states:${awsRegion}:${accountId}:stateMachine:agent-webhook-*`,
+    },
   ],
 });
 
