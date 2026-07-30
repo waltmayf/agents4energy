@@ -20,7 +20,7 @@ import { Observable, type Subscriber } from 'rxjs';
 
 import outputs from '../amplify_outputs.json';
 import { dedupeStoredEvents, eventsToAguiMessages, type StoredEvent } from './converse-to-agui';
-import { fetchActiveRun } from './active-run';
+import { fetchActiveRun, upsertActiveRun, clearActiveRun } from './active-run';
 import {
   createHarnessStreamState,
   translateHarnessStreamEvent,
@@ -168,6 +168,17 @@ export class HarnessAgent extends AbstractAgent {
       const abort = new AbortController();
       let cancelled = false;
 
+      // Throttled ActiveRun snapshot: lets a late-joining viewer see the
+      // in-flight assistant message before it's persisted to memory. Piggybacks
+      // on the AG-UI events we already emit below, rather than re-parsing the
+      // raw harness stream — messageId matches TEXT_MESSAGE_START's id so the
+      // consumer's dedupe (and the eventual real persist) reconcile cleanly.
+      let activeMessageId: string | null = null;
+      let accumulatedText = '';
+      let activeRunRowId: string | null = null;
+      let lastActiveRunWrite = 0;
+      const ACTIVE_RUN_THROTTLE_MS = 750;
+
       (async () => {
         const runId = input.runId || crypto.randomUUID();
         subscriber.next({ type: EventType.RUN_STARTED, threadId: sessionId, runId } as BaseEvent);
@@ -203,6 +214,23 @@ export class HarnessAgent extends AbstractAgent {
               () => crypto.randomUUID(),
             )) {
               subscriber.next(aguiEvent);
+              if (aguiEvent.type === EventType.TEXT_MESSAGE_START) {
+                const id = (aguiEvent as unknown as { messageId: string }).messageId;
+                if (id !== activeMessageId) {
+                  activeMessageId = id;
+                  accumulatedText = '';
+                }
+              } else if (aguiEvent.type === EventType.TEXT_MESSAGE_CONTENT) {
+                accumulatedText += (aguiEvent as unknown as { delta: string }).delta;
+              }
+            }
+
+            if (activeMessageId && Date.now() - lastActiveRunWrite >= ACTIVE_RUN_THROTTLE_MS) {
+              lastActiveRunWrite = Date.now();
+              activeRunRowId = await upsertActiveRun(
+                { sessionId, messageId: activeMessageId, accumulatedText, status: 'streaming' },
+                activeRunRowId,
+              );
             }
           }
 
@@ -211,9 +239,22 @@ export class HarnessAgent extends AbstractAgent {
               subscriber.next(aguiEvent);
             }
           }
+
+          if (!cancelled && activeMessageId) {
+            await upsertActiveRun(
+              { sessionId, messageId: activeMessageId, accumulatedText, status: 'streaming' },
+              activeRunRowId,
+            );
+          }
+          // The persisted memory version now has the complete message — drop
+          // the snapshot so the consumer's `status === 'streaming'` check stops
+          // matching and the authoritative copy takes over.
+          void clearActiveRun(sessionId).catch(() => {});
+
           subscriber.next({ type: EventType.RUN_FINISHED, threadId: sessionId, runId } as BaseEvent);
           subscriber.complete();
         } catch (err) {
+          void clearActiveRun(sessionId).catch(() => {});
           const name = err instanceof Error ? err.name : undefined;
           if (name === 'AbortError' || cancelled) {
             subscriber.complete();
@@ -228,6 +269,7 @@ export class HarnessAgent extends AbstractAgent {
       return () => {
         cancelled = true;
         abort.abort();
+        void clearActiveRun(sessionId).catch(() => {});
       };
     });
   }
@@ -346,12 +388,19 @@ export async function loadHistory(sessionId: string): Promise<Message[]> {
   // harness re-persists what it's sent — so the same turn can land as more
   // than one stored event. Collapse those before mapping to AG-UI messages.
   // Convert stored events to AG-UI messages
-  let msgs = eventsToAguiMessages(dedupeStoredEvents(sorted));
+  const msgs = eventsToAguiMessages(dedupeStoredEvents(sorted));
   // Append in‑flight assistant message from ActiveRun snapshot if present
   try {
     const active = await fetchActiveRun(sessionId);
+    // A crashed browser leaves a stale 'streaming' row with no one left to
+    // clear it — ignore snapshots that haven't been touched in a while rather
+    // than showing a permanently stuck in-flight bubble.
+    const ACTIVE_RUN_STALE_MS = 60_000;
+    const updatedAtMs = active?.updatedAt ? new Date(active.updatedAt).getTime() : NaN;
+    const isStale = !Number.isFinite(updatedAtMs) || Date.now() - updatedAtMs > ACTIVE_RUN_STALE_MS;
     if (
       active &&
+      !isStale &&
       active.status === 'streaming' &&
       active.accumulatedText &&
       active.accumulatedText.trim() &&
