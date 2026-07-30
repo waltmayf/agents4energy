@@ -11,5 +11,6 @@ export const agentWebhookPostComment = defineFunction({
     JIRA_API_TOKEN_SECRET_ARN: process.env.JIRA_API_TOKEN_SECRET_ARN ?? '',
     JIRA_API_EMAIL: process.env.JIRA_API_EMAIL ?? '',
     ACCOUNT_ID: '',
+    CLAUDE_CODE_RUNTIME_ARN: process.env.CLAUDE_CODE_RUNTIME_ARN ?? '',
   },
 });

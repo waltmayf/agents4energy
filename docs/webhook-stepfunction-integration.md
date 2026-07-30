@@ -29,7 +29,9 @@ GitHub issue_comment webhook          Jira comment_created webhook
       Step Function (STANDARD workflow)
         1. agent-webhook-post-comment (stage=initial)
              • creates this run's CloudWatch Logs stream
-             • posts a comment with a Live Tail deep-link
+             • posts a comment with chat UI + Live Tail deep-links, plus
+               (GitHub + CLAUDE_CODE_RUNTIME_ARN set) a pasteable
+               `agentcore exec --it` command
              • GitHub only: mints a GitHub App installation token
              • label-triggered runs only: adds the "agent-working" label
         2. agent-webhook-invoke-agent  (git-auth prep — Lambda)
@@ -183,6 +185,8 @@ Both secrets are Secrets Manager ARNs supplied as deploy-time inputs (`GITHUB_WE
 ## CloudWatch Logs Live Tail link
 
 The initial comment also includes a **live chat session link** to the deployed UI (`/chat?sessionId=<runId>`), allowing users to watch the agent's progress directly in the web interface.
+
+For `@agentcore-claude` (ClaudeCode runtime) runs, when `CLAUDE_CODE_RUNTIME_ARN` is configured on the deploy, the initial comment additionally posts a pasteable `agentcore exec --it --runtime <arn> --session-id <runId> --region <region>` command (see [`agent-webhook-post-comment/handler.ts`](../web/amplify/functions/agent-webhook-post-comment/handler.ts)). This is the npm `@aws/agentcore` CLI's `exec` subcommand (>= 0.18; shipped separately from the pip `bedrock-agentcore-starter-toolkit`), which attaches an interactive shell to the running runtime container by session id — a terminal-native alternative to the browser-based chat link and Live Tail link above. Only rendered for GitHub sources with the runtime ARN set; Jira runs and branches without the ClaudeCode runtime deployed don't get this line.
 
 Ported directly from `.github/workflows/claude.yml`'s "Post CloudWatch log links" step (see [`web/amplify/functions/_shared/liveTail.ts`](../web/amplify/functions/_shared/liveTail.ts)):
 

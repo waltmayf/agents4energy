@@ -12,6 +12,7 @@ const JIRA_API_EMAIL = process.env.JIRA_API_EMAIL ?? '';
 const JIRA_API_TOKEN_SECRET_ARN = process.env.JIRA_API_TOKEN_SECRET_ARN ?? '';
 const HOSTING_DOMAIN = process.env.HOSTING_DOMAIN ?? '';
 const BRANCH_SLUG = process.env.BRANCH_SLUG ?? '';
+const CLAUDE_CODE_RUNTIME_ARN = process.env.CLAUDE_CODE_RUNTIME_ARN ?? '';
 
 // Labels the Step Function manages around a label-triggered run (issue #56):
 // `agent-working` while the agent runs, `agent-error` if it fails.
@@ -220,9 +221,21 @@ export const handler = async (input: PostCommentInput): Promise<PostCommentOutpu
     const links = [];
     if (chatUrl) links.push(`[watch live in the chat UI](${chatUrl})`);
     if (liveTailUrl) links.push(`[watch live via CloudWatch Logs Live Tail](${liveTailUrl})`);
-    const body = links.length
+    let body = links.length
       ? `🤖 Working on it — ${links.join(' · ')}`
       : `🤖 Working on it (run \`${input.runId}\`)…`;
+
+    // Issue #203: also offer a copy-paste `agentcore exec` command so a
+    // developer already in a terminal can attach directly to the running
+    // ClaudeCode session, rather than only having browser-based follow-along
+    // options. Only when the runtime ARN is configured for this deploy (GitHub
+    // runs only — Jira has no ClaudeCode runtime session to attach to).
+    if (input.source === 'github' && CLAUDE_CODE_RUNTIME_ARN) {
+      body += `\n\nOr attach a terminal directly to the running agent container to follow along (needs \`@aws/agentcore\` CLI >= 0.18 — \`npm i -g @aws/agentcore\` or \`agentcore update cli\`):\n`
+        + '```bash\n'
+        + `agentcore exec --it --runtime ${CLAUDE_CODE_RUNTIME_ARN} --session-id ${input.runId} --region ${REGION}\n`
+        + '```';
+    }
 
     let githubToken: string | undefined;
     let githubTokenExpiresAt: string | undefined;
