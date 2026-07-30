@@ -25,8 +25,6 @@ set -euo pipefail
 
 REPO="${REPO:-waltmayf/agents4energy}"
 WORK_LABEL="agent-working"
-# Label the webhook applies to issues it has been asked to work on.
-DISPATCH_LABEL="agentcore"
 
 want_exit_code=0
 [[ "${1:-}" == "--exit-code" ]] && want_exit_code=1
@@ -76,26 +74,35 @@ pr_branches="$(jq -r '.[].headRefName' <<<"$prs_json")"
 pr_issue_refs="$(gh pr list --repo "$REPO" --state open --json number,body,headRefName \
   --jq '.[] | (.body // "") + " " + .headRefName')"
 
-# Finished-no-PR = dispatched (dispatch label) AND not currently working AND no
-# open PR appears to reference it. These are runs that ended without delivering.
+# Finished-no-PR = an issue whose LATEST webhook-bot comment is an empty-handed
+# sentinel ("no PR was created" / "ended before pushing" / "no text response")
+# AND no open PR references it. The webhook leaves NO label behind on a finished
+# run (labels can be []), so we detect via the bot's own sign-off comment, not a
+# label. Only issues NOT currently working are candidates.
 bold "── Finished, no PR (re-dispatch these) ──"
-finished_no_pr="$(jq -r --arg L "$DISPATCH_LABEL" --arg W "$WORK_LABEL" \
-  '.[] | select(any(.labels[]; .name == $L)) | select(all(.labels[]; .name != $W)) | .number' \
-  <<<"$issues_json")"
+# Regex the webhook bot uses when a run ends without pushing anything.
+SENTINEL='no PR was created|ended before pushing|no text response|hit the per-turn ceiling'
+BOT='waltmayf-claude-code-app'
+
+# Candidate issues: open, not currently working. Bounded to recently-updated
+# ones so we don't fetch comments for the entire backlog.
+candidates="$(jq -r --arg W "$WORK_LABEL" \
+  '.[] | select(all(.labels[]; .name != $W)) | .number' <<<"$issues_json")"
 
 any_finished=0
-if [[ -n "$finished_no_pr" ]]; then
-  while IFS= read -r num; do
-    [[ -z "$num" ]] && continue
-    # Does any open PR reference this issue number?
-    if grep -qwE "#?$num" <<<"$pr_issue_refs"; then
-      continue   # has a PR → already surfaced in bucket 1
-    fi
+while IFS= read -r num; do
+  [[ -z "$num" ]] && continue
+  # Skip if an open PR already references this issue → surfaced in bucket 1.
+  grep -qwE "#?$num" <<<"$pr_issue_refs" && continue
+  # Latest comment authored by the webhook bot on this issue.
+  last_bot="$(gh issue view "$num" --repo "$REPO" --json comments \
+    --jq "[.comments[] | select(.author.login==\"$BOT\")] | last | .body // \"\"" 2>/dev/null || echo "")"
+  if grep -qiE "$SENTINEL" <<<"$last_bot"; then
     title="$(jq -r --argjson n "$num" '.[] | select(.number==$n) | .title' <<<"$issues_json")"
-    echo "#$num $title"
+    echo "#$num $title  ← run ended empty-handed; re-dispatch smaller"
     any_finished=1
-  done <<<"$finished_no_pr"
-fi
+  fi
+done <<<"$candidates"
 [[ "$any_finished" -eq 0 ]] && echo "  (none)"
 echo
 
