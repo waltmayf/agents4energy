@@ -770,13 +770,30 @@ if (AGENTCORE_GATEWAY_ARN) {
   });
 }
 
-// The GraphQL API's CfnResource, referenced by the appsync_api_id output below.
 const cfnGraphqlApi = backend.data.resources.cfnResources.cfnGraphqlApi;
 
-// ============================================================================
-// EXPORTS — consumed by the frontend via amplify_outputs.json custom outputs
-// ============================================================================
+if (claudeCodeRuntimeName) {
+  // Provide GraphQL endpoint URL
+  agentCoreApp.addRuntimeEnvironmentVariable(
+    claudeCodeRuntimeName,
+    'APPSYNC_GRAPHQL_URL',
+    cfnGraphqlApi.attrGraphQlUrl,
+  );
 
+  // Grant write access to ActiveRun mutations
+  const appSyncMutationArns = [
+    `arn:aws:appsync:${Stack.of(agentStack).region}:${Stack.of(agentStack).account}:apis/*/types/Mutation/fields/createActiveRun`,
+    `arn:aws:appsync:${Stack.of(agentStack).region}:${Stack.of(agentStack).account}:apis/*/types/Mutation/fields/updateActiveRun`,
+    `arn:aws:appsync:${Stack.of(agentStack).region}:${Stack.of(agentStack).account}:apis/*/types/Mutation/fields/deleteActiveRun`,
+  ];
+  agentCoreApp.addRuntimeRolePolicy(
+    claudeCodeRuntimeName,
+    new PolicyStatement({
+      actions: ['appsync:GraphQL'],
+      resources: appSyncMutationArns,
+    }),
+  );
+}
 backend.addOutput({
   custom: {
     auth_authenticated_role_arn: backend.auth.resources.authenticatedUserIamRole.roleArn,

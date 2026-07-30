@@ -55,7 +55,10 @@ export const chatSchema = a.schema({
     status: a.string().required(),
     updatedAt: a.datetime(),
   })
-    .authorization((allow) => [allow.owner(), allow.authenticated(), allow.guest()]),
+    .authorization((allow) => [
+      allow.authenticated().to(['create', 'update', 'delete', 'read']),
+      allow.guest().to(['read']),
+    ]),
 
 
 
