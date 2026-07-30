@@ -17,10 +17,10 @@ import { ListPlusIcon, SquareIcon } from 'lucide-react';
 function ChatComposerInputImpl(props: CopilotChatInputProps) {
   const { value = '', onChange, onSubmitMessage, onStop, isRunning } = props;
   const hasText = value.trim().length > 0;
-  const canStop = !!onStop;
+  const willStop = isRunning && !hasText;
 
   const handleSendButtonClick = useCallback(() => {
-    if (isRunning && !hasText) {
+    if (willStop) {
       onStop?.();
       return;
     }
@@ -28,7 +28,7 @@ function ChatComposerInputImpl(props: CopilotChatInputProps) {
     if (!trimmed || !onSubmitMessage) return;
     onSubmitMessage(trimmed);
     onChange?.('');
-  }, [isRunning, hasText, value, onSubmitMessage, onChange, onStop]);
+  }, [willStop, value, onSubmitMessage, onChange, onStop]);
 
   const label = isRunning ? (hasText ? 'Queue message' : 'Stop response') : 'Send message';
 
@@ -37,7 +37,7 @@ function ChatComposerInputImpl(props: CopilotChatInputProps) {
       {...props}
       sendButton={{
         onClick: handleSendButtonClick,
-        disabled: isRunning ? !canStop : !hasText || !onSubmitMessage,
+        disabled: willStop ? !onStop : !hasText || !onSubmitMessage,
         'aria-label': label,
         title: label,
         children: isRunning
