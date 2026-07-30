@@ -44,6 +44,26 @@ Every PR that resolves an issue **must** include a GitHub auto-closing keyword i
 - The referenced issue must be in the **same repo** as the PR (`waltmayf/agents4energy`); a cross-repo reference won't auto-close.
 - This applies to PRs opened by dispatched agents too — include the closing line in the dispatch instructions, and if a PR arrives without it, add it (`gh pr edit <n> --body ...`) before merging.
 
+### Dispatching @agentcore-claude and waiting for it
+
+When you dispatch work to the `@agentcore-claude` webhook agent (by commenting on an issue), the webhook adds the `agent-working` label to that issue while the run is in flight and **removes it when the run ends** (whether it succeeds or dies empty-handed at the turn/time ceiling). That label — not PR draft state — is the authoritative "is the remote agent done?" signal. Dispatched runs push **draft** PRs early and leave them draft, so never wait on a PR going non-draft.
+
+**Default waiting method — always use this, not a bespoke per-run poll:**
+
+```bash
+# Block until NO open issue carries `agent-working` (all remote agents done),
+# then print the review queue. Run it in the background and act when it returns.
+./scripts/wait-for-agents.sh              # poll every 90s, no timeout
+./scripts/wait-for-agents.sh --timeout 10800   # give up after 3h (exit 124)
+
+# Ad-hoc "what needs my attention right now?" (open PRs incl. drafts + checks,
+# still-working issues, and dispatched issues that finished with NO PR):
+./scripts/review-queue.sh
+./scripts/review-queue.sh --exit-code     # exit 10 if anything needs attention
+```
+
+**Once no issue has `agent-working`, the remote agents are done and it's your turn to act** — review the resulting PR(s), and re-dispatch any issue that finished with no PR (it hit the ceiling; re-dispatch in smaller, independently-pushable slices). Scope each dispatch small: a run has a hard ~3h ceiling and anything not pushed is lost, so instruct the agent to push a draft PR as soon as its work type-checks.
+
 ### Docuemntation
 Be sure to keep the documentation in the `./docs` folder fresh. After you make a change, make sure the relevant docs are still correct, and create a new doc if it's something either a developer or user would want to know about.
 
