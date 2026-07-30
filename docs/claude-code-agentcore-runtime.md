@@ -195,8 +195,11 @@ agent-webhook-receiver Lambda
    ▼
 Step Function  (agentWebhookStack.ts)
    │
-   ├─ 1. PostInitialComment ─ posts the CloudWatch Live Tail link, mints a
-   │       short-lived GitHub App token, fetches AGENTS.md system prompt
+   ├─ 1. PostInitialComment ─ posts the chat UI + CloudWatch Live Tail links
+   │       and (GitHub only, when CLAUDE_CODE_RUNTIME_ARN is set) a copy-paste
+   │       `agentcore exec --it` command to attach a terminal to the running
+   │       session; mints a short-lived GitHub App token, fetches AGENTS.md
+   │       system prompt
    │
    ├─ 2. PrepareGitAuth ───── returns the annotated prompt (git-auth prep)
    │
@@ -287,6 +290,6 @@ It confirms the runtime's `{ started: true }` ack (throwing on a ≥400 ack so t
 
 ## Verifying
 
-Comment `@agentcore-claude <request>` on an issue/PR in a repo whose webhook points at this deployment's `agent_webhook_url` (see the [webhook doc's Setup](./webhook-stepfunction-integration.md)). The initial comment posts a CloudWatch Live Tail link; the final comment carries Claude Code's summary (and a PR link if it made changes). On branches where the runtime isn't deployed (`CLAUDE_CODE_RUNTIME_ARN` empty), the claude branch fails cleanly at invoke time with a clear error rather than failing synth/deploy.
+Comment `@agentcore-claude <request>` on an issue/PR in a repo whose webhook points at this deployment's `agent_webhook_url` (see the [webhook doc's Setup](./webhook-stepfunction-integration.md)). The initial comment posts a chat UI link, a CloudWatch Live Tail link, and (when the runtime is deployed) a pasteable `agentcore exec --it --runtime <arn> --session-id <runId> --region <region>` command so a developer can attach a terminal directly to the running container — this needs the npm `@aws/agentcore` CLI >= 0.18 (`npm i -g @aws/agentcore` / `agentcore update cli`). The final comment carries Claude Code's summary (and a PR link if it made changes). On branches where the runtime isn't deployed (`CLAUDE_CODE_RUNTIME_ARN` empty), the claude branch fails cleanly at invoke time with a clear error rather than failing synth/deploy, and the initial comment omits the exec command.
 
 A minimal smoke test that exercises only the container (bypassing GitHub) is to `InvokeAgentRuntime` directly with `{ "prompt": "who and where are you?" }` and `contentType: 'application/json'` — the reply should describe Claude Code running inside an AgentCore Runtime with cwd under `/mnt/workspace`.
