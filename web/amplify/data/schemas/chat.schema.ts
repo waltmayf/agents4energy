@@ -48,6 +48,16 @@ export const chatSchema = a.schema({
       index("chatSessionIdUnderscoreAgentId").sortKeys(["createdAt"])
     ])
     .authorization((allow) => [allow.owner(), allow.authenticated().to(["read", "create"]), allow.guest().to(["read"])]),
+  ActiveRun: a.model({
+    sessionId: a.id().required(),
+    messageId: a.string().required(),
+    accumulatedText: a.string(),
+    status: a.string().required(),
+    updatedAt: a.datetime(),
+  })
+    .authorization((allow) => [allow.owner(), allow.authenticated(), allow.guest()]),
+
+
 
   Settings: a.model({
     name: a.string(),
