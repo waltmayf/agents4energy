@@ -20,6 +20,7 @@ import { Observable, type Subscriber } from 'rxjs';
 
 import outputs from '../amplify_outputs.json';
 import { dedupeStoredEvents, eventsToAguiMessages, type StoredEvent } from './converse-to-agui';
+import { fetchActiveRun } from './active-run';
 import {
   createHarnessStreamState,
   translateHarnessStreamEvent,
@@ -344,5 +345,28 @@ export async function loadHistory(sessionId: string): Promise<Message[]> {
   // Every InvokeHarness call forwards the full user/assistant window, and the
   // harness re-persists what it's sent — so the same turn can land as more
   // than one stored event. Collapse those before mapping to AG-UI messages.
-  return eventsToAguiMessages(dedupeStoredEvents(sorted));
+  // Convert stored events to AG-UI messages
+  let msgs = eventsToAguiMessages(dedupeStoredEvents(sorted));
+  // Append in‑flight assistant message from ActiveRun snapshot if present
+  try {
+    const active = await fetchActiveRun(sessionId);
+    if (
+      active &&
+      active.status === 'streaming' &&
+      active.accumulatedText &&
+      active.accumulatedText.trim() &&
+      active.messageId &&
+      !msgs.some((m) => m.id === active.messageId)
+    ) {
+      msgs.push({
+        id: active.messageId,
+        role: 'assistant',
+        content: active.accumulatedText,
+      } as Message);
+    }
+  } catch (e) {
+    // Log and ignore – history load should succeed even if ActiveRun fetch fails
+    console.error('Failed to fetch ActiveRun for session', sessionId, e);
+  }
+  return msgs;
 }
