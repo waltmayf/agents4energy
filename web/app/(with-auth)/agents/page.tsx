@@ -1288,6 +1288,9 @@ export default function AgentsPage() {
   const [loadingMoreAgents, setLoadingMoreAgents] = useState(false);
   const [loadingMoreMcp, setLoadingMoreMcp] = useState(false);
 
+  // OAuth credential status per MCP server (for the sidebar Reconnect affordance).
+  const [mcpCredentials, setMcpCredentials] = useState<Record<string, McpCredential | null>>({});
+
   // Debounce agent search
   useEffect(() => {
     const timer = setTimeout(() => setAgentQueryActive(agentQuery), 300);
@@ -1617,6 +1620,37 @@ export default function AgentsPage() {
   const mcpServers = pageState.status === 'ready' ? pageState.mcpServers : [];
   const agentsNextToken = pageState.status === 'ready' ? pageState.agentsNextToken : null;
   const mcpServersNextToken = pageState.status === 'ready' ? pageState.mcpServersNextToken : null;
+
+  // Load credential status for every OAuth-enabled server so the sidebar can
+  // surface a Reconnect affordance for expired/expiring tokens without the
+  // user having to open each server's edit panel.
+  const oauthServerIds = mcpServers.filter((s) => s.oauthClientId?.trim()).map((s) => s.id).join(',');
+  useEffect(() => {
+    const ids = oauthServerIds ? oauthServerIds.split(',') : [];
+    if (ids.length === 0) return;
+    let cancelled = false;
+    Promise.all(ids.map((id) => fetchCredential(id).then((cred) => [id, cred] as const).catch(() => [id, null] as const)))
+      .then((entries) => {
+        if (cancelled) return;
+        setMcpCredentials((prev) => ({ ...prev, ...Object.fromEntries(entries) }));
+      });
+    return () => { cancelled = true; };
+  }, [oauthServerIds]);
+
+  const handleSidebarReconnect = useCallback(async (s: McpServer) => {
+    if (!s.id || !s.oauthClientId) return;
+    try {
+      const cred = await authenticateViaPkce({
+        mcpServerId: s.id,
+        mcpServerUrl: s.url,
+        oauthClientId: s.oauthClientId.trim(),
+        existingCredentialId: mcpCredentials[s.id]?.id,
+      });
+      setMcpCredentials((prev) => ({ ...prev, [s.id]: cred }));
+    } catch (e) {
+      console.error('Connect error', e);
+    }
+  }, [mcpCredentials]);
   const selectedAgent = agents.find((a) => a.id === selectedAgentId) ?? null;
   const selectedMcpServer = mcpServers.find((s) => s.id === selectedMcpId) ?? null;
 
@@ -1813,21 +1847,13 @@ export default function AgentsPage() {
               <>
                 <ul data-testid="mcp-server-sidebar-list">
                   {sortedMcpServers.map((s) => {
-    const handleConnect = async () => {
-      if (!s.id || !s.oauthClientId) return;
-      try {
-        await authenticateViaPkce({
-          mcpServerId: s.id,
-          mcpServerUrl: s.url,
-          oauthClientId: s.oauthClientId.trim(),
-        });
-      } catch (e) {
-        console.error('Connect error', e);
-      }
-    };
+    const cred = mcpCredentials[s.id] ?? null;
+    const needsReconnect = !!cred && isExpiredOrExpiringSoon(cred);
+    const needsConnect = s.oauthClientId?.trim() && !cred;
     return (
 
-                    <li key={s.id} className={cn('flex items-center border-b transition-colors hover:bg-muted/50', selectedMcpId === s.id && 'bg-muted/70')}>
+                    <li key={s.id} className={cn('flex flex-col border-b transition-colors hover:bg-muted/50', selectedMcpId === s.id && 'bg-muted/70')}>
+                      <div className="flex items-center">
                       <button
                         type="button"
                         onClick={() => setSelectedMcpId(s.id)}
@@ -1840,6 +1866,12 @@ export default function AgentsPage() {
                           <span className="block text-xs text-muted-foreground font-mono truncate">{s.url}</span>
                           {!s.enabled && (
                             <span className="text-[10px] text-muted-foreground italic">disabled</span>
+                          )}
+                          {needsReconnect && (
+                            <span className="flex items-center gap-1 text-[10px] text-amber-600 font-medium mt-0.5" data-testid={`mcp-token-expired-${s.id}`}>
+                              <AlertCircleIcon className="size-3" />
+                              Token expired — reconnect
+                            </span>
                           )}
                         </span>
                         <ChevronRightIcon
@@ -1858,18 +1890,31 @@ export default function AgentsPage() {
                       >
                         <StarIcon className={cn('size-3.5', mcpFavorites.has(s.id) && 'fill-current text-amber-400')} />
                       </button>
-                      {s.oauthClientId?.trim() && (
+                      {needsReconnect ? (
                         <Button
                           type="button"
                           size="sm"
                           variant="outline"
-                          onClick={handleConnect}
+                          onClick={() => handleSidebarReconnect(s)}
+                          className="shrink-0 mx-1 border-amber-400 text-amber-700 hover:text-amber-800"
+                          data-testid={`reconnect-mcp-${s.id}`}
+                        >
+                          <KeyRoundIcon className="size-3.5" />
+                          Reconnect
+                        </Button>
+                      ) : needsConnect ? (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          onClick={() => handleSidebarReconnect(s)}
                           className="shrink-0 mx-1"
                           data-testid={`connect-mcp-${s.id}`}
                         >
                           Connect
                         </Button>
-                      )}
+                      ) : null}
+                      </div>
                     </li>
                     );
                   })}
