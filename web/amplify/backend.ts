@@ -715,9 +715,18 @@ if (claudeCodeRuntimeName) {
   // (not backend.data's real API ARN) keeps this a plain string with no CDK
   // token, so it can't introduce a data-stack -> agent-stack cycle the way
   // referencing backend.data's ARN here would (see PR #230).
+  //
+  // Both Query AND Mutation fields are needed: active-run.js does a
+  // list-then-upsert (listActiveRuns is a *Query* field) and clearActiveRun
+  // lists before deleting — a Mutation-only grant would implicit-deny every
+  // listActiveRuns call, and since those errors are swallowed the row would
+  // silently never be created or cleared.
   agentCoreApp.addRuntimeRolePolicy(claudeCodeRuntimeName, new PolicyStatement({
     actions: ['appsync:GraphQL'],
-    resources: ['arn:aws:appsync:*:*:apis/*/types/Mutation/fields/*'],
+    resources: [
+      'arn:aws:appsync:*:*:apis/*/types/Query/fields/*',
+      'arn:aws:appsync:*:*:apis/*/types/Mutation/fields/*',
+    ],
   }));
 
   // The runtime learns the GraphQL endpoint + region at startup from an SSM
