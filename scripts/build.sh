@@ -76,6 +76,24 @@ if [ -n "${GITHUB_REPOSITORY:-}" ]; then
     }));
   ")
   aws ssm put-parameter --name "$E2E_CONFIG_SSM_PATH" --type String --overwrite --value "$E2E_CONFIG_VALUE"
+
+  # ── 1c. Publish the ActiveRun GraphQL endpoint to SSM (issue #15) ──────────
+  # The ClaudeCode AgentCore runtime writes its own ActiveRun snapshots straight
+  # to AppSync via SigV4 (see agent/default/app/ClaudeCode/server.js) instead of
+  # through a Lambda auth adapter, so it needs the GraphQL URL + region at
+  # startup. Can't be a CDK env var built from a data-stack token (that would
+  # reintroduce the data->agent stack cycle backend.ts's runtime wiring
+  # deliberately avoids) — so, same as the e2e config above, publish it here
+  # from this run's own amplify_outputs.json with --overwrite (idempotent,
+  # self-healing, no CFN ownership involved). The runtime is granted
+  # ssm:GetParameter on /outputs/* in backend.ts to read it back.
+  ACTIVERUN_SSM_PATH="/outputs/$E2E_CONFIG_REPO_SLUG/$BRANCH_SLUG/activerun-graphql"
+  echo "Publishing ActiveRun GraphQL config to SSM: $ACTIVERUN_SSM_PATH…"
+  ACTIVERUN_SSM_VALUE=$(node -e "
+    const o = JSON.parse(require('fs').readFileSync('$REPO_ROOT/web/amplify_outputs.json', 'utf8'));
+    console.log(JSON.stringify({ url: o.data.url, region: o.data.aws_region }));
+  ")
+  aws ssm put-parameter --name "$ACTIVERUN_SSM_PATH" --type String --overwrite --value "$ACTIVERUN_SSM_VALUE"
 else
   echo "GITHUB_REPOSITORY not set — skipping e2e config publish (local pnpm deploy)"
 fi
