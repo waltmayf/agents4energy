@@ -52,4 +52,23 @@ A browser tab that crashes or loses network mid-stream never reaches the `clearA
 
 ## What's deferred
 
-This slice covers the **browser producer only** — a user with the chat page open, streaming a turn themselves. A server-side/webhook producer (the ClaudeCode AgentCore runtime writing its own `ActiveRun` snapshot via SigV4 while running unattended) is a separate, larger follow-up: it requires wiring the AppSync endpoint and IAM mutation permissions into the runtime, which is out of scope here to keep this change client-only and free of new CloudFormation stack dependencies.
+This slice covers the **browser producer only** — a user with the chat page open, streaming a turn themselves. #15's core scenario — a browserless ClaudeCode/webhook run whose in-flight text no browser is producing — needs a **server-side producer**, which can't write AppSync directly from the AgentCore container runtime (its IAM role isn't a Cognito principal, and `allow.authenticated()` maps to the identity-pool role, not an arbitrary execution role — see PR #230). The chosen approach is to write *through the API*, via an Amplify `defineFunction` granted `allow.resource()` data access, split into two independently-deployable slices:
+
+- **Slice A (landed):** the writer Lambda — `web/amplify/functions/write-active-run/`. Registered in `defineBackend(...)` and granted `allow.resource(writeActiveRun).to(['mutate'])` on the chat schema (the schema object that owns `ActiveRun` — function access can only be configured on a schema, not a model/field). Nothing invokes it yet.
+- **Slice B (follow-up, not yet started):** wire the ClaudeCode runtime to invoke this Lambda — tokenless function-name delivery, an `lambda:InvokeFunction` grant, and a throttled write from `server.js`. This is the cycle-sensitive part: it must NOT add a reference from the agent stack back to the Lambda in a way that reintroduces a data-stack value (GraphQL URL/ARN, table name/ARN) into the AgentCore runtime.
+
+### Slice A's contract: `write-active-run` Lambda
+
+Not wired into `defineBackend`'s function URL or any resolver — it's invoked directly (`lambda:invoke`) once Slice B wires a caller. Request shape:
+
+```ts
+{
+  sessionId: string;
+  messageId: string;
+  accumulatedText: string;
+  status: 'streaming' | 'done';
+  clear?: boolean; // force a delete even if status is 'streaming'
+}
+```
+
+Response: `{ ok: boolean; id?: string }`. On `status: 'streaming'` it upserts the session's single `ActiveRun` row (list by `sessionId`, update if found else create), matching `web/lib/active-run.ts`'s semantics byte-for-byte so browser- and server-produced snapshots are interchangeable for the consumer in `loadHistory()`. On `status: 'done'` (or `clear: true`) it deletes the session's row(s). Write errors are logged and swallowed — `{ ok: false }` — never thrown, so a snapshot failure can never crash the caller. The core upsert/clear logic lives in `logic.ts` as `writeActiveRunWithClient`, a pure function parameterized on the data client, so it's unit-tested (`web/lib/write-active-run-logic.test.ts`) without needing the `$amplify/env/write-active-run` shim that only exists after a synth/deploy.
