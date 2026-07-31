@@ -41,6 +41,7 @@ import { BedrockAgentCoreClient } from '@aws-sdk/client-bedrock-agentcore';
 import { persistClaudeStreamEvent, persistUserPrompt, persistAwaitingInputMarker } from './memory.js';
 import { detectAwaitingInput } from './detect-awaiting-input.js';
 import { startBrowserMcp } from './browser-mcp.js';
+import { upsertActiveRun, clearActiveRun } from './active-run.js';
 
 const PORT = 8080;
 // SendTaskSuccess/Failure need only the token + a client in the SAME region and
@@ -451,6 +452,58 @@ function runClaudeCode({ prompt, workDir, repo, issueNumber, systemAppend, githu
     let stderr = '';
     let buffered = '';
 
+    // ActiveRun producer (issue #15): a browserless run has no browser tab
+    // producing the in-flight-message snapshot web/lib/harness-agent.ts writes
+    // for harness sessions, so this run writes its own — same contract
+    // (upsert with status:'streaming' while text accumulates, clearActiveRun()
+    // once settled) so a late-joining viewer's loadHistory() renders it
+    // identically regardless of which producer wrote it. One synthetic
+    // messageId for the whole job (not per CLI message) — good enough for a
+    // "here's roughly what's happening now" preview bubble, cleared the moment
+    // memory has the real, complete turns.
+    const activeRunMessageId = `claude-code-${memorySessionId || Date.now()}`;
+    let activeRunText = '';
+    let activeRunRowId = null;
+    let activeRunLastWrite = 0;
+    let activeRunTimer = null;
+    const ACTIVE_RUN_THROTTLE_MS = 750;
+
+    const flushActiveRun = () => {
+      if (!memorySessionId) return;
+      activeRunLastWrite = Date.now();
+      upsertActiveRun(
+        { sessionId: memorySessionId, messageId: activeRunMessageId, accumulatedText: activeRunText, status: 'streaming' },
+        activeRunRowId,
+        log,
+      ).then((id) => { if (id) activeRunRowId = id; });
+    };
+
+    const scheduleActiveRunWrite = () => {
+      if (!memorySessionId) return;
+      const elapsed = Date.now() - activeRunLastWrite;
+      if (elapsed >= ACTIVE_RUN_THROTTLE_MS) {
+        flushActiveRun();
+        return;
+      }
+      if (activeRunTimer) return;
+      activeRunTimer = setTimeout(() => {
+        activeRunTimer = null;
+        flushActiveRun();
+      }, ACTIVE_RUN_THROTTLE_MS - elapsed);
+    };
+
+    // Settle the snapshot: cancel any pending throttled write, flush the
+    // final text so the row is never stuck showing a stale partial, then
+    // delete it now that memory has (or will shortly have) the real turns.
+    // Called on the terminal `result` event's close, AND on error/teardown —
+    // an ActiveRun row must never outlive the job that owns it.
+    const settleActiveRun = () => {
+      if (!memorySessionId) return;
+      if (activeRunTimer) { clearTimeout(activeRunTimer); activeRunTimer = null; }
+      if (activeRunText) flushActiveRun();
+      void clearActiveRun(memorySessionId, log);
+    };
+
     const handleLine = (line) => {
       if (!line.trim()) return;
       let event;
@@ -462,6 +515,15 @@ function runClaudeCode({ prompt, workDir, repo, issueNumber, systemAppend, githu
       if (event.type === 'result') {
         resultText = typeof event.result === 'string' ? event.result : '';
         return;
+      }
+      if (event.type === 'assistant') {
+        const textBlocks = (event.message?.content ?? []).filter(
+          (b) => b?.type === 'text' && typeof b.text === 'string',
+        );
+        if (textBlocks.length) {
+          activeRunText += textBlocks.map((b) => b.text).join('');
+          scheduleActiveRunWrite();
+        }
       }
       if (memoryClient) {
         persistClaudeStreamEvent(memoryClient, { memoryId: MEMORY_ID, sessionId: memorySessionId, event, log });
@@ -478,9 +540,10 @@ function runClaudeCode({ prompt, workDir, repo, issueNumber, systemAppend, githu
       }
     });
     child.stderr.on('data', (d) => { stderr += d.toString(); log('claude:', d.toString().trimEnd()); });
-    child.on('error', reject);
+    child.on('error', (err) => { settleActiveRun(); reject(err); });
     child.on('close', (code) => {
       if (buffered.trim()) handleLine(buffered);
+      settleActiveRun();
       if (code !== 0) {
         reject(new Error(`claude exited ${code}: ${stderr.slice(-2000)}`));
         return;

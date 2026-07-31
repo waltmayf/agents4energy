@@ -50,25 +50,22 @@ Any error fetching the `ActiveRun` row is caught and logged — history loading 
 
 A browser tab that crashes or loses network mid-stream never reaches the `clearActiveRun()` call, leaving a `status: 'streaming'` row with no one left to clean it up. `loadHistory()` guards against this by ignoring any `ActiveRun` row whose `updatedAt` is more than 60 seconds old (or missing/unparseable) — preventing a permanently stuck in-flight bubble for other viewers.
 
-## What's deferred
+## Producer: server-side throttled write (`agent/default/app/ClaudeCode/`)
 
-This slice covers the **browser producer only** — a user with the chat page open, streaming a turn themselves. #15's core scenario — a browserless ClaudeCode/webhook run whose in-flight text no browser is producing — needs a **server-side producer**, which can't write AppSync directly from the AgentCore container runtime (its IAM role isn't a Cognito principal, and `allow.authenticated()` maps to the identity-pool role, not an arbitrary execution role — see PR #230). The chosen approach is to write *through the API*, via an Amplify `defineFunction` granted `allow.resource()` data access, split into two independently-deployable slices:
+The browser producer above covers only a user with the chat page open, streaming a turn themselves. #15's core scenario — a browserless run started via `@agentcore-claude` (or any process-driven invocation of the ClaudeCode AgentCore runtime) whose in-flight text no browser is producing — needs a **server-side producer** running inside that runtime.
 
-- **Slice A (landed):** the writer Lambda — `web/amplify/functions/write-active-run/`. Registered in `defineBackend(...)` and granted `allow.resource(writeActiveRun).to(['mutate'])` on the chat schema (the schema object that owns `ActiveRun` — function access can only be configured on a schema, not a model/field). Nothing invokes it yet.
-- **Slice B (follow-up, not yet started):** wire the ClaudeCode runtime to invoke this Lambda — tokenless function-name delivery, an `lambda:InvokeFunction` grant, and a throttled write from `server.js`. This is the cycle-sensitive part: it must NOT add a reference from the agent stack back to the Lambda in a way that reintroduces a data-stack value (GraphQL URL/ARN, table name/ARN) into the AgentCore runtime.
+An earlier iteration (#232, now reverted) tried to reach `ActiveRun` through a `write-active-run` Amplify Lambda, reasoning that the runtime's execution role isn't a Cognito principal and `allow.authenticated()` maps to the identity-pool role, not an arbitrary IAM role (see PR #230's rejection of injecting the role directly). That reasoning about Cognito was right, but the fix was the wrong shape: the runtime doesn't need to *become* a Cognito principal or go through a Lambda auth adapter — it's already a perfectly valid IAM principal, and AppSync accepts IAM (SigV4) auth directly. `allow.resource(fn)` is a convenience for `defineFunction` Lambdas, not a requirement for programmatic API access — exactly the same way `scripts/graphql.sh` calls the API locally with a developer's own IAM credentials.
 
-### Slice A's contract: `write-active-run` Lambda
+So the runtime calls AppSync's GraphQL endpoint directly, over HTTPS, signing each request with SigV4:
 
-Not wired into `defineBackend`'s function URL or any resolver — it's invoked directly (`lambda:invoke`) once Slice B wires a caller. Request shape:
+- **`agent/default/app/ClaudeCode/active-run.js`** — `upsertActiveRun()` / `clearActiveRun()`, mirroring `web/lib/active-run.ts`'s semantics byte-for-byte (list-by-`sessionId` → update-if-found-else-create; delete on clear) using raw `listActiveRuns`/`createActiveRun`/`updateActiveRun`/`deleteActiveRun` GraphQL operations, signed with `@aws-sdk/signature-v4` + `@aws-crypto/sha256-js` against `@aws-sdk/credential-providers`' `fromNodeProviderChain()` (the runtime's own ambient execution-role credentials — no Cognito involved).
+- **`agent/default/app/ClaudeCode/server.js`** — hooks into the `stream-json` loop right where `persistClaudeStreamEvent()` already runs: accumulates assistant `text` blocks across events, throttle-writes (~750ms, trailing-edge) via `upsertActiveRun()`, and on the terminal `result` event (or an error/close) flushes a final write then calls `clearActiveRun()` so the row never outlives the job. `sessionId` is `memorySessionId` (the same id memory events use — see `docs/webhook-stepfunction-integration.md`). All best-effort: every call swallows and logs its own errors, exactly like the browser producer and every other memory write in this runtime.
 
-```ts
-{
-  sessionId: string;
-  messageId: string;
-  accumulatedText: string;
-  status: 'streaming' | 'done';
-  clear?: boolean; // force a delete even if status is 'streaming'
-}
-```
+### Cycle-safe wiring (`web/amplify/backend.ts` + `scripts/build.sh`)
 
-Response: `{ ok: boolean; id?: string }`. On `status: 'streaming'` it upserts the session's single `ActiveRun` row (list by `sessionId`, update if found else create), matching `web/lib/active-run.ts`'s semantics byte-for-byte so browser- and server-produced snapshots are interchangeable for the consumer in `loadHistory()`. On `status: 'done'` (or `clear: true`) it deletes the session's row(s). Write errors are logged and swallowed — `{ ok: false }` — never thrown, so a snapshot failure can never crash the caller. The core upsert/clear logic lives in `logic.ts` as `writeActiveRunWithClient`, a pure function parameterized on the data client, so it's unit-tested (`web/lib/write-active-run-logic.test.ts`) without needing the `$amplify/env/write-active-run` shim that only exists after a synth/deploy.
+Two constraints drove the wiring:
+
+1. **No reference from the agent stack to a data-stack token.** Granting IAM permissions on the *real* AppSync API ARN (`backend.data`'s CFN token) from the agent stack's runtime role would create a `data → function → agent → data` CloudFormation cycle (this killed an earlier PR, #230, twice). So `backend.ts` grants `appsync:GraphQL` and `ssm:GetParameter` using **wildcard string ARNs** (`arn:aws:appsync:*:*:apis/*/types/Mutation/fields/*`, `arn:aws:ssm:*:*:parameter/outputs/*`) — plain strings with no CDK token, matching the existing `states:SendTaskSuccess/Failure` grant's own comment ("no cross-stack token cycle").
+2. **No data-stack value baked into a CDK env var.** The GraphQL URL only exists after `ampx sandbox` synthesizes the data stack — encoding it as `agentCoreApp.addRuntimeEnvironmentVariable(...)` would reference that same token. Instead, `scripts/build.sh` publishes `{ url, region }` (read back from its own `amplify_outputs.json`, `.data.url` / `.data.aws_region`) to SSM at `/outputs/<repoSlug>/<branchSlug>/activerun-graphql` with `--overwrite`, after the sandbox deploy — the same idempotent, self-healing pattern the neighboring e2e-config publish already uses (see that block's comment for why: issue #192). `backend.ts` computes the identical path from `process.env.GITHUB_REPOSITORY` + the `backendName` CDK context value (both plain strings) and passes it to the runtime as the `ACTIVERUN_GRAPHQL_SSM_PATH` env var, so build.sh and backend.ts can't drift out of sync on the path itself.
+
+`active-run.js` reads that env var at startup, fetches the parameter once per process (cached), and no-ops (logs + skips every write) if it's absent — e.g. a local `agentcore dev` run against a branch that hasn't been through `scripts/build.sh` yet.
