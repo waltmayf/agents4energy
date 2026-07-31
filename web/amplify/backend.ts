@@ -2,6 +2,7 @@ import { defineBackend } from '@aws-amplify/backend';
 import { auth } from './auth/resource';
 import { data } from './data/resource';
 import { listSessionMessages } from './functions/list-session-messages/resource';
+import { writeActiveRun } from './functions/write-active-run/resource';
 import { updateSessionSummary } from './functions/update-session-summary/resource';
 import { registerMcpTarget } from './functions/register-mcp-target/resource';
 import { listMcpTools } from './functions/list-mcp-tools/resource';
@@ -134,6 +135,7 @@ const backend = defineBackend({
   auth,
   data,
   listSessionMessages,
+  writeActiveRun,
   updateSessionSummary,
   registerMcpTarget,
   listMcpTools,
