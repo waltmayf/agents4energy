@@ -18,11 +18,16 @@
 #   scripts/wait-for-agents.sh --timeout 10800 # give up after N seconds (exit 124)
 #
 # Exit codes: 0 = all agents done (queue printed); 124 = timed out still working.
-# Always targets the fork where CI runs. Override with REPO=owner/name.
+#
+# Config (repo, working label, bot, sentinel) is resolved by lib/agents-wait-config.sh:
+# env vars > nearest .agents-wait.json > built-in defaults. Defaults target the
+# fork where CI runs. Override with REPO=owner/name or a .agents-wait.json file.
 set -euo pipefail
 
-REPO="${REPO:-waltmayf/agents4energy}"
-WORK_LABEL="agent-working"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$script_dir/lib/agents-wait-config.sh"
+load_agents_wait_config
+
 interval=90
 timeout=0   # 0 = no timeout
 
@@ -34,18 +39,17 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 start=$SECONDS
 
 working_issues() {
-  gh issue list --repo "$REPO" --label "$WORK_LABEL" --state open \
+  gh issue list --repo "$REPO" --label "$AGENTS_WORK_LABEL" --state open \
     --json number,title --jq '.[] | "#\(.number) \(.title)"'
 }
 
 while :; do
   working="$(working_issues || true)"
   if [[ -z "$working" ]]; then
-    echo "✅ No issues carry '$WORK_LABEL' — all remote agents are done. Your turn."
+    echo "✅ No issues carry '$AGENTS_WORK_LABEL' — all remote agents are done. Your turn."
     echo
     "$script_dir/review-queue.sh" || true
     exit 0
