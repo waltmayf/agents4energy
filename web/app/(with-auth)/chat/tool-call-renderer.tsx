@@ -2,6 +2,7 @@
 import { useDefaultRenderTool } from '@copilotkit/react-core/v2';
 import { useState } from 'react';
 import { ChevronRightIcon, WrenchIcon, Loader2Icon } from 'lucide-react';
+import { Document, Scalar, visit } from 'yaml';
 
 /**
  * Registers a wildcard (`name: "*"`) tool-call renderer for the chat.
@@ -36,7 +37,7 @@ function ToolCallCard({
   result: string | undefined;
 }) {
   const [open, setOpen] = useState(false);
-  const argsText = formatJson(parameters);
+  const argsText = formatAsYaml(parameters);
 
   return (
     <div className="my-2 rounded-lg border bg-muted/30 text-sm">
@@ -78,7 +79,7 @@ function ToolCallCard({
                 Result
               </div>
               <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded bg-background px-2 py-1 text-xs">
-                {formatJson(result)}
+                {formatAsYaml(result)}
               </pre>
             </div>
           )}
@@ -88,18 +89,27 @@ function ToolCallCard({
   );
 }
 
-/** Pretty-print JSON-ish values; fall back to the raw string. */
-function formatJson(value: unknown): string {
+/** Pretty-print JSON-ish values as YAML, using block-scalar style for multi-line strings; fall back to the raw string. */
+function formatAsYaml(value: unknown): string {
   if (value == null) return '';
+  let parsed: unknown = value;
   if (typeof value === 'string') {
     try {
-      return JSON.stringify(JSON.parse(value), null, 2);
+      parsed = JSON.parse(value);
     } catch {
       return value;
     }
   }
   try {
-    return JSON.stringify(value, null, 2);
+    const doc = new Document(parsed);
+    visit(doc, {
+      Scalar(_key, node) {
+        if (typeof node.value === 'string' && node.value.includes('\n')) {
+          node.type = Scalar.BLOCK_LITERAL;
+        }
+      },
+    });
+    return doc.toString({ lineWidth: 0 }).trimEnd();
   } catch {
     return String(value);
   }
