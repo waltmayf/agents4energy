@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { writeActiveRunWithClient, type ActiveRunModelClient } from './logic.ts';
+import { writeActiveRunWithClient, type ActiveRunModelClient } from '../amplify/functions/write-active-run/logic.ts';
 
 /**
  * In-memory fake of the ActiveRun model's Amplify Data client calls — same
