@@ -2,7 +2,6 @@ import { defineBackend } from '@aws-amplify/backend';
 import { auth } from './auth/resource';
 import { data } from './data/resource';
 import { listSessionMessages } from './functions/list-session-messages/resource';
-import { writeActiveRun } from './functions/write-active-run/resource';
 import { updateSessionSummary } from './functions/update-session-summary/resource';
 import { registerMcpTarget } from './functions/register-mcp-target/resource';
 import { listMcpTools } from './functions/list-mcp-tools/resource';
@@ -135,7 +134,6 @@ const backend = defineBackend({
   auth,
   data,
   listSessionMessages,
-  writeActiveRun,
   updateSessionSummary,
   registerMcpTarget,
   listMcpTools,
@@ -709,6 +707,52 @@ if (claudeCodeRuntimeName) {
     actions: ['states:SendTaskSuccess', 'states:SendTaskFailure'],
     resources: [agentWebhookStack.stateMachineArn],
   }));
+
+  // Let the ClaudeCode runtime write its own ActiveRun snapshots straight to
+  // AppSync via SigV4 (issue #15, server-side producer) — the runtime's own
+  // execution-role credentials are a valid IAM principal for the GraphQL API,
+  // exactly like scripts/graphql.sh's local SigV4 calls. A wildcard string ARN
+  // (not backend.data's real API ARN) keeps this a plain string with no CDK
+  // token, so it can't introduce a data-stack -> agent-stack cycle the way
+  // referencing backend.data's ARN here would (see PR #230).
+  //
+  // Both Query AND Mutation fields are needed: active-run.js does a
+  // list-then-upsert (listActiveRuns is a *Query* field) and clearActiveRun
+  // lists before deleting — a Mutation-only grant would implicit-deny every
+  // listActiveRuns call, and since those errors are swallowed the row would
+  // silently never be created or cleared.
+  agentCoreApp.addRuntimeRolePolicy(claudeCodeRuntimeName, new PolicyStatement({
+    actions: ['appsync:GraphQL'],
+    resources: [
+      'arn:aws:appsync:*:*:apis/*/types/Query/fields/*',
+      'arn:aws:appsync:*:*:apis/*/types/Mutation/fields/*',
+    ],
+  }));
+
+  // The runtime learns the GraphQL endpoint + region at startup from an SSM
+  // parameter published post-deploy by scripts/build.sh (see the e2e-config
+  // param above for the same pattern) — not a CDK env var built from a
+  // data-stack token, which would reintroduce the cycle just avoided above.
+  agentCoreApp.addRuntimeRolePolicy(claudeCodeRuntimeName, new PolicyStatement({
+    actions: ['ssm:GetParameter'],
+    resources: ['arn:aws:ssm:*:*:parameter/outputs/*'],
+  }));
+
+  // Tell the runtime exactly which SSM path to read, computed the same way
+  // build.sh derives the path it publishes to (repo slug from GITHUB_REPOSITORY,
+  // branch slug from `backendName` — the CDK context value `ampx --identifier`
+  // sets to the same BRANCH_SLUG build.sh uses). Both sides are plain strings
+  // (no data-stack token), so this can't reintroduce the cycle avoided above.
+  const activeRunRepoSlug = (process.env.GITHUB_REPOSITORY ?? '')
+    .toLowerCase()
+    .replace(/[^a-z0-9/-]+/g, '-');
+  if (activeRunRepoSlug && backendName) {
+    agentCoreApp.addRuntimeEnvironmentVariable(
+      claudeCodeRuntimeName,
+      'ACTIVERUN_GRAPHQL_SSM_PATH',
+      `/outputs/${activeRunRepoSlug}/${backendName}/activerun-graphql`,
+    );
+  }
 }
 
 // Persist Claude Code's own turns into the same MyHarnessMemory resource the
