@@ -215,7 +215,10 @@ function ChatView({
       {/* Registers a wildcard tool-call renderer so tool activity (name/args/result)
           renders as a collapsible card instead of an empty bubble. Side-effect only. */}
       <ToolCallRenderer />
-      <div className="flex flex-col h-full min-h-0">
+      {/* h-dvh anchors this to the viewport directly — no ancestor layout sets an
+          explicit height, so `h-full` would resolve to nothing and let the page
+          grow with the message list instead of clipping to a scrollable region. */}
+      <div className="flex flex-col h-dvh min-h-0">
         <AwaitingInputBanner agent={activeAgent} />
         <div className="flex-1 min-h-0">
           <CopilotChat
