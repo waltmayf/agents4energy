@@ -17,10 +17,10 @@ function makeFakeModel() {
   };
 
   const ActiveRun = {
-    list: async ({ filter }: { filter?: { sessionId?: { eq?: string } }; limit?: number }) => {
+    // Mirrors the generated sessionId-GSI query field (chat.schema.ts).
+    listActiveRunBySession: async ({ sessionId }: { sessionId: string }) => {
       calls.list++;
-      const sessionId = filter?.sessionId?.eq;
-      const data = sessionId ? rows.filter((r) => r.sessionId === sessionId) : rows.slice();
+      const data = rows.filter((r) => r.sessionId === sessionId);
       return { data, errors: undefined };
     },
     create: async (input: { sessionId: string; messageId: string; accumulatedText: string; status: string; updatedAt: string }) => {

@@ -21,9 +21,11 @@ import { HttpRequest } from '@aws-sdk/protocol-http';
 import { SignatureV4 } from '@aws-sdk/signature-v4';
 import { Sha256 } from '@aws-crypto/sha256-js';
 
+// Key query against the sessionId GSI (see chat.schema.ts's secondaryIndexes())
+// rather than listActiveRuns' Scan-with-filter.
 const LIST_ACTIVE_RUNS = `
-  query ListActiveRuns($sessionId: ID!) {
-    listActiveRuns(filter: { sessionId: { eq: $sessionId } }, limit: 1) {
+  query ListActiveRunBySession($sessionId: ID!) {
+    listActiveRunBySession(sessionId: $sessionId, limit: 1) {
       items { id }
     }
   }
@@ -118,7 +120,7 @@ async function findActiveRunId({ url, region, sessionId, log }) {
   const data = await signedGraphqlRequest({
     url, region, query: LIST_ACTIVE_RUNS, variables: { sessionId }, log,
   });
-  return data?.listActiveRuns?.items?.[0]?.id ?? null;
+  return data?.listActiveRunBySession?.items?.[0]?.id ?? null;
 }
 
 /**

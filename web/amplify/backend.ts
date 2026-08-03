@@ -717,10 +717,10 @@ if (claudeCodeRuntimeName) {
   // referencing backend.data's ARN here would (see PR #230).
   //
   // Both Query AND Mutation fields are needed: active-run.js does a
-  // list-then-upsert (listActiveRuns is a *Query* field) and clearActiveRun
-  // lists before deleting — a Mutation-only grant would implicit-deny every
-  // listActiveRuns call, and since those errors are swallowed the row would
-  // silently never be created or cleared.
+  // list-then-upsert (listActiveRunBySession is a *Query* field) and
+  // clearActiveRun lists before deleting — a Mutation-only grant would
+  // implicit-deny every listActiveRunBySession call, and since those errors are
+  // swallowed the row would silently never be created or cleared.
   agentCoreApp.addRuntimeRolePolicy(claudeCodeRuntimeName, new PolicyStatement({
     actions: ['appsync:GraphQL'],
     resources: [

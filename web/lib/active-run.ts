@@ -12,12 +12,11 @@ export type ActiveRun = Awaited<ReturnType<typeof dataClient.models.ActiveRun.ge
  * Returns null if no record exists.
  */
 export async function fetchActiveRun(sessionId: string): Promise<ActiveRun> {
-  // Query by sessionId field; assuming sessionId is the primary identifier.
-  // Use list with filter to get the record.
-  const res = await dataClient.models.ActiveRun.list({
-    filter: { sessionId: { eq: sessionId } },
-    limit: 1,
-  });
+  // Key query against the sessionId GSI (listActiveRunBySession) rather than a
+  // Scan-with-filter — see the secondaryIndexes() note in chat.schema.ts.
+  const res = await dataClient.models.ActiveRun.listActiveRunBySession({
+    sessionId,
+  }, { limit: 1 });
   const rec = (res.data ?? [])[0];
   return rec ?? null;
 }
@@ -51,10 +50,9 @@ export async function upsertActiveRun(input: UpsertActiveRunInput, existingId?: 
       return res.data?.id ?? existingId;
     }
 
-    const listRes = await dataClient.models.ActiveRun.list({
-      filter: { sessionId: { eq: input.sessionId } },
-      limit: 1,
-    });
+    const listRes = await dataClient.models.ActiveRun.listActiveRunBySession({
+      sessionId: input.sessionId,
+    }, { limit: 1 });
     const existing = (listRes.data ?? [])[0];
     if (existing) {
       const res = await dataClient.models.ActiveRun.update({
@@ -86,10 +84,9 @@ export async function upsertActiveRun(input: UpsertActiveRunInput, existingId?: 
 /** Delete the session's ActiveRun row(s), swallowing errors — best-effort cleanup. */
 export async function clearActiveRun(sessionId: string): Promise<void> {
   try {
-    const res = await dataClient.models.ActiveRun.list({
-      filter: { sessionId: { eq: sessionId } },
-      limit: 10,
-    });
+    const res = await dataClient.models.ActiveRun.listActiveRunBySession({
+      sessionId,
+    }, { limit: 10 });
     for (const row of res.data ?? []) {
       await dataClient.models.ActiveRun.delete({ id: row.id });
     }
