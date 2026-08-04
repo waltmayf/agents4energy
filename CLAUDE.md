@@ -146,5 +146,5 @@ See [docs/agentic-architecture.md](docs/agentic-architecture.md) for the full da
 
 - `agentcore.json` is the source of truth for AgentCore resources — do not edit CDK output files directly. Renaming a resource destroys and recreates it.
 - `web/deployment-info.json` is populated by the deploy script; do not hand-edit ARNs there.
-- Amplify hardcodes the Memory ARN and Gateway ID in `web/amplify/backend.ts` — update those constants after any AgentCore redeploy that changes those resources.
+- The AgentCore Memory ARN and Gateway ID are **derived** from the `AgentCoreApplication` construct in `web/amplify/backend.ts` (`agentCoreApp.memoryArn(...)` / `agentCoreApp.gatewayId(...)`) and published to SSM Parameter Store under `/agentcore/<stackName>/…` to avoid cross-stack CloudFormation export cycles — they are **not** hardcoded, so no manual update is needed after an AgentCore redeploy.
 - E2E tests run serially (workers=1) because tests share session state stored in `localStorage`.

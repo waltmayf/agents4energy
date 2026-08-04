@@ -11,16 +11,18 @@
  *   npx tsx scripts/setup-github-webhook.ts --repo owner/name
  *   npx tsx scripts/setup-github-webhook.ts --repo owner/name \
  *     --outputs web/amplify_outputs.json \
- *     --secret-arn arn:aws:secretsmanager:...:secret:agents4energy/github-webhook-secret-XXXX
+ *     --secret <hmac-value>   # or legacy: --secret-arn arn:...:secret:...
  *
  * What it does:
  *   1. Reads `custom.agent_webhook_url` from web/amplify_outputs.json (written by
  *      `ampx sandbox` / `pnpm deploy`).
- *   2. Reads the webhook HMAC secret from Secrets Manager. The ARN is taken from
- *      --secret-arn, else $GITHUB_WEBHOOK_SECRET_ARN, else the receiver Lambda's
- *      GITHUB_WEBHOOK_SECRET_ARN env var (discovered from the same sandbox) so
- *      the value registered on GitHub is guaranteed to match what the deployed
- *      receiver verifies against.
+ *   2. Resolves the webhook HMAC secret value. Preference order:
+ *        a. --secret <value> (explicit),
+ *        b. the deployed receiver Lambda's GITHUB_WEBHOOK_SECRET env var — the
+ *           resolved value Amplify's secret() injected (issue #239), so what we
+ *           register on GitHub can't drift from what the receiver verifies,
+ *        c. --secret-arn / $GITHUB_WEBHOOK_SECRET_ARN → Secrets Manager
+ *           (legacy fallback for backends predating the secret() migration).
  *   3. Creates the repo webhook (event: issue_comment, content-type: json,
  *      secret: the HMAC value) — or, if a hook with the same payload URL already
  *      exists, updates it in place. Never creates a duplicate.
@@ -96,11 +98,15 @@ try {
   fail('gh CLI is not authenticated. Run `gh auth login` (needs admin:repo_hook, covered by the `repo` scope).');
 }
 
-// ─── Resolve the webhook HMAC secret ARN ──────────────────────────────────────
+// ─── Resolve the webhook HMAC secret value ─────────────────────────────────────
 // Prefer the value the deployed receiver Lambda actually verifies against, so
-// the secret registered on GitHub can never drift from the backend.
+// the secret registered on GitHub can never drift from the backend. Since the
+// secret() migration (issue #239) the receiver holds the RESOLVED value in its
+// GITHUB_WEBHOOK_SECRET env var — read that directly. Fall back to the legacy
+// Secrets Manager ARN path for backends deployed before the migration.
 
-function findReceiverSecretArn(): string | undefined {
+// Returns [value | undefined, legacyArn | undefined] from the deployed receiver.
+function readReceiverEnv(): { value?: string; legacyArn?: string } {
   try {
     const fns = JSON.parse(
       aws(
@@ -115,41 +121,60 @@ function findReceiverSecretArn(): string | undefined {
           `--function-name ${name} --query "Environment.Variables" --output json`,
         ),
       ) as Record<string, string>;
-      if (env?.GITHUB_WEBHOOK_SECRET_ARN) return env.GITHUB_WEBHOOK_SECRET_ARN;
+      if (env?.GITHUB_WEBHOOK_SECRET) return { value: env.GITHUB_WEBHOOK_SECRET };
+      if (env?.GITHUB_WEBHOOK_SECRET_ARN) return { legacyArn: env.GITHUB_WEBHOOK_SECRET_ARN };
     }
   } catch { /* fall through */ }
-  return undefined;
+  return {};
 }
 
-const secretArn =
-  argFlag('--secret-arn') ??
-  process.env.GITHUB_WEBHOOK_SECRET_ARN ??
-  findReceiverSecretArn();
-
-if (!secretArn) {
-  fail(
-    'Could not determine the webhook secret ARN. Pass --secret-arn, set ' +
-    '$GITHUB_WEBHOOK_SECRET_ARN, or ensure the receiver Lambda was deployed ' +
-    'with GITHUB_WEBHOOK_SECRET_ARN set.',
-  );
+function readSecretFromArn(arn: string): string {
+  let v: string;
+  try {
+    v = aws(
+      `secretsmanager get-secret-value --region ${region} ` +
+      `--secret-id ${arn} --query SecretString --output text`,
+    );
+  } catch (e) {
+    fail(`Failed to read the webhook secret from ${arn}: ${(e as Error).message}`);
+  }
+  if (!v || v === 'None') fail(`Secret ${arn} has no SecretString value.`);
+  return v;
 }
 
 let secretValue: string;
-try {
-  secretValue = aws(
-    `secretsmanager get-secret-value --region ${region} ` +
-    `--secret-id ${secretArn} --query SecretString --output text`,
-  );
-} catch (e) {
-  fail(`Failed to read the webhook secret from ${secretArn}: ${(e as Error).message}`);
-}
-if (!secretValue || secretValue === 'None') {
-  fail(`Secret ${secretArn} has no SecretString value.`);
+let secretSource: string;
+
+const explicitValue = argFlag('--secret');
+const explicitArn = argFlag('--secret-arn') ?? process.env.GITHUB_WEBHOOK_SECRET_ARN;
+
+if (explicitValue) {
+  secretValue = explicitValue;
+  secretSource = '--secret (explicit value)';
+} else if (explicitArn) {
+  secretValue = readSecretFromArn(explicitArn);
+  secretSource = `Secrets Manager (${explicitArn})`;
+} else {
+  const receiver = readReceiverEnv();
+  if (receiver.value) {
+    secretValue = receiver.value;
+    secretSource = 'receiver Lambda GITHUB_WEBHOOK_SECRET (Amplify secret)';
+  } else if (receiver.legacyArn) {
+    secretValue = readSecretFromArn(receiver.legacyArn);
+    secretSource = `receiver Lambda legacy ARN (${receiver.legacyArn})`;
+  } else {
+    fail(
+      'Could not determine the webhook secret. Pass --secret <value>, or set the ' +
+      'GITHUB_WEBHOOK_SECRET Amplify secret and deploy so the receiver Lambda ' +
+      'carries it (npx ampx sandbox secret set GITHUB_WEBHOOK_SECRET). Legacy: ' +
+      'pass --secret-arn / set $GITHUB_WEBHOOK_SECRET_ARN.',
+    );
+  }
 }
 
 console.log(`Repository:  ${repo}`);
 console.log(`Webhook URL: ${webhookUrl}`);
-console.log(`Secret ARN:  ${secretArn}`);
+console.log(`Secret from: ${secretSource}`);
 console.log(`Region:      ${region}\n`);
 
 // ─── Create or update the hook (idempotent) ────────────────────────────────────

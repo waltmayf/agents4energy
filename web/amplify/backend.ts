@@ -561,7 +561,10 @@ if (GITHUB_APP_PRIVATE_KEY_SECRET_ARN) {
 // Lambda fails cleanly at invoke time instead of failing the whole deploy.
 // ============================================================================
 
-const GITHUB_WEBHOOK_SECRET_ARN = process.env.GITHUB_WEBHOOK_SECRET_ARN ?? '';
+// GitHub webhook HMAC secret is now an Amplify secret() wired directly in
+// agent-webhook-receiver/resource.ts (issue #239) — Amplify injects the value
+// and grants read access automatically, so it needs no ARN env var or manual
+// GetSecretValue grant here. Jira's secret stays on the optional ARN pattern.
 const JIRA_WEBHOOK_SECRET_ARN = process.env.JIRA_WEBHOOK_SECRET_ARN ?? '';
 const JIRA_API_TOKEN_SECRET_ARN = process.env.JIRA_API_TOKEN_SECRET_ARN ?? '';
 
@@ -581,11 +584,13 @@ backend.agentWebhookPostComment.addEnvironment('HOSTING_DOMAIN', hosting.distrib
 backend.agentWebhookPostComment.addEnvironment('BRANCH_SLUG', backendName ?? '');
 backend.agentWebhookPostComment.addEnvironment('CLAUDE_CODE_RUNTIME_ARN', AGENTCORE_CLAUDE_CODE_RUNTIME_ARN);
 
-const secretArns = [GITHUB_WEBHOOK_SECRET_ARN, JIRA_WEBHOOK_SECRET_ARN].filter(Boolean);
-if (secretArns.length) {
+// Only Jira's secret is still fetched from Secrets Manager at runtime; the
+// GitHub webhook secret is an Amplify secret() (auto-granted). Grant the read
+// only when Jira is configured on this branch.
+if (JIRA_WEBHOOK_SECRET_ARN) {
   webhookReceiverLambda.addToRolePolicy(new PolicyStatement({
     actions: ['secretsmanager:GetSecretValue'],
-    resources: secretArns,
+    resources: [JIRA_WEBHOOK_SECRET_ARN],
   }));
 }
 if (GITHUB_APP_PRIVATE_KEY_SECRET_ARN) {

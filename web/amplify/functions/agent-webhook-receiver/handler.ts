@@ -13,7 +13,10 @@ import { verifyGithubSignature, verifyJiraSharedSecret, extractPromptAfterMentio
 import { execName, sharedNamePrefix } from '../../../lib/exec-name';
 
 const REGION = process.env.AWS_REGION ?? 'us-east-1';
-const GITHUB_WEBHOOK_SECRET_ARN = process.env.GITHUB_WEBHOOK_SECRET_ARN ?? '';
+// GitHub HMAC secret value, injected directly by Amplify's secret() (issue
+// #239) — the handler compares against it with no runtime Secrets Manager call.
+const GITHUB_WEBHOOK_SECRET = process.env.GITHUB_WEBHOOK_SECRET ?? '';
+// Jira stays on the optional ARN pattern (fetched from Secrets Manager below).
 const JIRA_WEBHOOK_SECRET_ARN = process.env.JIRA_WEBHOOK_SECRET_ARN ?? '';
 const STATE_MACHINE_ARN = process.env.STATE_MACHINE_ARN ?? '';
 // Lets the receiver reach into the Claude Code runtime and kill a superseded
@@ -28,6 +31,17 @@ const CLAUDE_CODE_RUNTIME_ARN = process.env.CLAUDE_CODE_RUNTIME_ARN ?? '';
 // `agent-working` / `agent-error` labels around the run (see issue #56 and
 // docs/webhook-stepfunction-integration.md "Label triggers").
 const TRIGGER_LABEL = 'agentcore';
+
+// Who may invoke the agent from a comment mention. GitHub stamps each comment
+// with the commenter's `author_association` to the repo; OWNER/MEMBER/
+// COLLABORATOR all imply write or admin access, whereas CONTRIBUTOR,
+// FIRST_TIME_CONTRIBUTOR, FIRST_TIMER, MANNEQUIN, and NONE do not. Gating on
+// this (no extra API call — it's already in the webhook payload) stops an
+// untrusted commenter from steering an agent that holds repo-write credentials
+// and can run arbitrary shell in its session. The label trigger needs no such
+// check: GitHub only lets users with triage/write/admin permission apply a
+// label in the first place, so reaching the labeled event already proves trust.
+const AUTHORIZED_ASSOCIATIONS = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
 
 const secretsManager = new SecretsManagerClient({ region: REGION });
 const sfn = new SFNClient({ region: REGION });
@@ -183,7 +197,14 @@ async function cancelPriorRuns(namePrefix: string, log: (msg: string) => void): 
 
 interface GithubIssueCommentPayload {
   action: string;
-  comment: { id: number; body: string; user: { login: string; type: string } };
+  comment: {
+    id: number;
+    body: string;
+    user: { login: string; type: string };
+    // The commenter's relationship to the repo — OWNER/MEMBER/COLLABORATOR
+    // imply write/admin; see AUTHORIZED_ASSOCIATIONS.
+    author_association: string;
+  };
   issue: { number: number; title: string; body: string | null; pull_request?: unknown };
   repository: { full_name: string };
   sender: { login: string; type: string };
@@ -208,8 +229,10 @@ interface JiraCommentPayload {
 }
 
 // Runs behind an API Gateway HTTP API with no built-in auth — GitHub/Jira
-// can't do SigV4/Cognito, so per-source signature verification (below) is
-// the only gate. Always returns 200 quickly (StartExecution is fire-and-forget)
+// can't do SigV4/Cognito, so per-source signature verification (below) is the
+// transport gate. GitHub comment mentions are additionally gated on the
+// commenter's author_association (see AUTHORIZED_ASSOCIATIONS) so only repo
+// write/admin users can drive the agent. Always returns 200 quickly (StartExecution is fire-and-forget)
 // so neither GitHub's ~10s nor Jira's webhook timeout is ever at risk; the
 // Step Function does the actual (multi-minute) agent work asynchronously.
 export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGatewayProxyStructuredResultV2> => {
@@ -228,11 +251,10 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
     if (githubEvent !== 'issue_comment' && githubEvent !== 'issues' && githubEvent !== 'pull_request') {
       return json(200, { skipped: `unsupported github event: ${githubEvent}` });
     }
-    if (!GITHUB_WEBHOOK_SECRET_ARN) {
-      return json(500, { error: 'GITHUB_WEBHOOK_SECRET_ARN not configured' });
+    if (!GITHUB_WEBHOOK_SECRET) {
+      return json(500, { error: 'GITHUB_WEBHOOK_SECRET not configured' });
     }
-    const secret = await getSecret(GITHUB_WEBHOOK_SECRET_ARN);
-    if (!verifyGithubSignature(rawBody, headers['x-hub-signature-256'], secret)) {
+    if (!verifyGithubSignature(rawBody, headers['x-hub-signature-256'], GITHUB_WEBHOOK_SECRET)) {
       return json(401, { error: 'invalid signature' });
     }
 
@@ -299,6 +321,16 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
 
     const mention = parseMention(payload.comment.body);
     if (mention === null) return json(200, { skipped: 'no trigger mention' });
+
+    // Authorization gate (checked only once a trigger mention is present, so
+    // ordinary comments from anyone still pass through untouched). The agent
+    // holds repo-write credentials and runs arbitrary shell, so only users with
+    // write/admin on the repo may invoke it — see AUTHORIZED_ASSOCIATIONS.
+    const association = payload.comment.author_association ?? '';
+    if (!AUTHORIZED_ASSOCIATIONS.has(association)) {
+      console.log(`[receiver] rejected mention from unauthorized sender=${senderLogin} association=${association || '(none)'}`);
+      return json(200, { skipped: `unauthorized sender (association=${association || 'NONE'})` });
+    }
 
     const runId = randomUUID();
     const namePrefixBase = `github-${payload.repository.full_name.replace(/\//g, '-')}-${payload.issue.number}`;

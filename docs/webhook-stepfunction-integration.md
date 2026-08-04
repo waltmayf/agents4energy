@@ -21,6 +21,9 @@ GitHub issue_comment webhook          Jira comment_created webhook
           (issue_comment), OR the "agentcore" label applied to an issue/PR
           (issues/pull_request); sets $.agent = "claude" for @agentcore-claude,
           else "harness" (labels/Jira always route to the harness)
+        • authorization (GitHub comment mentions): rejects unless the
+          commenter's author_association is OWNER/MEMBER/COLLABORATOR —
+          see "Authorization" below
         • loop prevention: ignores Bot / *[bot] senders (GitHub)
         • StartExecution (fire-and-forget — returns 202 immediately,
           well under GitHub's/Jira's webhook timeout)
@@ -170,7 +173,22 @@ phrase distinction is kept as-is (no reason to rename `@agentcore` back to `@age
 
 **Why Jira uses a shared secret instead of HMAC:** Jira Cloud's classic REST-API-registered webhooks (the kind you register via `POST /rest/webhooks/1.0/webhook` or a simple app descriptor) have no signing scheme equivalent to GitHub's `X-Hub-Signature-256`. Atlassian only signs webhook deliveries for full Connect/Forge app installations, which is a much heavier integration than this pipeline needs. A shared secret passed as a query parameter — compared with `crypto.timingSafeEqual`, never logged — is the standard workaround. If Jira Connect/Forge support is ever added here, prefer its signed-JWT scheme instead.
 
-Both secrets are Secrets Manager ARNs supplied as deploy-time inputs (`GITHUB_WEBHOOK_SECRET_ARN`, `JIRA_WEBHOOK_SECRET_ARN`) — see "Setup" below. If unset, the receiver Lambda fails cleanly at invoke time with a clear error; synth/deploy still succeeds (same pattern as `GITHUB_APP_PRIVATE_KEY_SECRET_ARN` in `docs/github-integration.md`).
+The two secrets are sourced differently (issue #239):
+
+- **GitHub HMAC secret** is an **Amplify `secret()`** (`GITHUB_WEBHOOK_SECRET`), wired in [`agent-webhook-receiver/resource.ts`](../web/amplify/functions/agent-webhook-receiver/resource.ts). Amplify stores it as an SSM SecureString, injects the resolved value into the receiver at deploy, and grants read access automatically — so the receiver compares against it with **no runtime Secrets Manager call**, and a bare local `ampx sandbox` deploy (which doesn't export any GitHub env vars) can no longer silently blank it. This replaced the earlier `GITHUB_WEBHOOK_SECRET_ARN` deploy-time env var, whose absence on a local deploy wiped both the value and its IAM grant, 500-ing every delivery. Set it once with `npx ampx sandbox secret set GITHUB_WEBHOOK_SECRET` (local) or as a branch/shared secret in the Amplify console (CI).
+- **Jira shared secret** stays a Secrets Manager ARN deploy-time input (`JIRA_WEBHOOK_SECRET_ARN`) — Jira is optional and `secret()` fails the whole deploy when unset, so keeping it on the ARN pattern preserves Jira-less deploys. If unset, only the Jira path is disabled (the receiver fails cleanly for Jira at invoke time); synth/deploy still succeeds.
+
+## Authorization (who may invoke the agent)
+
+Signature verification proves a delivery came *from* GitHub/Jira — not that the human behind it is allowed to drive an agent that holds repo-write credentials and runs arbitrary shell in its session. Comment mentions are gated on the commenter's identity on top of the signature check:
+
+| Trigger | Gate |
+|---|---|
+| GitHub **comment mention** (`@agentcore`/`@agentcore-claude`) | The comment's `author_association` must be `OWNER`, `MEMBER`, or `COLLABORATOR` (all imply write/admin). `CONTRIBUTOR`, `FIRST_TIME_CONTRIBUTOR`, `FIRST_TIMER`, `MANNEQUIN`, and `NONE` are rejected with a `200 { skipped: "unauthorized sender ..." }`. The field ships in the webhook payload, so this costs no extra API call. |
+| GitHub **`agentcore` label** | No explicit check needed — GitHub only lets users with **triage/write/admin** permission apply a label, so a `labeled` event reaching the receiver already proves the labeler is trusted. (The labeled-event payload's `author_association` is the *issue author's*, not the labeler's, so an explicit check there would gate the wrong person.) |
+| **Jira** comment | Not identity-gated — Jira payloads carry no repo-permission concept. The `?secret=` shared secret + who can comment on the Jira project is the trust boundary. |
+
+The gate lives in `agent-webhook-receiver/handler.ts` (`AUTHORIZED_ASSOCIATIONS`), applied only *after* a trigger mention is detected, so ordinary comments from anyone still flow through untouched — an unauthorized user simply gets no agent run. Rejections are logged (sender login + association) but return `200` so GitHub doesn't retry the delivery.
 
 ### Lambda REQUEST authorizer (issue #83)
 
@@ -276,25 +294,34 @@ With `gh` authenticated, the `<github_access>` prompt block tells the agent to o
 
 ## Setup
 
-All inputs below are deploy-time environment variables read in `backend.ts`, mirroring `GITHUB_APP_ID` / `GITHUB_APP_PRIVATE_KEY_SECRET_ARN` in `docs/github-integration.md`. None are created by this stack.
+Except for the GitHub HMAC secret (an Amplify `secret()` — see below), all inputs below are deploy-time environment variables read in `backend.ts`, mirroring `GITHUB_APP_ID` / `GITHUB_APP_PRIVATE_KEY_SECRET_ARN` in `docs/github-integration.md`. None are created by this stack.
+
+**GitHub webhook HMAC secret — set as an Amplify secret, not an env var** (issue #239):
+
+```bash
+# Local sandbox:
+npx ampx sandbox secret set GITHUB_WEBHOOK_SECRET
+# CI / branch deploys: set GITHUB_WEBHOOK_SECRET as a branch or shared secret
+# in the Amplify console (Hosting → Secrets).
+```
 
 | Env var | Required for | Value |
 |---|---|---|
 | `GITHUB_APP_ID` | GitHub comments | Same GitHub App as `docs/github-integration.md` |
 | `GITHUB_APP_PRIVATE_KEY_SECRET_ARN` | GitHub comments | Same secret as `docs/github-integration.md` |
-| `GITHUB_WEBHOOK_SECRET_ARN` | GitHub comments | Secrets Manager ARN of a secret whose value is the webhook's HMAC secret |
 | `JIRA_WEBHOOK_SECRET_ARN` | Jira comments | Secrets Manager ARN of the shared secret used in `?secret=` |
 | `JIRA_BASE_URL` | Jira comments | e.g. `https://your-domain.atlassian.net` |
 | `JIRA_API_EMAIL` | Jira comments | Email of the Jira account whose API token is below |
 | `JIRA_API_TOKEN_SECRET_ARN` | Jira comments | Secrets Manager ARN of a [Jira API token](https://id.atlassian.com/manage-profile/security/api-tokens) |
 
-After `pnpm deploy`, register the webhook on the repo. For **GitHub**, use the scripted setup — it reads `custom.agent_webhook_url` from `amplify_outputs.json`, pulls the HMAC secret straight from the deployed receiver Lambda's `GITHUB_WEBHOOK_SECRET_ARN` (so the registered secret can't drift from what the backend verifies), and creates-or-updates the hook idempotently:
+After `pnpm deploy`, register the webhook on the repo. For **GitHub**, use the scripted setup — it reads `custom.agent_webhook_url` from `amplify_outputs.json`, pulls the HMAC secret straight from the deployed receiver Lambda's `GITHUB_WEBHOOK_SECRET` env var (the value Amplify's `secret()` injected, so the registered secret can't drift from what the backend verifies), and creates-or-updates the hook idempotently:
 
 ```bash
 npx tsx scripts/setup-github-webhook.ts --repo owner/name
+# or pass the value explicitly: --secret <hmac-value>
 ```
 
-Re-running it just updates the existing hook in place (matched by payload URL) — no duplicates. To register manually instead: repo → Settings → Webhooks → Add webhook, Payload URL = `agent_webhook_url`, content type `application/json`, secret = the value stored at `GITHUB_WEBHOOK_SECRET_ARN`, events = "Issue comments" only.
+Re-running it just updates the existing hook in place (matched by payload URL) — no duplicates. To register manually instead: repo → Settings → Webhooks → Add webhook, Payload URL = `agent_webhook_url`, content type `application/json`, secret = the value you set for the `GITHUB_WEBHOOK_SECRET` Amplify secret, events = "Issue comments", "Issues", and "Pull requests".
 
 - **Jira**: Settings → System → WebHooks → Create a WebHook. URL = `<agent_webhook_url>?source=jira&secret=<value stored at JIRA_WEBHOOK_SECRET_ARN>`, event = "Comment created".
 

@@ -81,7 +81,10 @@ jobs:
           DEPLOY_BRANCH: ${{ github.ref_name }}
           GITHUB_APP_ID: ${{ vars.AGENT_GITHUB_APP_ID }}
           GITHUB_APP_PRIVATE_KEY_SECRET_ARN: ${{ vars.AGENT_GITHUB_APP_PRIVATE_KEY_SECRET_ARN }}
-          GITHUB_WEBHOOK_SECRET_ARN: ${{ vars.AGENT_GITHUB_WEBHOOK_SECRET_ARN }}
+          # GITHUB_WEBHOOK_SECRET is now an Amplify secret() (issue #239), not a
+          # deploy-time env var — set it as a branch/shared secret in the Amplify
+          # console (or `npx ampx sandbox secret set GITHUB_WEBHOOK_SECRET`), so
+          # it survives deploys that don't export it. No CI var needed here.
           JIRA_WEBHOOK_SECRET_ARN: ${{ vars.AGENT_JIRA_WEBHOOK_SECRET_ARN }}
           JIRA_API_TOKEN_SECRET_ARN: ${{ vars.AGENT_JIRA_API_TOKEN_SECRET_ARN }}
           JIRA_BASE_URL: ${{ vars.AGENT_JIRA_BASE_URL }}
