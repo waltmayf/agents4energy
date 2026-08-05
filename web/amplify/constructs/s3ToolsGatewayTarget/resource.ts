@@ -52,6 +52,12 @@ export class S3ToolsGatewayTarget extends Construct {
         'bedrock-agentcore:UpdateGatewayTarget',
         'bedrock-agentcore:DeleteGatewayTarget',
         'bedrock-agentcore:GetGatewayTarget',
+        // Create/Update/DeleteGatewayTarget internally re-synchronize the
+        // gateway's target set, so the control plane also authorizes
+        // SynchronizeGatewayTargets on the parent gateway — without it,
+        // CreateGatewayTarget fails with AccessDenied. (Matches the
+        // register-mcp-target grant in backend.ts.)
+        'bedrock-agentcore:SynchronizeGatewayTargets',
       ],
       resources: [props.gatewayArn],
     }));
