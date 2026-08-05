@@ -20,16 +20,12 @@ const MAX_READ_BYTES = 1024 * 1024;
 const s3 = new S3Client({ region: REGION });
 
 // The gateway invokes this Lambda directly (no MCP JSON-RPC envelope) — the
-// event IS the tool's input arguments. Which of the 4 tools was called, and
-// the session id forwarded from invoke-agent's buildTools() header injection,
-// arrive out-of-band on context.clientContext.custom (verified empirically
-// against the live gateway — see PR #241 for details):
-//   bedrockAgentCoreToolName            "<gatewayTargetName>___ApplyDiff"
-//   bedrockAgentCorePropagatedHeaders   { "x-session-id": "<sessionId>" }
+// event IS the tool's input arguments. Which of the 4 tools was called
+// arrives out-of-band on context.clientContext.custom.bedrockAgentCoreToolName
+// (form "<gatewayTargetName>___<ToolName>"), since one Lambda backs all 4 tools.
 interface GatewayClientContext {
   custom?: {
     bedrockAgentCoreToolName?: string;
-    bedrockAgentCorePropagatedHeaders?: Record<string, string>;
   };
 }
 
@@ -37,7 +33,6 @@ interface ToolEvent {
   path?: string;
   diff?: string;
   recursive?: boolean;
-  sessionId?: string; // explicit fallback (approach 2) if header forwarding is ever unavailable
   [key: string]: unknown;
 }
 
@@ -47,19 +42,6 @@ function extractToolName(context: Context): string {
   // Gateway-target tool names are "<targetName>___<ToolName>".
   const idx = raw.lastIndexOf('___');
   return idx === -1 ? raw : raw.slice(idx + 3);
-}
-
-function extractSessionId(context: Context, event: ToolEvent): string {
-  const headers = (context.clientContext as GatewayClientContext | undefined)?.custom
-    ?.bedrockAgentCorePropagatedHeaders;
-  const fromHeader = headers?.['x-session-id'];
-  const sessionId = fromHeader || event.sessionId;
-  if (!sessionId) {
-    throw new Error(
-      'No session id available — expected the "x-session-id" header forwarded by the gateway, or a "sessionId" tool argument',
-    );
-  }
-  return sessionId;
 }
 
 async function getObjectText(key: string): Promise<string | undefined> {
@@ -72,19 +54,12 @@ async function getObjectText(key: string): Promise<string | undefined> {
   }
 }
 
-function assertWritable(isDocs: boolean, path: string): void {
-  if (isDocs) {
-    throw new Error(`"${path}" is under the read-only docs/ prefix and cannot be modified or deleted`);
-  }
-}
-
-async function handleApplyDiff(event: ToolEvent, sessionId: string): Promise<unknown> {
+async function handleApplyDiff(event: ToolEvent): Promise<unknown> {
   const { path, diff } = event;
   if (!path) throw new Error('path is required');
   if (diff === undefined || diff === null) throw new Error('diff is required');
 
-  const { key, isDocs } = resolveS3Path(path, sessionId);
-  assertWritable(isDocs, path);
+  const key = resolveS3Path(path);
 
   const original = await getObjectText(key);
   const { content, created } = applyDiff(original, diff);
@@ -94,11 +69,11 @@ async function handleApplyDiff(event: ToolEvent, sessionId: string): Promise<unk
   return { path, created, bytesWritten: Buffer.byteLength(content, 'utf-8') };
 }
 
-async function handleReadFile(event: ToolEvent, sessionId: string): Promise<unknown> {
+async function handleReadFile(event: ToolEvent): Promise<unknown> {
   const { path } = event;
   if (!path) throw new Error('path is required');
 
-  const { key } = resolveS3Path(path, sessionId);
+  const key = resolveS3Path(path);
 
   let head;
   try {
@@ -120,12 +95,11 @@ async function handleReadFile(event: ToolEvent, sessionId: string): Promise<unkn
   return { path, content };
 }
 
-async function handleDeleteFile(event: ToolEvent, sessionId: string): Promise<unknown> {
+async function handleDeleteFile(event: ToolEvent): Promise<unknown> {
   const { path } = event;
   if (!path) throw new Error('path is required');
 
-  const { key, isDocs } = resolveS3Path(path, sessionId);
-  assertWritable(isDocs, path);
+  const key = resolveS3Path(path);
 
   await s3.send(new DeleteObjectCommand({ Bucket: BUCKET_NAME, Key: key }));
   return { path, deleted: true };
@@ -141,9 +115,9 @@ interface DirEntry {
   type: 'directory';
 }
 
-async function handleListFiles(event: ToolEvent, sessionId: string): Promise<unknown> {
+async function handleListFiles(event: ToolEvent): Promise<unknown> {
   const { path, recursive } = event;
-  const { prefix } = resolveS3Prefix(path, sessionId);
+  const prefix = resolveS3Prefix(path);
 
   const entries: Array<FileEntry | DirEntry> = [];
   let continuationToken: string | undefined;
@@ -168,24 +142,22 @@ async function handleListFiles(event: ToolEvent, sessionId: string): Promise<unk
     continuationToken = res.IsTruncated ? res.NextContinuationToken : undefined;
   } while (continuationToken);
 
-  return { path: path ?? '.', entries };
+  return { path: path ?? '/', entries };
 }
 
 export const handler = async (event: ToolEvent, context: Context): Promise<unknown> => {
   const toolName = extractToolName(context);
 
   try {
-    const sessionId = extractSessionId(context, event);
-
     switch (toolName) {
       case 'ApplyDiff':
-        return await handleApplyDiff(event, sessionId);
+        return await handleApplyDiff(event);
       case 'ListFiles':
-        return await handleListFiles(event, sessionId);
+        return await handleListFiles(event);
       case 'ReadFile':
-        return await handleReadFile(event, sessionId);
+        return await handleReadFile(event);
       case 'DeleteFile':
-        return await handleDeleteFile(event, sessionId);
+        return await handleDeleteFile(event);
       default:
         throw new Error(`Unknown tool: "${toolName}"`);
     }

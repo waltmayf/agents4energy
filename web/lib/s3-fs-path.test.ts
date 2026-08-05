@@ -2,82 +2,72 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { resolveS3Path, resolveS3Prefix, S3FsPathError } from './s3-fs-path.ts';
 
-test('absolute path resolves from bucket root', () => {
-  const { key, isDocs } = resolveS3Path('/docs/production/gas_lift.md', 'sess-1');
-  assert.equal(key, 'docs/production/gas_lift.md');
-  assert.equal(isDocs, true);
+test('absolute path resolves under the files/ root', () => {
+  const key = resolveS3Path('/docs/production/gas_lift.md');
+  assert.equal(key, 'files/docs/production/gas_lift.md');
 });
 
-test('relative path resolves against session workspace', () => {
-  const { key, isDocs } = resolveS3Path('example.txt', 'sess-1');
-  assert.equal(key, 'workspace/id=sess-1/example.txt');
-  assert.equal(isDocs, false);
+test('relative path resolves under the files/ root', () => {
+  const key = resolveS3Path('example.txt');
+  assert.equal(key, 'files/example.txt');
 });
 
-test('relative nested path resolves against session workspace', () => {
-  const { key } = resolveS3Path('reports/q3.md', 'sess-1');
-  assert.equal(key, 'workspace/id=sess-1/reports/q3.md');
-});
-
-test('relative path requires a sessionId', () => {
-  assert.throws(() => resolveS3Path('example.txt', ''), S3FsPathError);
+test('relative nested path resolves under the files/ root', () => {
+  const key = resolveS3Path('reports/q3.md');
+  assert.equal(key, 'files/reports/q3.md');
 });
 
 test('normalizes internal . and .. segments', () => {
-  const { key } = resolveS3Path('a/./b/../c.txt', 'sess-1');
-  assert.equal(key, 'workspace/id=sess-1/a/c.txt');
+  const key = resolveS3Path('a/./b/../c.txt');
+  assert.equal(key, 'files/a/c.txt');
 });
 
-test('rejects traversal above the workspace root', () => {
-  assert.throws(() => resolveS3Path('../escape.txt', 'sess-1'), S3FsPathError);
+test('absolute and relative paths for the same segments resolve identically', () => {
+  assert.equal(resolveS3Path('/reports/q3.md'), resolveS3Path('reports/q3.md'));
 });
 
-test('rejects traversal above the bucket root for absolute paths', () => {
-  assert.throws(() => resolveS3Path('/../escape.txt', 'sess-1'), S3FsPathError);
+test('rejects traversal above the files/ root (relative)', () => {
+  assert.throws(() => resolveS3Path('../escape.txt'), S3FsPathError);
+});
+
+test('rejects traversal above the files/ root (absolute)', () => {
+  assert.throws(() => resolveS3Path('/../escape.txt'), S3FsPathError);
+});
+
+test('rejects deep traversal that nets negative', () => {
+  assert.throws(() => resolveS3Path('a/../../escape.txt'), S3FsPathError);
 });
 
 test('rejects an empty path', () => {
-  assert.throws(() => resolveS3Path('', 'sess-1'), S3FsPathError);
+  assert.throws(() => resolveS3Path(''), S3FsPathError);
 });
 
 test('rejects a path that normalizes to empty', () => {
-  assert.throws(() => resolveS3Path('.', 'sess-1'), S3FsPathError);
-});
-
-test('non-docs absolute paths are not flagged as docs', () => {
-  const { isDocs } = resolveS3Path('/other/file.txt', 'sess-1');
-  assert.equal(isDocs, false);
+  assert.throws(() => resolveS3Path('.'), S3FsPathError);
 });
 
 // -- resolveS3Prefix (ListFiles) --------------------------------------------
 
-test('omitted path resolves to the session CWD prefix', () => {
-  const { prefix, isDocs } = resolveS3Prefix(undefined, 'sess-1');
-  assert.equal(prefix, 'workspace/id=sess-1/');
-  assert.equal(isDocs, false);
+test('omitted path resolves to the files/ root prefix', () => {
+  assert.equal(resolveS3Prefix(undefined), 'files/');
 });
 
-test('empty-string path resolves to the session CWD prefix', () => {
-  const { prefix } = resolveS3Prefix('', 'sess-1');
-  assert.equal(prefix, 'workspace/id=sess-1/');
+test('empty-string path resolves to the files/ root prefix', () => {
+  assert.equal(resolveS3Prefix(''), 'files/');
 });
 
-test('absolute prefix resolves from bucket root with trailing slash', () => {
-  const { prefix, isDocs } = resolveS3Prefix('/docs/production', 'sess-1');
-  assert.equal(prefix, 'docs/production/');
-  assert.equal(isDocs, true);
+test('absolute prefix resolves under files/ with trailing slash', () => {
+  assert.equal(resolveS3Prefix('/docs/production'), 'files/docs/production/');
 });
 
-test('absolute bucket-root prefix resolves to empty string', () => {
-  const { prefix } = resolveS3Prefix('/', 'sess-1');
-  assert.equal(prefix, '');
+test('bucket-root prefix ("/") resolves to the files/ root prefix', () => {
+  assert.equal(resolveS3Prefix('/'), 'files/');
 });
 
-test('relative prefix resolves against session workspace with trailing slash', () => {
-  const { prefix } = resolveS3Prefix('reports', 'sess-1');
-  assert.equal(prefix, 'workspace/id=sess-1/reports/');
+test('relative prefix resolves under files/ with trailing slash', () => {
+  assert.equal(resolveS3Prefix('reports'), 'files/reports/');
 });
 
 test('prefix listing rejects traversal', () => {
-  assert.throws(() => resolveS3Prefix('../escape', 'sess-1'), S3FsPathError);
+  assert.throws(() => resolveS3Prefix('../escape'), S3FsPathError);
 });

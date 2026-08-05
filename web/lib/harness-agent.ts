@@ -75,21 +75,8 @@ export interface HarnessAgentConfig {
   mcpServers?: McpServerConfig[];
 }
 
-// AgentCore Gateway MCP endpoints look like
-// https://<gatewayId>.gateway.bedrock-agentcore.<region>.amazonaws.com/mcp —
-// matches the same URL fragment web/e2e/dispatcher-gateway-tools.spec.ts keys off.
-const AGENTCORE_GATEWAY_URL_FRAGMENT = 'gateway.bedrock-agentcore';
-
-/**
- * Resolve MCP server configs into remote_mcp HarnessTools, injecting stored
- * OAuth tokens and — for AgentCore Gateway targets only — an `x-session-id`
- * header so a Lambda-backed target (e.g. the S3 filesystem tools, issue #240)
- * can scope per-call state to this chat session. Verified empirically against
- * the live gateway: it forwards allow-listed inbound headers into the Lambda's
- * `context.clientContext.custom.bedrockAgentCorePropagatedHeaders`, not onto
- * the event body (see PR #241 description for the full finding).
- */
-async function buildTools(mcpServers: McpServerConfig[], sessionId: string): Promise<HarnessTool[] | undefined> {
+/** Resolve MCP server configs into remote_mcp HarnessTools, injecting stored OAuth tokens. */
+async function buildTools(mcpServers: McpServerConfig[]): Promise<HarnessTool[] | undefined> {
   if (!mcpServers.length) return undefined;
 
   // Map URL -> server ID so we can look up stored credentials.
@@ -101,19 +88,17 @@ async function buildTools(mcpServers: McpServerConfig[], sessionId: string): Pro
 
   const resolved = await Promise.all(
     mcpServers.map(async (s) => {
-      let headers = s.headers;
-      if (s.url.includes(AGENTCORE_GATEWAY_URL_FRAGMENT)) {
-        headers = { ...(headers || {}), 'x-session-id': sessionId };
-      }
-
       const serverId = urlToId.get(s.url);
       if (serverId) {
         const cred = await fetchCredential(serverId);
         if (cred && !isExpiredOrExpiringSoon(cred)) {
-          headers = { ...(headers || {}), Authorization: `Bearer ${cred.accessToken}` };
+          return {
+            ...s,
+            headers: { ...(s.headers || {}), Authorization: `Bearer ${cred.accessToken}` },
+          };
         }
       }
-      return { ...s, headers };
+      return s;
     }),
   );
 
@@ -199,7 +184,7 @@ export class HarnessAgent extends AbstractAgent {
         subscriber.next({ type: EventType.RUN_STARTED, threadId: sessionId, runId } as BaseEvent);
 
         try {
-          const tools = await buildTools(config.mcpServers ?? [], sessionId);
+          const tools = await buildTools(config.mcpServers ?? []);
 
           const response = await client.send(
             new InvokeHarnessCommand({
