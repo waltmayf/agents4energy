@@ -99,19 +99,34 @@ async function fetchAgentConfig(agentSlug: string) {
   };
 }
 
-function buildTools(mcpServers: McpServerRecord[]): HarnessTool[] {
-  return mcpServers.map((s) => ({
-    type: 'remote_mcp',
-    name: s.name.replace(/[^a-zA-Z0-9_-]/g, '_'),
-    config: {
-      remoteMcp: {
-        url: s.url,
-        headers: s.headers?.length
-          ? headersFromArray(s.headers.filter((h): h is { key: string | null; value: string | null } => h !== null))
-          : undefined,
+// AgentCore Gateway MCP endpoints look like
+// https://<gatewayId>.gateway.bedrock-agentcore.<region>.amazonaws.com/mcp.
+const AGENTCORE_GATEWAY_URL_FRAGMENT = 'gateway.bedrock-agentcore';
+
+// Injects an `x-session-id` header on AgentCore Gateway targets so a
+// Lambda-backed target (e.g. the S3 filesystem tools, issue #240) can scope
+// per-call state to this sub-agent's session. Mirrors web/lib/harness-agent.ts's
+// buildTools() — see that file for the empirical finding on how the gateway
+// forwards this header into the Lambda's clientContext.
+function buildTools(mcpServers: McpServerRecord[], sessionId: string): HarnessTool[] {
+  return mcpServers.map((s) => {
+    const headers = s.headers?.length
+      ? headersFromArray(s.headers.filter((h): h is { key: string | null; value: string | null } => h !== null))
+      : {};
+    if (s.url.includes(AGENTCORE_GATEWAY_URL_FRAGMENT)) {
+      headers['x-session-id'] = sessionId;
+    }
+    return {
+      type: 'remote_mcp',
+      name: s.name.replace(/[^a-zA-Z0-9_-]/g, '_'),
+      config: {
+        remoteMcp: {
+          url: s.url,
+          headers: Object.keys(headers).length ? headers : undefined,
+        },
       },
-    },
-  }));
+    };
+  });
 }
 
 async function invokeHarness(opts: {
@@ -123,7 +138,7 @@ async function invokeHarness(opts: {
 }): Promise<string> {
   const { sessionId, prompt, systemPromptText, modelId, mcpServers } = opts;
 
-  const tools = buildTools(mcpServers);
+  const tools = buildTools(mcpServers, sessionId);
 
   const response = await agentCore.send(new InvokeHarnessCommand({
     harnessArn: HARNESS_ARN,
