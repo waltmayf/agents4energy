@@ -12,6 +12,8 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 export interface S3ToolsGatewayTargetProps {
   /** The AgentCore gateway to register the target on. */
   gatewayIdentifier: string;
+  /** ARN of the AgentCore gateway to register the target on — scopes the handler's IAM grant. */
+  gatewayArn: string;
   /** Physical name for the gateway target (unique within the gateway). */
   targetName: string;
   /** ARN of the s3-tools Lambda backing the ApplyDiff/ListFiles/ReadFile/DeleteFile tools. */
@@ -37,14 +39,24 @@ export class S3ToolsGatewayTarget extends Construct {
       timeout: Duration.seconds(60),
     });
 
+    // Create/Update/Delete/GetGatewayTarget support resource-level permissions
+    // scoped to the parent gateway's ARN (see aws-cdk-lib's own
+    // GatewayBase.grantManage/grantRead, which grant these against
+    // gatewayRef.gatewayArn). ListGatewayTargets does not support
+    // resource-level scoping and must stay on '*' — matching
+    // aws-cdk-lib's GatewayBase.grantRead, which grants it separately
+    // with resourceArns: ['*'].
     fn.addToRolePolicy(new PolicyStatement({
       actions: [
         'bedrock-agentcore:CreateGatewayTarget',
         'bedrock-agentcore:UpdateGatewayTarget',
         'bedrock-agentcore:DeleteGatewayTarget',
-        'bedrock-agentcore:ListGatewayTargets',
         'bedrock-agentcore:GetGatewayTarget',
       ],
+      resources: [props.gatewayArn],
+    }));
+    fn.addToRolePolicy(new PolicyStatement({
+      actions: ['bedrock-agentcore:ListGatewayTargets'],
       resources: ['*'],
     }));
 

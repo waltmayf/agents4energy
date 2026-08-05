@@ -23,6 +23,7 @@ const {
   AgentCoreApplication: RealAgentCoreApplication,
   AgentCoreMcp,
   setSessionProjectRoot,
+  toPascalId,
 }: typeof import('@aws/agentcore-cdk') = require('@aws/agentcore-cdk');
 
 // Both RealAgentCoreApplication (for its runtime/harness container builds) and
@@ -185,6 +186,29 @@ export class AgentCoreApplication extends Construct {
     const env = this.app.environments.get(name);
     if (!env) throw new Error(`Runtime "${name}" not found in AgentCoreApplication`);
     env.runtime.addEnvironmentVariable(key, value);
+  }
+
+  /**
+   * Attach a policy statement to a Gateway's execution role.
+   *
+   * `AgentCoreMcp.gateways` only exposes the L1 `CfnGateway` (no `.role`), so
+   * this reaches the internal `Gateway` component construct — stored as a
+   * child of the `Mcp` construct under the same `toPascalId('Gateway', name)`
+   * logical id `AgentCoreMcp` uses internally — and calls its `addToPolicy`.
+   *
+   * Needed because the `Gateway` component only auto-grants
+   * `lambda:InvokeFunction` on a target's Lambda when it creates that Lambda
+   * target itself (inline `agentCoreGateways[].targets[]` in agentcore.json).
+   * Targets registered out-of-band via a custom resource (e.g.
+   * `S3ToolsGatewayTarget`) never go through that path, so the gateway role
+   * needs this identity-based grant added explicitly — the resource-based
+   * Lambda permission (`AllowGatewayInvoke`) alone is not sufficient;
+   * `CreateGatewayTarget` synchronously validates both.
+   */
+  public addGatewayRolePolicy(name: string, statement: PolicyStatement): void {
+    if (!this.mcp) throw new Error(`Gateway "${name}" not found in AgentCoreApplication (no gateways configured)`);
+    const gatewayComponent = this.mcp.node.findChild(toPascalId('Gateway', name)) as unknown as { addToPolicy(statement: PolicyStatement): void };
+    gatewayComponent.addToPolicy(statement);
   }
 
   public memoryArn(name: string): string {

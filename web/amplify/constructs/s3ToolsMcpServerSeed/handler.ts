@@ -90,16 +90,32 @@ async function findOrCreateMcpServer(
   region: string,
   gatewayEndpoint: string,
 ): Promise<string> {
+  // Match by the stable demo name, not by url == gatewayEndpoint — the
+  // gateway endpoint can change across redeploys (e.g. gateway
+  // recreated), and matching on it would orphan the old McpServer row
+  // instead of updating it in place.
   const existing = await signedGraphqlRequest(
     url,
     region,
     `query ListMcpServers($filter: ModelMcpServerFilterInput) {
-      listMcpServers(filter: $filter) { items { id } }
+      listMcpServers(filter: $filter) { items { id url } }
     }`,
-    { filter: { url: { eq: gatewayEndpoint } } },
+    { filter: { name: { eq: DEMO_MCP_SERVER_NAME } } },
   );
-  const existingId = (existing.listMcpServers as { items?: Array<{ id: string }> })?.items?.[0]?.id;
-  if (existingId) return existingId;
+  const existingItem = (existing.listMcpServers as { items?: Array<{ id: string; url: string }> })?.items?.[0];
+  if (existingItem) {
+    if (existingItem.url !== gatewayEndpoint) {
+      await signedGraphqlRequest(
+        url,
+        region,
+        `mutation UpdateMcpServer($input: UpdateMcpServerInput!) {
+          updateMcpServer(input: $input) { id }
+        }`,
+        { input: { id: existingItem.id, url: gatewayEndpoint } },
+      );
+    }
+    return existingItem.id;
+  }
 
   const created = await signedGraphqlRequest(
     url,

@@ -1,5 +1,5 @@
 import { Construct } from 'constructs';
-import { Duration, CustomResource } from 'aws-cdk-lib';
+import { Duration, CustomResource, Stack } from 'aws-cdk-lib';
 import { PolicyStatement } from 'aws-cdk-lib/aws-iam';
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
 import { Runtime } from 'aws-cdk-lib/aws-lambda';
@@ -16,6 +16,8 @@ export interface S3ToolsMcpServerSeedProps {
   graphqlRegion: string;
   /** The AgentCore Gateway's MCP endpoint URL (the McpServer.url value). */
   gatewayEndpoint: string;
+  /** AppSync GraphQL API id — scopes the handler's appsync:GraphQL grant to this API only. */
+  graphqlApiId: string;
 }
 
 /**
@@ -41,13 +43,17 @@ export class S3ToolsMcpServerSeed extends Construct {
       timeout: Duration.seconds(60),
     });
 
-    // IAM principal calling AppSync directly (see handler.ts) — matches the
-    // grant shape at backend.ts's ClaudeCode runtime AppSync policy.
+    // IAM principal calling AppSync directly (see handler.ts). Unlike the
+    // ClaudeCode runtime's wildcard AppSync policy in backend.ts (deliberately
+    // broad to avoid a cross-stack ARN token cycle — see the comment there),
+    // this custom resource lives in the same synth as the data stack, so it
+    // can be scoped to the concrete API instead of apis/*.
+    const { region, account } = Stack.of(this);
     fn.addToRolePolicy(new PolicyStatement({
       actions: ['appsync:GraphQL'],
       resources: [
-        'arn:aws:appsync:*:*:apis/*/types/Query/fields/*',
-        'arn:aws:appsync:*:*:apis/*/types/Mutation/fields/*',
+        `arn:aws:appsync:${region}:${account}:apis/${props.graphqlApiId}/types/Query/fields/*`,
+        `arn:aws:appsync:${region}:${account}:apis/${props.graphqlApiId}/types/Mutation/fields/*`,
       ],
     }));
 

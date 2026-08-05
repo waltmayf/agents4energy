@@ -39,6 +39,11 @@ export const agentConfigSchema = a.schema({
   }).authorization((allow) => [
     allow.authenticated().to(['read', 'create', 'update', 'delete']),
     allow.owner(),
+    // Admits IAM-signed requests (e.g. S3ToolsMcpServerSeed's SigV4-signed
+    // custom-resource Lambda, which has no Cognito sub) in identityPool mode —
+    // same pattern as ChatSession/ActiveRun. Needed so the deploy-time seed
+    // can create/read this demo row.
+    allow.guest(),
   ]),
 
   // Unified MCP server record — covers AgentCore gateways and plain MCP endpoints.
@@ -70,6 +75,8 @@ export const agentConfigSchema = a.schema({
   }).authorization((allow) => [
     allow.authenticated().to(['read', 'create', 'update', 'delete']),
     allow.owner(),
+    // See Agent's allow.guest() comment above — same seed needs this too.
+    allow.guest(),
   ]),
 
   // Per-user OAuth2 token for an MCP server that requires PKCE auth.
@@ -101,6 +108,8 @@ export const agentConfigSchema = a.schema({
   }).authorization((allow) => [
     allow.authenticated().to(['read', 'create', 'update', 'delete']),
     allow.owner(),
+    // See Agent's allow.guest() comment above — same seed needs this too.
+    allow.guest(),
   ]),
 
   // A single MCP tool descriptor returned by listMcpTools.
