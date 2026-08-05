@@ -532,20 +532,6 @@ if (AGENTCORE_GATEWAY_ARN) {
   });
 }
 
-// The resource-based permission above is only half of what
-// CreateGatewayTarget validates synchronously: the gateway's *execution
-// role* also needs an identity-based lambda:InvokeFunction grant on this
-// Lambda. The @aws/agentcore-cdk Gateway component auto-adds that only for
-// targets it creates itself from agentcore.json; this target is registered
-// out-of-band via S3ToolsGatewayTarget, so that auto-grant never runs and
-// CreateGatewayTarget would 400 without this explicit grant.
-if (gatewayName) {
-  agentCoreApp.addGatewayRolePolicy(gatewayName, new PolicyStatement({
-    actions: ['lambda:InvokeFunction'],
-    resources: [s3ToolsLambda.functionArn, `${s3ToolsLambda.functionArn}:*`],
-  }));
-}
-
 // Registers the Lambda as a gateway target exposing the 4 filesystem tools,
 // and seeds a demo Agent + McpServer + AgentMcpServer join so the tools are
 // reachable end-to-end from the chat UI (see both constructs' resource.ts).
@@ -564,12 +550,47 @@ if (AGENTCORE_GATEWAY_ID) {
 
   const s3ToolsCdkStack = backend.createStack('s3-tools');
 
-  new S3ToolsGatewayTarget(s3ToolsCdkStack, 'S3ToolsGatewayTarget', {
+  // The resource-based permission (AllowGatewayInvoke) above is only half of
+  // what CreateGatewayTarget validates synchronously: the gateway's *execution
+  // role* also needs an identity-based lambda:InvokeFunction grant on this
+  // Lambda. The @aws/agentcore-cdk Gateway component auto-adds that only for
+  // targets it creates itself from agentcore.json; this target is registered
+  // out-of-band via S3ToolsGatewayTarget, so that auto-grant never runs and
+  // CreateGatewayTarget would 400 without this explicit grant.
+  //
+  // Attach it as a standalone Policy in THIS sink stack — NOT via the gateway
+  // role's inline policy in the agent stack. The statement references
+  // s3ToolsLambda.functionArn (a function-stack token); adding it to the role
+  // (agent stack) would make agentStack depend on the function stack, which
+  // already depends on agentStack (function Lambdas read AGENTCORE_* envs) — a
+  // CFN cycle (data -> function -> agent -> function). The sink stack already
+  // depends on both the agent stack (gateway role/ARN) and the function stack
+  // (Lambda ARN), so owning the Policy here adds no new cross-stack edge.
+  let gatewayInvokeGrant: Policy | undefined;
+  if (gatewayName) {
+    gatewayInvokeGrant = new Policy(s3ToolsCdkStack, 'S3ToolsGatewayInvokeGrant', {
+      roles: [agentCoreApp.gatewayRole(gatewayName)],
+      statements: [
+        new PolicyStatement({
+          actions: ['lambda:InvokeFunction'],
+          resources: [s3ToolsLambda.functionArn, `${s3ToolsLambda.functionArn}:*`],
+        }),
+      ],
+    });
+  }
+
+  const s3ToolsGatewayTarget = new S3ToolsGatewayTarget(s3ToolsCdkStack, 'S3ToolsGatewayTarget', {
     gatewayIdentifier: AGENTCORE_GATEWAY_ID,
     gatewayArn: AGENTCORE_GATEWAY_ARN,
     targetName: s3ToolsTargetName,
     lambdaArn: s3ToolsLambda.functionArn,
   });
+
+  // CreateGatewayTarget synchronously validates the gateway role can invoke
+  // the Lambda, so the invoke grant must exist before the target is created.
+  if (gatewayInvokeGrant) {
+    s3ToolsGatewayTarget.node.addDependency(gatewayInvokeGrant);
+  }
 
   if (AGENTCORE_GATEWAY_ENDPOINT) {
     new S3ToolsMcpServerSeed(s3ToolsCdkStack, 'S3ToolsMcpServerSeed', {
