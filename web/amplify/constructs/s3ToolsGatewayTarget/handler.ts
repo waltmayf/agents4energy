@@ -6,8 +6,10 @@ import {
   DeleteGatewayTargetCommand,
   ListGatewayTargetsCommand,
   SchemaType,
+  CredentialProviderType,
   type ToolDefinition,
   type TargetConfiguration,
+  type CredentialProviderConfiguration,
 } from '@aws-sdk/client-bedrock-agentcore-control';
 
 const client = new BedrockAgentCoreControlClient({});
@@ -90,6 +92,18 @@ function buildTargetConfiguration(lambdaArn: string): TargetConfiguration {
   };
 }
 
+// CreateGatewayTarget requires credentialProviderConfigurations to be set
+// explicitly (it does NOT default) — without it the call fails with the
+// ValidationException "Credential provider configurations is not defined".
+// A Lambda target is invoked with the gateway's own execution role, so use
+// GATEWAY_IAM_ROLE (paired with the identity-based lambda:InvokeFunction grant
+// on that role in backend.ts). This is the auto-config the @aws/agentcore-cdk
+// Gateway component applies for inline Lambda targets; out-of-band targets
+// must supply it themselves.
+const credentialProviderConfigurations: CredentialProviderConfiguration[] = [
+  { credentialProviderType: CredentialProviderType.GATEWAY_IAM_ROLE },
+];
+
 async function findExistingTargetId(gatewayIdentifier: string, targetName: string): Promise<string | undefined> {
   let nextToken: string | undefined;
   do {
@@ -120,6 +134,7 @@ export const handler = async (
         targetId: existingTargetId,
         name: props.TargetName,
         targetConfiguration,
+        credentialProviderConfigurations,
       }));
       return { PhysicalResourceId: existingTargetId };
     }
@@ -128,6 +143,7 @@ export const handler = async (
       gatewayIdentifier: props.GatewayIdentifier,
       name: props.TargetName,
       targetConfiguration,
+      credentialProviderConfigurations,
     }));
     if (!created.targetId) throw new Error('CreateGatewayTarget did not return a targetId');
     return { PhysicalResourceId: created.targetId };
