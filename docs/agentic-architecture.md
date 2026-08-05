@@ -173,6 +173,16 @@ Registration happens via the `registerMcpTarget` GraphQL mutation → Amplify La
 
 Before saving an MCP server, the frontend can call the `listMcpTools` GraphQL query. This Lambda probes the server using the same `url` + `headers` that the harness would use (MCP `initialize` → `tools/list` sequence). If the query succeeds, the harness invocation will too.
 
+### Lambda-backed gateway target: S3 filesystem tools
+
+The `s3-tools` Lambda (`web/amplify/functions/s3-tools/`) is the first **Lambda-backed** gateway target in the repo — the gateway invokes it directly (no outbound HTTP/MCP JSON-RPC hop) rather than proxying to an HTTP MCP endpoint like the two paths above. It backs four tools exposed to any agent that has its gateway `McpServer` assigned: `ApplyDiff`, `ListFiles`, `ReadFile`, `DeleteFile`. See [`docs/agent-filesystem.md`](./agent-filesystem.md) for the tool contracts and path-resolution rules.
+
+Wiring, all in `web/amplify/backend.ts`:
+- **Storage**: `web/amplify/storage/resource.ts` defines an Amplify Storage bucket (`agentWorkspace`). The Lambda's execution role is granted `s3:GetObject`/`PutObject`/`DeleteObject`/`ListBucket` scoped to the bucket's `files/*` prefix — there is no direct browser/Cognito access to this bucket.
+- **Target registration**: the `S3ToolsGatewayTarget` custom resource (`web/amplify/constructs/s3ToolsGatewayTarget/`) calls `CreateGatewayTarget` with `targetConfiguration.mcp.lambda` (an inline `ToolSchema` describing the four tools), listing existing targets by name first so redeploys update in place instead of erroring on "already exists".
+- **Demo wiring**: the `S3ToolsMcpServerSeed` custom resource (`web/amplify/constructs/s3ToolsMcpServerSeed/`) idempotently creates a demo `Agent` + `McpServer` (pointing at the gateway endpoint) + `AgentMcpServer` join row, so the tools are reachable end-to-end from the chat UI without manual setup. It signs AppSync requests directly with SigV4 (the custom-resource Lambda is an IAM principal, not a Cognito user) — the same approach `agent/default/app/ClaudeCode/active-run.js` uses for its server-side `ActiveRun` writes.
+- Both custom resources live in their own CDK stack (`backend.createStack('s3-tools')`), not `agentStack`, because they reference tokens from both the function stack and the data stack — nesting them in `agentStack` would form the same nested-stack dependency cycle documented next to `AgentWebhookStack`'s own stack placement.
+
 ---
 
 ## Agent Configuration

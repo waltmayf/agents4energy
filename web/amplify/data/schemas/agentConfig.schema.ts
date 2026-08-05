@@ -39,6 +39,11 @@ export const agentConfigSchema = a.schema({
   }).authorization((allow) => [
     allow.authenticated().to(['read', 'create', 'update', 'delete']),
     allow.owner(),
+    // Admits IAM-signed requests (e.g. S3ToolsMcpServerSeed's SigV4-signed
+    // custom-resource Lambda, which has no Cognito sub) in identityPool mode —
+    // same pattern as ChatSession/ActiveRun. Needed so the deploy-time seed
+    // can create/read this demo row.
+    allow.guest(),
   ]),
 
   // Unified MCP server record — covers AgentCore gateways and plain MCP endpoints.
@@ -51,9 +56,22 @@ export const agentConfigSchema = a.schema({
     url: a.string().required(),
     description: a.string(),
     serverType: a.string(),
-    headers: a.ref('McpServerHeaderEntry').array(),
+    // Secret-bearing: `headers` carries bearer tokens/API keys and
+    // `authSecretArn` points at a Secrets Manager secret. Field-level auth
+    // strips these from guest (unauthenticated identity-pool) reads so the
+    // model-level allow.guest() below — required so the SigV4 deploy-time seed
+    // can list/create the demo row — cannot leak another user's credentials.
+    // (The seed never selects these fields.) authenticated()+owner() here
+    // matches the pre-guest posture; it does not widen access.
+    headers: a.ref('McpServerHeaderEntry').array().authorization((allow) => [
+      allow.authenticated().to(['read', 'create', 'update', 'delete']),
+      allow.owner(),
+    ]),
     // AgentCore-specific fields
-    authSecretArn: a.string(),
+    authSecretArn: a.string().authorization((allow) => [
+      allow.authenticated().to(['read', 'create', 'update', 'delete']),
+      allow.owner(),
+    ]),
     registryId: a.string(),
     registryRecordId: a.string(),
     signRequestsWithAwsCreds: a.boolean().default(false),
@@ -70,6 +88,8 @@ export const agentConfigSchema = a.schema({
   }).authorization((allow) => [
     allow.authenticated().to(['read', 'create', 'update', 'delete']),
     allow.owner(),
+    // See Agent's allow.guest() comment above — same seed needs this too.
+    allow.guest(),
   ]),
 
   // Per-user OAuth2 token for an MCP server that requires PKCE auth.
@@ -101,6 +121,8 @@ export const agentConfigSchema = a.schema({
   }).authorization((allow) => [
     allow.authenticated().to(['read', 'create', 'update', 'delete']),
     allow.owner(),
+    // See Agent's allow.guest() comment above — same seed needs this too.
+    allow.guest(),
   ]),
 
   // A single MCP tool descriptor returned by listMcpTools.

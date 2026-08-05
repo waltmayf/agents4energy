@@ -12,6 +12,8 @@ import { agentWebhookPostComment } from './functions/agent-webhook-post-comment/
 import { agentWebhookInvokeAgent } from './functions/agent-webhook-invoke-agent/resource';
 import { agentWebhookInvokeClaude } from './functions/agent-webhook-invoke-claude/resource';
 import { agentWebhookAuthorizer } from './functions/agent-webhook-authorizer/resource';
+import { s3Tools } from './functions/s3-tools/resource';
+import { agentWorkspace } from './storage/resource';
 import { Policy, PolicyStatement, ServicePrincipal } from 'aws-cdk-lib/aws-iam';
 import { Function as LambdaFunction } from 'aws-cdk-lib/aws-lambda';
 import { Fn, Stack, CfnOutput } from 'aws-cdk-lib';
@@ -23,6 +25,8 @@ import { AgentCoreApplication, type HarnessDeployment } from './constructs/agent
 import type { HarnessSpec } from '@aws/agentcore-cdk';
 import { E2eTestUser } from './constructs/e2eTestUser/resource';
 import { AgentWebhookStack } from './constructs/agentWebhookStack';
+import { S3ToolsGatewayTarget } from './constructs/s3ToolsGatewayTarget/resource';
+import { S3ToolsMcpServerSeed } from './constructs/s3ToolsMcpServerSeed/resource';
 
 import { StringParameter } from 'aws-cdk-lib/aws-ssm';
 
@@ -144,6 +148,8 @@ const backend = defineBackend({
   agentWebhookInvokeAgent,
   agentWebhookInvokeClaude,
   agentWebhookAuthorizer,
+  s3Tools,
+  agentWorkspace,
 });
 
 backend.stack.tags.setTag('Project', 'workshop');
@@ -497,6 +503,104 @@ registerMcpTargetLambda.addToRolePolicy(new PolicyStatement({
   ],
   resources: ['*'],
 }));
+
+// ============================================================================
+// S3-TOOLS Lambda — ApplyDiff/ListFiles/ReadFile/DeleteFile filesystem tools,
+// exposed as a Lambda-backed AgentCore Gateway target (issue #240).
+// ============================================================================
+
+const s3ToolsLambda = backend.s3Tools.resources.lambda as LambdaFunction;
+backend.s3Tools.addEnvironment('BUCKET_NAME', backend.agentWorkspace.resources.bucket.bucketName);
+
+// Scoped to the files/ root prefix only — see web/lib/s3-fs-path.ts.
+backend.agentWorkspace.resources.bucket.grantRead(s3ToolsLambda, 'files/*');
+s3ToolsLambda.addToRolePolicy(new PolicyStatement({
+  actions: ['s3:PutObject', 's3:DeleteObject'],
+  resources: [`${backend.agentWorkspace.resources.bucket.bucketArn}/files/*`],
+}));
+s3ToolsLambda.addToRolePolicy(new PolicyStatement({
+  actions: ['s3:ListBucket'],
+  resources: [backend.agentWorkspace.resources.bucket.bucketArn],
+  conditions: { StringLike: { 's3:prefix': ['files/*'] } },
+}));
+
+if (AGENTCORE_GATEWAY_ARN) {
+  s3ToolsLambda.addPermission('AllowGatewayInvoke', {
+    principal: new ServicePrincipal('bedrock-agentcore.amazonaws.com'),
+    action: 'lambda:InvokeFunction',
+    sourceArn: AGENTCORE_GATEWAY_ARN,
+  });
+}
+
+// Registers the Lambda as a gateway target exposing the 4 filesystem tools,
+// and seeds a demo Agent + McpServer + AgentMcpServer join so the tools are
+// reachable end-to-end from the chat UI (see both constructs' resource.ts).
+// Own stack (not agentStack, not the function stack): these constructs
+// reference tokens from BOTH the function stack (s3ToolsLambda.functionArn)
+// and the data stack (the GraphQL URL) — nesting them inside agentStack would
+// make agentStack depend on those stacks, which already depend on agentStack
+// (function-stack Lambdas read AGENTCORE_* envs; see the AgentWebhookStack
+// comment above for the identical cycle this avoids).
+if (AGENTCORE_GATEWAY_ID) {
+  const s3ToolsTargetName = toGatewayResourceName(
+    's3-tools',
+    backendNamespace ?? '',
+    backendName ?? '',
+  ).slice(0, 100);
+
+  const s3ToolsCdkStack = backend.createStack('s3-tools');
+
+  // The resource-based permission (AllowGatewayInvoke) above is only half of
+  // what CreateGatewayTarget validates synchronously: the gateway's *execution
+  // role* also needs an identity-based lambda:InvokeFunction grant on this
+  // Lambda. The @aws/agentcore-cdk Gateway component auto-adds that only for
+  // targets it creates itself from agentcore.json; this target is registered
+  // out-of-band via S3ToolsGatewayTarget, so that auto-grant never runs and
+  // CreateGatewayTarget would 400 without this explicit grant.
+  //
+  // Attach it as a standalone Policy in THIS sink stack — NOT via the gateway
+  // role's inline policy in the agent stack. The statement references
+  // s3ToolsLambda.functionArn (a function-stack token); adding it to the role
+  // (agent stack) would make agentStack depend on the function stack, which
+  // already depends on agentStack (function Lambdas read AGENTCORE_* envs) — a
+  // CFN cycle (data -> function -> agent -> function). The sink stack already
+  // depends on both the agent stack (gateway role/ARN) and the function stack
+  // (Lambda ARN), so owning the Policy here adds no new cross-stack edge.
+  let gatewayInvokeGrant: Policy | undefined;
+  if (gatewayName) {
+    gatewayInvokeGrant = new Policy(s3ToolsCdkStack, 'S3ToolsGatewayInvokeGrant', {
+      roles: [agentCoreApp.gatewayRole(gatewayName)],
+      statements: [
+        new PolicyStatement({
+          actions: ['lambda:InvokeFunction'],
+          resources: [s3ToolsLambda.functionArn, `${s3ToolsLambda.functionArn}:*`],
+        }),
+      ],
+    });
+  }
+
+  const s3ToolsGatewayTarget = new S3ToolsGatewayTarget(s3ToolsCdkStack, 'S3ToolsGatewayTarget', {
+    gatewayIdentifier: AGENTCORE_GATEWAY_ID,
+    gatewayArn: AGENTCORE_GATEWAY_ARN,
+    targetName: s3ToolsTargetName,
+    lambdaArn: s3ToolsLambda.functionArn,
+  });
+
+  // CreateGatewayTarget synchronously validates the gateway role can invoke
+  // the Lambda, so the invoke grant must exist before the target is created.
+  if (gatewayInvokeGrant) {
+    s3ToolsGatewayTarget.node.addDependency(gatewayInvokeGrant);
+  }
+
+  if (AGENTCORE_GATEWAY_ENDPOINT) {
+    new S3ToolsMcpServerSeed(s3ToolsCdkStack, 'S3ToolsMcpServerSeed', {
+      graphqlUrl: backend.data.resources.cfnResources.cfnGraphqlApi.attrGraphQlUrl,
+      graphqlRegion: AGENTCORE_REGION,
+      graphqlApiId: backend.data.resources.cfnResources.cfnGraphqlApi.attrApiId,
+      gatewayEndpoint: AGENTCORE_GATEWAY_ENDPOINT,
+    });
+  }
+}
 
 // ============================================================================
 // INVOKE-AGENT Lambda — sub-agent dispatcher via AgentCore harness

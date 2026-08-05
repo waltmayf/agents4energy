@@ -1,5 +1,5 @@
 import { Construct } from 'constructs';
-import { PolicyStatement } from 'aws-cdk-lib/aws-iam';
+import { PolicyStatement, type IRole } from 'aws-cdk-lib/aws-iam';
 import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
 import { resolve, dirname } from 'path';
@@ -23,6 +23,7 @@ const {
   AgentCoreApplication: RealAgentCoreApplication,
   AgentCoreMcp,
   setSessionProjectRoot,
+  toPascalId,
 }: typeof import('@aws/agentcore-cdk') = require('@aws/agentcore-cdk');
 
 // Both RealAgentCoreApplication (for its runtime/harness container builds) and
@@ -185,6 +186,38 @@ export class AgentCoreApplication extends Construct {
     const env = this.app.environments.get(name);
     if (!env) throw new Error(`Runtime "${name}" not found in AgentCoreApplication`);
     env.runtime.addEnvironmentVariable(key, value);
+  }
+
+  /**
+   * The IAM execution role of a Gateway, by its logical name.
+   *
+   * `AgentCoreMcp.gateways` only exposes the L1 `CfnGateway` (no `.role`), so
+   * this reaches the internal `Gateway` component construct — stored as a
+   * child of the `Mcp` construct under the same `toPascalId('Gateway', name)`
+   * logical id `AgentCoreMcp` uses internally — and returns its `.role`.
+   *
+   * Callers need this to grant the gateway role identity-based permissions
+   * (e.g. `lambda:InvokeFunction` on a Lambda target). The `Gateway` component
+   * only auto-grants that when it creates a Lambda target itself (inline
+   * `agentCoreGateways[].targets[]` in agentcore.json); targets registered
+   * out-of-band via a custom resource (e.g. `S3ToolsGatewayTarget`) never go
+   * through that path, so the grant must be added explicitly — the
+   * resource-based Lambda permission (`AllowGatewayInvoke`) alone is not
+   * sufficient; `CreateGatewayTarget` synchronously validates both.
+   *
+   * IMPORTANT — attach the grant in the SAME stack that owns the target Lambda
+   * ARN (the sink stack), NOT here in the agent stack. The gateway role lives
+   * in the agent stack; adding a statement that references a function-stack
+   * token (the Lambda ARN) to the role's inline policy makes the agent stack
+   * depend on the function stack, and the function stack already depends on
+   * the agent stack (its Lambdas read `AGENTCORE_*` env vars) — a CFN cycle.
+   * Instead create a standalone `iam.Policy` in the sink stack and attach it
+   * to this role via `role.attachInlinePolicy(...)`.
+   */
+  public gatewayRole(name: string): IRole {
+    if (!this.mcp) throw new Error(`Gateway "${name}" not found in AgentCoreApplication (no gateways configured)`);
+    const gatewayComponent = this.mcp.node.findChild(toPascalId('Gateway', name)) as unknown as { role: IRole };
+    return gatewayComponent.role;
   }
 
   public memoryArn(name: string): string {
