@@ -56,9 +56,22 @@ export const agentConfigSchema = a.schema({
     url: a.string().required(),
     description: a.string(),
     serverType: a.string(),
-    headers: a.ref('McpServerHeaderEntry').array(),
+    // Secret-bearing: `headers` carries bearer tokens/API keys and
+    // `authSecretArn` points at a Secrets Manager secret. Field-level auth
+    // strips these from guest (unauthenticated identity-pool) reads so the
+    // model-level allow.guest() below — required so the SigV4 deploy-time seed
+    // can list/create the demo row — cannot leak another user's credentials.
+    // (The seed never selects these fields.) authenticated()+owner() here
+    // matches the pre-guest posture; it does not widen access.
+    headers: a.ref('McpServerHeaderEntry').array().authorization((allow) => [
+      allow.authenticated().to(['read', 'create', 'update', 'delete']),
+      allow.owner(),
+    ]),
     // AgentCore-specific fields
-    authSecretArn: a.string(),
+    authSecretArn: a.string().authorization((allow) => [
+      allow.authenticated().to(['read', 'create', 'update', 'delete']),
+      allow.owner(),
+    ]),
     registryId: a.string(),
     registryRecordId: a.string(),
     signRequestsWithAwsCreds: a.boolean().default(false),
