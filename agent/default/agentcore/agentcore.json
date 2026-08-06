@@ -109,10 +109,27 @@
         }
       },
       "enableSemanticSearch": true,
+    "policyEngineConfiguration": {
+      "policyEngineName": "CedarEngine",
+      "mode": "ENFORCE"
+    },
       "exceptionLevel": "DEBUG"
     }
   ],
-  "policyEngines": [],
+  "policyEngines": [
+    {
+      "name": "CedarEngine",
+      "description": "Cedar policy engine for default gateway",
+      "policies": [
+        {
+          "name": "AllowAdmin",
+          "description": "Permit admin group all actions",
+          "statement": "permit(principal == \"admin\", action == \"*\", resource == \"*\");",
+          "validationMode": "FAIL_ON_ANY_FINDINGS"
+        }
+      ]
+    }
+  ],
   "configBundles": [],
   "abTests": [],
   "httpGateways": [],
