@@ -112,7 +112,13 @@
       "exceptionLevel": "DEBUG"
     }
   ],
-  "policyEngines": [],
+  "policyEngines": [
+    {
+      "name": "default-cedar",
+      "description": "Cedar policy engine for default-gateway",
+      "policies": []
+    }
+  ],
   "configBundles": [],
   "abTests": [],
   "httpGateways": [],
