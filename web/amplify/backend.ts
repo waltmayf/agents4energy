@@ -915,6 +915,9 @@ new E2eTestUser(agentStack, 'E2eTestUser', {
   email: `e2e-test-${e2eTestUserResourceId}@agentcore.dev`,
   emailSsmPath: E2E_TEST_USER_EMAIL_SSM_PATH,
   passwordSsmPath: E2E_TEST_USER_PASSWORD_SSM_PATH,
+  // Seeded into a real group (#246) so e2e tests can assert group-dependent
+  // behavior once the permission model (#247) lands.
+  group: 'reservoir-eng',
 });
 
 if (AGENTCORE_GATEWAY_ARN) {

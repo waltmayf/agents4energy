@@ -29,6 +29,7 @@ import {
 } from './harness-stream-to-agui';
 import { buildRunErrorMessageEvents } from './harness-run-error';
 import { friendlyChatHarnessError } from './harness-error-message';
+import { encodeRuntimeUserId, type CallerIdentity } from './caller-identity';
 
 const custom = (outputs as { custom?: { agentcore_harness_arn?: string; agentcore_region?: string } }).custom;
 export const HARNESS_ARN = custom?.agentcore_harness_arn as string;
@@ -57,6 +58,22 @@ export function makeClient(): BedrockAgentCoreClient {
       };
     },
   });
+}
+
+/**
+ * Read the signed-in caller's `sub` + `cognito:groups` off the Cognito ID
+ * token (see caller-identity.ts). The harness itself authorizes this call
+ * via SigV4/Identity Pool credentials, not this JWT — so this claim is only
+ * ever read here to be forwarded as a trusted invoke argument, never used for
+ * authorization by the browser itself.
+ */
+async function fetchCallerIdentity(): Promise<CallerIdentity> {
+  const session = await fetchAuthSession();
+  const payload = session.tokens?.idToken?.payload;
+  const sub = typeof payload?.sub === 'string' ? payload.sub : null;
+  const groupsClaim = payload?.['cognito:groups'];
+  const groups = Array.isArray(groupsClaim) ? groupsClaim.filter((g): g is string => typeof g === 'string') : [];
+  return { sub, groups };
 }
 
 export interface McpServerConfig {
@@ -186,7 +203,10 @@ export class HarnessAgent extends AbstractAgent {
         subscriber.next({ type: EventType.RUN_STARTED, threadId: sessionId, runId } as BaseEvent);
 
         try {
-          const tools = await buildTools(config.mcpServers ?? []);
+          const [tools, callerIdentity] = await Promise.all([
+            buildTools(config.mcpServers ?? []),
+            fetchCallerIdentity(),
+          ]);
 
           const response = await client.send(
             new InvokeHarnessCommand({
@@ -196,6 +216,7 @@ export class HarnessAgent extends AbstractAgent {
               systemPrompt: config.systemPromptText ? [{ text: config.systemPromptText }] : undefined,
               model: config.modelId ? { bedrockModelConfig: { modelId: config.modelId } } : undefined,
               tools,
+              runtimeUserId: encodeRuntimeUserId(callerIdentity),
             }),
             { abortSignal: abort.signal },
           );

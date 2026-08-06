@@ -23,6 +23,20 @@ test('assistant text block becomes one assistant message', () => {
   assert.equal((msgs[0] as { content: string }).content, 'the answer is 42');
 });
 
+test('multiple text blocks in one assistant turn are separated, not glued together (#244)', () => {
+  const msgs = eventToMessages(
+    stored('assistant', [
+      { text: "I'll check what's actually available in this container before concluding anything." },
+      { text: 'I do have root and network access, so let me actually try installing them rather than assuming I can\'t.' },
+    ]),
+    0,
+  );
+  assert.equal(msgs.length, 1);
+  const content = (msgs[0] as { content: string }).content;
+  assert.match(content, /anything\.\s+I do have root/);
+  assert.ok(!content.includes('anything.I do have root'), 'text blocks must not be joined with no separator');
+});
+
 test('assistant toolUse produces an assistant message carrying toolCalls', () => {
   const msgs = eventToMessages(
     stored('assistant', [
