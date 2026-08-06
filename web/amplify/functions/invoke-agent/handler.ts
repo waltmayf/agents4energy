@@ -1,4 +1,5 @@
 import { randomUUID } from 'crypto';
+import type { AppSyncIdentityCognito } from 'aws-lambda';
 import {
   DynamoDBClient,
   ScanCommand,
@@ -12,6 +13,7 @@ import {
   InvokeHarnessCommand,
   type HarnessTool,
 } from '@aws-sdk/client-bedrock-agentcore';
+import { encodeRuntimeUserId, type CallerIdentity } from '../../../lib/caller-identity';
 
 const HARNESS_ARN = process.env.HARNESS_ARN!;
 const REGION = process.env.AWS_REGION ?? 'us-east-1';
@@ -34,6 +36,22 @@ interface InvokeAgentArgs {
 
 interface InvokeAgentEvent {
   arguments: InvokeAgentArgs;
+  // AppSync populates this from the verified Cognito JWT when the mutation is
+  // called with userPool auth (allow.authenticated()); IAM-signed callers
+  // (allow.guest(), e.g. GitHub Actions) get an IAM identity shape instead, or
+  // none at all in a unit-test invocation.
+  identity?: AppSyncIdentityCognito | { sub?: never; groups?: never } | null;
+}
+
+// AppSync populates event.identity from the verified Cognito JWT when this
+// mutation is called with userPool auth — so by the time we read sub/groups
+// here they're already a verified claim, not caller-supplied input. Encoded
+// into InvokeHarnessCommand's runtimeUserId per caller-identity.ts's comment.
+function callerIdentityFromEvent(event: InvokeAgentEvent): CallerIdentity {
+  const identity = event.identity;
+  const sub = identity && 'sub' in identity ? identity.sub ?? null : null;
+  const groups = identity && 'groups' in identity ? identity.groups ?? [] : [];
+  return { sub, groups: groups ?? [] };
 }
 
 interface InvokeAgentResult {
@@ -120,8 +138,9 @@ async function invokeHarness(opts: {
   systemPromptText: string | null;
   modelId: string | null;
   mcpServers: McpServerRecord[];
+  callerIdentity: CallerIdentity;
 }): Promise<string> {
-  const { sessionId, prompt, systemPromptText, modelId, mcpServers } = opts;
+  const { sessionId, prompt, systemPromptText, modelId, mcpServers, callerIdentity } = opts;
 
   const tools = buildTools(mcpServers);
 
@@ -132,6 +151,7 @@ async function invokeHarness(opts: {
     systemPrompt: systemPromptText ? [{ text: systemPromptText }] : undefined,
     model: modelId ? { bedrockModelConfig: { modelId } } : undefined,
     tools: tools.length ? tools : undefined,
+    runtimeUserId: encodeRuntimeUserId(callerIdentity),
   }));
 
   const chunks: string[] = [];
@@ -151,6 +171,7 @@ async function invokeHarness(opts: {
 export const handler = async (event: InvokeAgentEvent): Promise<InvokeAgentResult> => {
   const { agentSlug, prompt, sessionId: inputSessionId } = event.arguments;
   const sessionId = inputSessionId ?? randomUUID();
+  const callerIdentity = callerIdentityFromEvent(event);
 
   const agentConfig = await fetchAgentConfig(agentSlug);
   if (!agentConfig) {
@@ -161,6 +182,7 @@ export const handler = async (event: InvokeAgentEvent): Promise<InvokeAgentResul
   }
 
   const response = await invokeHarness({
+    callerIdentity,
     sessionId,
     prompt,
     systemPromptText: agentConfig.systemPromptText,

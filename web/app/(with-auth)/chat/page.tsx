@@ -24,10 +24,26 @@ import {
 } from '@/components/ui/select';
 import { WrenchIcon, Loader2Icon } from 'lucide-react';
 import { listMcpToolsForServer } from '@/lib/list-mcp-tools';
+import { useCurrentUser } from '@/lib/use-current-user';
 import { ToolCallRenderer } from './tool-call-renderer';
 import { UserMessageMarkdown } from './user-message-renderer';
 import { AwaitingInputBanner } from './awaiting-input-banner';
 import { ChatComposerInput } from './chat-composer-input';
+
+/**
+ * Shows the signed-in user's Cognito groups (issue #246) — the identity
+ * foundation later UI work (#247) will use to hide unauthorized tools/agents.
+ * Renders nothing until groups are loaded or when the user has none.
+ */
+function UserGroupsBadge() {
+  const { groups, loading } = useCurrentUser();
+  if (loading || groups.length === 0) return null;
+  return (
+    <span className="text-xs text-muted-foreground mr-auto self-center" title="Your Cognito groups">
+      {groups.join(', ')}
+    </span>
+  );
+}
 
 type McpTool = {
   name: string;
@@ -235,6 +251,7 @@ function ChatView({
         </div>
 
         <div className="flex items-center justify-end gap-1 border-t px-3 py-2">
+          <UserGroupsBadge />
           <Select
             value={agentId ?? '__default__'}
             onValueChange={(val) => onAgentChange(val === '__default__' ? null : val)}

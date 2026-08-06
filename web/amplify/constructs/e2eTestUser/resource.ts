@@ -20,6 +20,12 @@ export interface E2eTestUserProps {
   emailSsmPath: string;
   /** SSM parameter path to store the test user's password (SecureString). */
   passwordSsmPath: string;
+  /**
+   * Cognito group to add the test user to (e.g. "reservoir-eng"), so e2e
+   * tests can assert group-dependent behavior. The group must already exist
+   * in the pool (see `groups` on `defineAuth` in web/amplify/auth/resource.ts).
+   */
+  group: string;
 }
 
 /**
@@ -47,6 +53,7 @@ export class E2eTestUser extends Construct {
         'cognito-idp:AdminGetUser',
         'cognito-idp:AdminSetUserPassword',
         'cognito-idp:AdminDeleteUser',
+        'cognito-idp:AdminAddUserToGroup',
       ],
       resources: [props.userPoolArn],
     }));
@@ -70,6 +77,7 @@ export class E2eTestUser extends Construct {
         Email: props.email,
         EmailSsmPath: props.emailSsmPath,
         PasswordSsmPath: props.passwordSsmPath,
+        Group: props.group,
       },
     });
   }
