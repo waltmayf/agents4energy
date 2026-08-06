@@ -21,6 +21,7 @@ import { Observable, type Subscriber } from 'rxjs';
 import outputs from '../amplify_outputs.json';
 import { dedupeStoredEvents, eventsToAguiMessages, type StoredEvent } from './converse-to-agui';
 import { fetchActiveRun, upsertActiveRun, clearActiveRun } from './active-run';
+import { mergeActiveRunSnapshot } from './active-run-merge';
 import {
   createHarnessStreamState,
   translateHarnessStreamEvent,
@@ -421,30 +422,11 @@ export async function loadHistory(sessionId: string): Promise<Message[]> {
   // than one stored event. Collapse those before mapping to AG-UI messages.
   // Convert stored events to AG-UI messages
   const msgs = eventsToAguiMessages(dedupeStoredEvents(sorted));
-  // Append in‑flight assistant message from ActiveRun snapshot if present
+  // Append in‑flight assistant message from ActiveRun snapshot if present, unless
+  // the same turn has already landed in persisted memory (see active-run-merge.ts).
   try {
     const active = await fetchActiveRun(sessionId);
-    // A crashed browser leaves a stale 'streaming' row with no one left to
-    // clear it — ignore snapshots that haven't been touched in a while rather
-    // than showing a permanently stuck in-flight bubble.
-    const ACTIVE_RUN_STALE_MS = 60_000;
-    const updatedAtMs = active?.updatedAt ? new Date(active.updatedAt).getTime() : NaN;
-    const isStale = !Number.isFinite(updatedAtMs) || Date.now() - updatedAtMs > ACTIVE_RUN_STALE_MS;
-    if (
-      active &&
-      !isStale &&
-      active.status === 'streaming' &&
-      active.accumulatedText &&
-      active.accumulatedText.trim() &&
-      active.messageId &&
-      !msgs.some((m) => m.id === active.messageId)
-    ) {
-      msgs.push({
-        id: active.messageId,
-        role: 'assistant',
-        content: active.accumulatedText,
-      } as Message);
-    }
+    return mergeActiveRunSnapshot(msgs, active);
   } catch (e) {
     // Log and ignore – history load should succeed even if ActiveRun fetch fails
     console.error('Failed to fetch ActiveRun for session', sessionId, e);
