@@ -41,3 +41,16 @@ export function friendlyHarnessError(cause: string | undefined | null): string |
 
   return null;
 }
+
+/**
+ * Chat-specific wrapper around `friendlyHarnessError()` (issue #243): the
+ * webhook message above doesn't mention chat sessions, but a live chat turn
+ * that hits context overflow can never succeed again on the same session (the
+ * harness replays the full transcript every turn), so we tell the user to
+ * start a new one instead of retrying.
+ */
+export function friendlyChatHarnessError(cause: string | undefined | null): string | null {
+  const friendly = friendlyHarnessError(cause);
+  if (!friendly) return null;
+  return `${friendly}\n\nStart a new chat session to continue — this session has grown too large to retry.`;
+}

@@ -27,6 +27,8 @@ import {
   finalizeHarnessStream,
   type HarnessStreamEvent,
 } from './harness-stream-to-agui';
+import { buildRunErrorMessageEvents } from './harness-run-error';
+import { friendlyChatHarnessError } from './harness-error-message';
 
 const custom = (outputs as { custom?: { agentcore_harness_arn?: string; agentcore_region?: string } }).custom;
 export const HARNESS_ARN = custom?.agentcore_harness_arn as string;
@@ -261,6 +263,15 @@ export class HarnessAgent extends AbstractAgent {
             return;
           }
           const message = err instanceof Error ? err.message : String(err);
+          // CopilotChat v2 doesn't render a bare RUN_ERROR event, so a harness
+          // failure — most commonly context-window overflow — would otherwise
+          // leave the chat showing nothing (issue #243). Emit it as a visible
+          // assistant message first, then still surface RUN_ERROR/error() so
+          // the run itself is correctly marked failed.
+          const displayText = friendlyChatHarnessError(message) ?? `⚠️ The agent run failed: ${message}`;
+          for (const aguiEvent of buildRunErrorMessageEvents(displayText, () => crypto.randomUUID())) {
+            subscriber.next(aguiEvent);
+          }
           subscriber.next({ type: EventType.RUN_ERROR, message } as BaseEvent);
           subscriber.error(err instanceof Error ? err : new Error(message));
         }
