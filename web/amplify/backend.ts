@@ -4,6 +4,7 @@ import { data } from './data/resource';
 import { listSessionMessages } from './functions/list-session-messages/resource';
 import { updateSessionSummary } from './functions/update-session-summary/resource';
 import { registerMcpTarget } from './functions/register-mcp-target/resource';
+import { syncCedarPolicies } from './functions/sync-cedar-policies/resource';
 import { listMcpTools } from './functions/list-mcp-tools/resource';
 import { invokeAgent } from './functions/invoke-agent/resource';
 import { mintGithubToken } from './functions/mint-github-token/resource';
@@ -15,7 +16,8 @@ import { agentWebhookAuthorizer } from './functions/agent-webhook-authorizer/res
 import { s3Tools } from './functions/s3-tools/resource';
 import { agentWorkspace } from './storage/resource';
 import { Policy, PolicyStatement, ServicePrincipal } from 'aws-cdk-lib/aws-iam';
-import { Function as LambdaFunction } from 'aws-cdk-lib/aws-lambda';
+import { Function as LambdaFunction, StartingPosition } from 'aws-cdk-lib/aws-lambda';
+import { DynamoEventSource } from 'aws-cdk-lib/aws-lambda-event-sources';
 import { Fn, Stack, CfnOutput } from 'aws-cdk-lib';
 import { fileURLToPath } from 'url';
 import { resolve, dirname } from 'path';
@@ -140,6 +142,7 @@ const backend = defineBackend({
   listSessionMessages,
   updateSessionSummary,
   registerMcpTarget,
+  syncCedarPolicies,
   listMcpTools,
   invokeAgent,
   mintGithubToken,
@@ -330,6 +333,10 @@ const memoryName = firstHarnessMemory?.mode === 'existing' ? firstHarnessMemory.
 // accessors would throw — treat the harness as absent (ARNs resolve to '').
 const harnessName = skipHarness ? undefined : harnessSpecs[0]?.name;
 const gatewayName = projectSpec.agentCoreGateways?.[0]?.name;
+// The Cedar policy engine attached to the first gateway (DefaultCedar, #271) —
+// used by the sync-cedar-policies Lambda (#272) to push generated policies.
+const policyEngineName: string | undefined = projectSpec.agentCoreGateways?.[0]?.policyEngineConfiguration
+  ?.policyEngineName;
 
 const AGENTCORE_MEMORY_ID = memoryName ? agentCoreApp.memoryId(memoryName) : '';
 const AGENTCORE_MEMORY_ARN = memoryName ? agentCoreApp.memoryArn(memoryName) : '';
@@ -338,6 +345,8 @@ const AGENTCORE_GATEWAY_ARN = gatewayName ? agentCoreApp.gatewayArn(gatewayName)
 const AGENTCORE_GATEWAY_ENDPOINT = gatewayName ? agentCoreApp.gatewayEndpoint(gatewayName) : '';
 const AGENTCORE_HARNESS_ARN = harnessName ? agentCoreApp.harnessArn(harnessName) : '';
 const AGENTCORE_HARNESS_ROLE_ARN = harnessName ? agentCoreApp.harnessRoleArn(harnessName) : '';
+const AGENTCORE_POLICY_ENGINE_ID = policyEngineName ? agentCoreApp.policyEngineId(policyEngineName) : '';
+const AGENTCORE_POLICY_ENGINE_ARN = policyEngineName ? agentCoreApp.policyEngineArn(policyEngineName) : '';
 const AGENTCORE_REGION = Stack.of(agentStack).region;
 
 // ClaudeCode AgentCore Runtime — the container agent invoked via
@@ -512,6 +521,60 @@ registerMcpTargetLambda.addToRolePolicy(new PolicyStatement({
   ],
   resources: ['*'],
 }));
+
+// ============================================================================
+// SYNC-CEDAR-POLICIES Lambda (#272) — generates Cedar policies from
+// GroupToolGrant rows and pushes them to the DefaultCedar policy engine (#271)
+// on every grant change. Triggered by a DynamoDB Stream on the GroupToolGrant
+// table rather than a build-time step, since grants are edited at runtime via
+// the #247 admin UI, not at deploy time — see docs/mcp-tool-permissions.md.
+// No-ops (skips the DynamoEventSource + env wiring) when no policy engine is
+// configured, so this stays inert until #271's DefaultCedar engine exists.
+// ============================================================================
+
+if (AGENTCORE_POLICY_ENGINE_ID) {
+  backend.syncCedarPolicies.addEnvironment('POLICY_ENGINE_ID', AGENTCORE_POLICY_ENGINE_ID);
+  backend.syncCedarPolicies.addEnvironment('GATEWAY_ID', AGENTCORE_GATEWAY_ID);
+  backend.syncCedarPolicies.addEnvironment(
+    'GROUP_TOOL_GRANT_TABLE_NAME',
+    backend.data.resources.tables['GroupToolGrant'].tableName,
+  );
+  backend.syncCedarPolicies.addEnvironment(
+    'MCP_SERVER_TABLE_NAME',
+    backend.data.resources.tables['McpServer'].tableName,
+  );
+
+  const syncCedarPoliciesLambda = backend.syncCedarPolicies.resources.lambda as LambdaFunction;
+  syncCedarPoliciesLambda.addToRolePolicy(new PolicyStatement({
+    actions: [
+      'bedrock-agentcore:ListPolicies',
+      'bedrock-agentcore:GetPolicy',
+      'bedrock-agentcore:CreatePolicy',
+      'bedrock-agentcore:UpdatePolicy',
+      'bedrock-agentcore:DeletePolicy',
+    ],
+    resources: [AGENTCORE_POLICY_ENGINE_ARN, `${AGENTCORE_POLICY_ENGINE_ARN}/*`],
+  }));
+  syncCedarPoliciesLambda.addToRolePolicy(new PolicyStatement({
+    actions: ['bedrock-agentcore:GetGatewayTarget'],
+    resources: ['*'],
+  }));
+  syncCedarPoliciesLambda.addToRolePolicy(new PolicyStatement({
+    actions: ['dynamodb:Scan'],
+    resources: [
+      backend.data.resources.tables['GroupToolGrant'].tableArn,
+      backend.data.resources.tables['McpServer'].tableArn,
+    ],
+  }));
+
+  backend.syncCedarPolicies.resources.lambda.addEventSource(
+    new DynamoEventSource(backend.data.resources.tables['GroupToolGrant'], {
+      startingPosition: StartingPosition.LATEST,
+      batchSize: 1,
+      retryAttempts: 3,
+    }),
+  );
+}
 
 // ============================================================================
 // S3-TOOLS Lambda — ApplyDiff/ListFiles/ReadFile/DeleteFile filesystem tools,
