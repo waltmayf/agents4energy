@@ -2,8 +2,30 @@
 import { useEffect, useState } from 'react';
 import { generateClient } from 'aws-amplify/data';
 import type { Schema } from '@/amplify/data/resource';
+import { useCurrentUser } from '@/lib/use-current-user';
+import { listAllToolGrants, isToolGrantedToAnyGroup, type ToolGrant } from '@/lib/tool-permissions';
 
 const amplifyClient = generateClient<Schema>({ authMode: 'userPool' });
+
+/**
+ * UX-only filter (non-authoritative — see #248 for the real enforcement
+ * boundary): drops an MCP server from an agent's tool list when the signed-in
+ * user's groups are governed for that server (at least one GroupToolGrant row
+ * exists) but none of those grants allow access. Servers with no grants at
+ * all are left ungoverned/visible, so existing agents keep working until an
+ * admin opts a server into governance via the Permissions tab.
+ */
+function filterServersForUser(
+  servers: McpServerInfo[],
+  grants: ToolGrant[],
+  userGroups: string[],
+): McpServerInfo[] {
+  return servers.filter((s) => {
+    const grantsForServer = grants.filter((g) => g.mcpServerId === s.id);
+    if (grantsForServer.length === 0) return true;
+    return isToolGrantedToAnyGroup(grants, userGroups, s.id, '*');
+  });
+}
 
 export type McpServerInfo = {
   id: string;
@@ -31,6 +53,7 @@ export type AgentsState =
 export function useAgents(): AgentsState {
   const [state, setState] = useState<AgentsState>({ status: 'loading' });
   const [reloadKey, setReloadKey] = useState(0);
+  const { groups: userGroups, loading: userLoading } = useCurrentUser();
 
   // Re-fetch when the tab regains focus — credentials may have been added or
   // revoked on the Agents page while this tab was in the background.
@@ -41,15 +64,17 @@ export function useAgents(): AgentsState {
   }, []);
 
   useEffect(() => {
+    if (userLoading) return;
     let cancelled = false;
 
     async function load() {
       try {
-        const [agentsRes, joinRes, serversRes, credsRes] = await Promise.all([
+        const [agentsRes, joinRes, serversRes, credsRes, grants] = await Promise.all([
           amplifyClient.models.Agent.list({ filter: { enabled: { eq: true } } }),
           amplifyClient.models.AgentMcpServer.list(),
           amplifyClient.models.McpServer.list({ filter: { enabled: { eq: true } } }),
           amplifyClient.models.McpServerCredential.list(),
+          listAllToolGrants(),
         ]);
 
         if (agentsRes.errors?.length) console.error('[useAgents] agents error', agentsRes.errors);
@@ -105,7 +130,7 @@ export function useAgents(): AgentsState {
               description: a.description,
               systemPromptText: a.systemPromptText,
               modelId: a.modelId,
-              mcpServers: serversByAgent[a.id] ?? [],
+              mcpServers: filterServersForUser(serversByAgent[a.id] ?? [], grants, userGroups),
             })),
           });
         }
@@ -117,7 +142,7 @@ export function useAgents(): AgentsState {
 
     load();
     return () => { cancelled = true; };
-  }, [reloadKey]);
+  }, [reloadKey, userLoading, userGroups]);
 
   return state;
 }

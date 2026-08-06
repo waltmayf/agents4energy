@@ -85,6 +85,7 @@ export const agentConfigSchema = a.schema({
     enabled: a.boolean().required().default(true),
     agents: a.hasMany('AgentMcpServer', 'mcpServerId'),
     credentials: a.hasMany('McpServerCredential', 'mcpServerId'),
+    groupGrants: a.hasMany('GroupToolGrant', 'mcpServerId'),
   }).authorization((allow) => [
     allow.authenticated().to(['read', 'create', 'update', 'delete']),
     allow.owner(),
@@ -116,13 +117,39 @@ export const agentConfigSchema = a.schema({
     mcpServerId: a.id().required(),
     agent: a.belongsTo('Agent', 'agentId'),
     mcpServer: a.belongsTo('McpServer', 'mcpServerId'),
-    // Subset of tool names this agent can use. Empty / null means all tools enabled.
+    // Deprecated (#247): unused by any read path. Group -> tool authorization is
+    // now expressed by GroupToolGrant below, which is per-(group, server, tool)
+    // rather than per-(agent, server) — a group's grants apply to every agent
+    // that exposes that server, not just one. Left in place (nullable, unread)
+    // rather than dropped, to avoid a destructive schema migration; new code
+    // should not read or write it.
     enabledTools: a.string().array(),
   }).authorization((allow) => [
     allow.authenticated().to(['read', 'create', 'update', 'delete']),
     allow.owner(),
     // See Agent's allow.guest() comment above — same seed needs this too.
     allow.guest(),
+  ]),
+
+  // Effect of a GroupToolGrant: whether the group may or may not call the tool.
+  ToolGrantEffect: a.enum(['ALLOW', 'DENY']),
+
+  // Maps a Cognito group to the MCP tools it may call, per MCP server. This is
+  // the human-editable source of truth that Cedar policies (#248) will be
+  // generated from — it is NOT itself an enforcement mechanism. Client-side
+  // filtering in use-agents.ts is UX-only, not a security boundary.
+  GroupToolGrant: a.model({
+    // Cognito group name, e.g. "admin" | "reservoir-eng" | "drilling".
+    group: a.string().required(),
+    mcpServerId: a.id().required(),
+    mcpServer: a.belongsTo('McpServer', 'mcpServerId'),
+    // Tool name as returned by listMcpTools, or "*" to match every tool on
+    // this server.
+    toolName: a.string().required(),
+    effect: a.ref('ToolGrantEffect').required(),
+  }).authorization((allow) => [
+    allow.group('admin').to(['read', 'create', 'update', 'delete']),
+    allow.authenticated().to(['read']),
   ]),
 
   // A single MCP tool descriptor returned by listMcpTools.

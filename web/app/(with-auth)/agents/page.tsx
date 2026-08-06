@@ -30,6 +30,7 @@ import {
   CheckCircle2Icon,
   AlertCircleIcon,
   StarIcon,
+  ShieldIcon,
 } from 'lucide-react';
 import {
   type McpCredential,
@@ -39,6 +40,8 @@ import {
   isExpiredOrExpiringSoon,
 } from '@/lib/mcp-auth';
 import { listMcpToolsForServer } from '@/lib/list-mcp-tools';
+import { useCurrentUser } from '@/lib/use-current-user';
+import { PermissionsPanel } from './permissions-panel';
 
 const amplifyClient = generateClient<Schema>({ authMode: 'userPool' });
 
@@ -1270,7 +1273,9 @@ function EditPanel({
 
 export default function AgentsPage() {
   const [pageState, dispatch] = useReducer(reducer, { status: 'loading' });
-  const [activeTab, setActiveTab] = useState<'agents' | 'mcp-servers'>('agents');
+  const [activeTab, setActiveTab] = useState<'agents' | 'mcp-servers' | 'permissions'>('agents');
+  const { groups: currentUserGroups } = useCurrentUser();
+  const isAdmin = currentUserGroups.includes('admin');
   const [selectedAgentId, setSelectedAgentId] = useState<string | 'new' | null>(null);
   const [selectedMcpId, setSelectedMcpId] = useState<string | 'new' | null>(null);
 
@@ -1656,7 +1661,8 @@ export default function AgentsPage() {
 
   const agentPanelOpen = selectedAgentId !== null;
   const mcpPanelOpen = selectedMcpId !== null;
-  const panelOpen = activeTab === 'agents' ? agentPanelOpen : mcpPanelOpen;
+  // Permissions has no sidebar list — it always renders as full-width content.
+  const panelOpen = activeTab === 'agents' ? agentPanelOpen : activeTab === 'mcp-servers' ? mcpPanelOpen : true;
 
   // Sort agents: favorites first
   const sortedAgents = [...agents].sort((a, b) => {
@@ -1711,28 +1717,46 @@ export default function AgentsPage() {
             <ServerIcon className="size-3.5" />
             MCP Servers
           </button>
+          {isAdmin && (
+            <button
+              type="button"
+              onClick={() => setActiveTab('permissions')}
+              className={cn(
+                'flex-1 flex items-center justify-center gap-1.5 py-2.5 text-sm font-medium transition-colors border-b-2 -mb-px',
+                activeTab === 'permissions'
+                  ? 'border-primary text-foreground'
+                  : 'border-transparent text-muted-foreground hover:text-foreground',
+              )}
+              data-testid="tab-permissions"
+            >
+              <ShieldIcon className="size-3.5" />
+              Permissions
+            </button>
+          )}
         </div>
 
         {/* List header */}
-        <div className="flex items-center justify-between px-4 py-3 border-b shrink-0">
-          <span className="text-sm font-medium text-muted-foreground">
-            {activeTab === 'agents' ? 'All agents' : 'All servers'}
-          </span>
-          <Button
-            size="sm"
-            onClick={() => {
-              if (activeTab === 'agents') setSelectedAgentId('new');
-              else setSelectedMcpId('new');
-            }}
-            data-testid={activeTab === 'agents' ? 'new-agent-button' : 'new-mcp-server-button'}
-          >
-            <PlusIcon />
-            {activeTab === 'agents' ? 'New agent' : 'Add server'}
-          </Button>
-        </div>
+        {activeTab !== 'permissions' && (
+          <div className="flex items-center justify-between px-4 py-3 border-b shrink-0">
+            <span className="text-sm font-medium text-muted-foreground">
+              {activeTab === 'agents' ? 'All agents' : 'All servers'}
+            </span>
+            <Button
+              size="sm"
+              onClick={() => {
+                if (activeTab === 'agents') setSelectedAgentId('new');
+                else setSelectedMcpId('new');
+              }}
+              data-testid={activeTab === 'agents' ? 'new-agent-button' : 'new-mcp-server-button'}
+            >
+              <PlusIcon />
+              {activeTab === 'agents' ? 'New agent' : 'Add server'}
+            </Button>
+          </div>
+        )}
 
         {/* Search input */}
-        {pageState.status === 'ready' && (
+        {pageState.status === 'ready' && activeTab !== 'permissions' && (
           <div className="px-4 py-2 border-b shrink-0">
             {activeTab === 'agents' ? (
               <Input
@@ -1755,6 +1779,7 @@ export default function AgentsPage() {
         )}
 
         {/* List body */}
+        {activeTab !== 'permissions' && (
         <div className="flex-1 overflow-y-auto">
           {pageState.status === 'loading' && (
             <div className="flex items-center justify-center py-12">
@@ -1938,6 +1963,7 @@ export default function AgentsPage() {
             )
           )}
         </div>
+        )}
       </div>
 
       {/* Agent edit panel */}
@@ -1964,6 +1990,11 @@ export default function AgentsPage() {
             onClose={() => setSelectedMcpId(null)}
           />
         </div>
+      )}
+
+      {/* Group -> tool permissions (admin only) */}
+      {activeTab === 'permissions' && isAdmin && pageState.status === 'ready' && (
+        <PermissionsPanel mcpServers={mcpServers} />
       )}
     </div>
   );
