@@ -109,10 +109,35 @@
         }
       },
       "enableSemanticSearch": true,
-      "exceptionLevel": "DEBUG"
+      "exceptionLevel": "DEBUG",
+      "policyEngineConfiguration": {
+        "policyEngineName": "DefaultCedar",
+        "mode": "LOG_ONLY"
+      }
     }
   ],
-  "policyEngines": [],
+  "policyEngines": [
+    {
+      "name": "DefaultCedar",
+      "description": "Cedar policy engine for default-gateway. Associated in LOG_ONLY mode (evaluates and logs decisions without blocking) — tool calls are not yet routed through the gateway (#273), so ENFORCE has no effect yet. Policies below are static smoke tests; #272 replaces them with policies generated from GroupToolGrant (Cognito group -> MCP tool grants, web/amplify/data/schemas/agentConfig.schema.ts).",
+      "policies": [
+        {
+          "name": "AdminAllowAllTools",
+          "description": "Smoke test: principals with the Cognito \"admin\" group claim may call any tool on default-gateway. Mirrors GroupToolGrant's admin/*/ALLOW convention. Cognito's custom:groups / cognito:groups claim is expected to arrive as a JWT tag on AgentCore::OAuthUser; exact tag name depends on the gateway's CUSTOM_JWT claim mapping and will be confirmed in #272 when policies are generated from real grants.",
+          "statement": "permit(\n  principal is AgentCore::OAuthUser,\n  action,\n  resource is AgentCore::Gateway\n)\nwhen {\n  principal.hasTag(\"cognito:groups\") &&\n  principal.getTag(\"cognito:groups\") like \"*admin*\"\n};",
+          "validationMode": "IGNORE_ALL_FINDINGS",
+          "enforcementMode": "LOG_ONLY"
+        },
+        {
+          "name": "DefaultDenyUnauthenticated",
+          "description": "Smoke test: forbid tool calls from callers with no recognized OAuth principal, making default-deny explicit while no other policies exist yet. Cedar already default-denies with no matching permit, so this is a documentation/smoke policy, not a behavior change on its own.",
+          "statement": "forbid(\n  principal,\n  action,\n  resource is AgentCore::Gateway\n)\nunless {\n  principal is AgentCore::OAuthUser\n};",
+          "validationMode": "IGNORE_ALL_FINDINGS",
+          "enforcementMode": "LOG_ONLY"
+        }
+      ]
+    }
+  ],
   "configBundles": [],
   "abTests": [],
   "httpGateways": [],
