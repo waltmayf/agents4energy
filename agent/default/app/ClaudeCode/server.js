@@ -40,6 +40,7 @@ import { SFNClient, SendTaskSuccessCommand, SendTaskFailureCommand } from '@aws-
 import { BedrockAgentCoreClient } from '@aws-sdk/client-bedrock-agentcore';
 import { persistClaudeStreamEvent, persistUserPrompt, persistAwaitingInputMarker } from './memory.js';
 import { detectAwaitingInput } from './detect-awaiting-input.js';
+import { detectMonitorRequest } from './detect-monitor.js';
 import { startBrowserMcp } from './browser-mcp.js';
 import { upsertActiveRun, clearActiveRun } from './active-run.js';
 
@@ -242,17 +243,23 @@ app.post('/invocations', async (req, res) => {
           }
         }
         log(`[callback] job finished (${finalText.length} chars); sending SendTaskSuccess`);
-        // Output.Message.Content stays byte-for-byte identical to the pre-#185
-        // shape (the native invokeHarness task produces the same shape) so
-        // PostFinalComment is unaffected. `agentStatus`/`awaitingQuestion` are
-        // additive top-level fields the SFN Choice below branches on; they are
-        // only ever present when awaiting === true.
+        // Build the output object, preserving the exact Output.Message.Content shape.
+        const outputObj = {
+          Output: { Message: { Role: 'assistant', Content: [{ Text: finalText }] } },
+        };
+        if (awaiting) {
+          outputObj.agentStatus = 'awaiting_input';
+          outputObj.awaitingQuestion = question;
+        } else {
+          const { monitor, spec } = detectMonitorRequest(finalText);
+          if (monitor) {
+            outputObj.agentStatus = 'monitoring';
+            outputObj.monitorSpec = spec;
+          }
+        }
         await sfn.send(new SendTaskSuccessCommand({
           taskToken,
-          output: JSON.stringify({
-            Output: { Message: { Role: 'assistant', Content: [{ Text: finalText }] } },
-            ...(awaiting ? { agentStatus: 'awaiting_input', awaitingQuestion: question } : {}),
-          }),
+          output: JSON.stringify(outputObj),
         }));
       },
       async (err) => {
