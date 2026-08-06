@@ -12,6 +12,8 @@ import { Observable, type Subscriber } from 'rxjs';
 import outputs from '../amplify_outputs.json';
 import { makeClient, messageText, loadHistory } from './harness-agent';
 import { parseInvokeResponseText } from './claude-code-invoke-response';
+import { buildRunErrorMessageEvents } from './harness-run-error';
+import { friendlyChatHarnessError } from './harness-error-message';
 
 const custom = (outputs as { custom?: { agentcore_claude_code_runtime_arn?: string } }).custom;
 export const CLAUDE_CODE_RUNTIME_ARN = custom?.agentcore_claude_code_runtime_arn as string | undefined;
@@ -110,6 +112,13 @@ export class ClaudeCodeAgent extends AbstractAgent {
             return;
           }
           const message = err instanceof Error ? err.message : String(err);
+          // Same fix as HarnessAgent.run() — see harness-agent.ts (issue #243):
+          // CopilotChat v2 doesn't render a bare RUN_ERROR, so surface the
+          // failure as a visible assistant message first.
+          const displayText = friendlyChatHarnessError(message) ?? `⚠️ The agent run failed: ${message}`;
+          for (const aguiEvent of buildRunErrorMessageEvents(displayText, () => crypto.randomUUID())) {
+            subscriber.next(aguiEvent);
+          }
           subscriber.next({ type: EventType.RUN_ERROR, message } as BaseEvent);
           subscriber.error(err instanceof Error ? err : new Error(message));
         }
