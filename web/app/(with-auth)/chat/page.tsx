@@ -25,6 +25,7 @@ import {
 import { WrenchIcon, Loader2Icon } from 'lucide-react';
 import { listMcpToolsForServer } from '@/lib/list-mcp-tools';
 import { useCurrentUser } from '@/lib/use-current-user';
+import { listAllToolGrants, isToolGrantedToAnyGroup, type ToolGrant } from '@/lib/tool-permissions';
 import { ToolCallRenderer } from './tool-call-renderer';
 import { UserMessageMarkdown } from './user-message-renderer';
 import { AwaitingInputBanner } from './awaiting-input-banner';
@@ -68,10 +69,12 @@ function AgentToolsDialog({
 }) {
   const [results, setResults] = useState<ServerToolsResult[] | null>(null);
   const [loading, setLoading] = useState(false);
+  const { groups: userGroups } = useCurrentUser();
 
   const fetchTools = useCallback(async () => {
     setLoading(true);
     setResults(null);
+    const grants = await listAllToolGrants().catch(() => [] as ToolGrant[]);
     const settled = await Promise.all(
       agent.mcpServers.map(async (server): Promise<ServerToolsResult> => {
         try {
@@ -82,11 +85,18 @@ function AgentToolsDialog({
             ),
           };
           const result = await listMcpToolsForServer(serverWithHeaders);
-          return {
-            server,
-            tools: result.tools.filter((t): t is McpTool => t != null),
-            error: result.error,
-          };
+          const grantsForServer = grants.filter((g) => g.mcpServerId === server.id);
+          // UX-only (non-authoritative, see #248): hide a tool once its server
+          // is governed (any grant row exists) unless the user's groups are
+          // explicitly allowed. Ungoverned servers show every tool.
+          const tools = result.tools
+            .filter((t): t is McpTool => t != null)
+            .filter(
+              (t) =>
+                grantsForServer.length === 0 ||
+                isToolGrantedToAnyGroup(grants, userGroups, server.id, t.name),
+            );
+          return { server, tools, error: result.error };
         } catch (err) {
           return { server, tools: [], error: String(err) };
         }
@@ -94,7 +104,7 @@ function AgentToolsDialog({
     );
     setResults(settled);
     setLoading(false);
-  }, [agent]);
+  }, [agent, userGroups]);
 
   const handleOpenChange = useCallback(
     (next: boolean) => {
