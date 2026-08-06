@@ -262,6 +262,10 @@ const longestResourceNameLength = Math.max(
   // Runtimes (e.g. ClaudeCode) share the same `${projectName}_${name}` naming
   // and 48-char cap as harnesses/memories.
   ...(projectSpec.runtimes ?? []).map((r: { name: string }) => r.name.length),
+  // Policy engines (e.g. DefaultCedar, #271) share the same
+  // `${projectName}_${name}` physical naming (see AgentCorePolicyEngine in
+  // @aws/agentcore-cdk).
+  ...(projectSpec.policyEngines ?? []).map((p: { name: string }) => p.name.length),
 );
 const uniqueProjectName = toAgentCoreProjectName(
   48 - 1 - longestResourceNameLength,
@@ -277,6 +281,11 @@ const agentCoreApp = new AgentCoreApplication(agentStack, 'AgentCoreApplication'
   // (invoked via @agentcore-claude on GitHub issues/PRs, see agent/default/app/
   // ClaudeCode). Built via CodeBuild → ECR → CfnRuntime by @aws/agentcore-cdk.
   runtimes: projectSpec.runtimes ?? [],
+  // Policy engines from agentcore.json (e.g. DefaultCedar, #271) — the
+  // AgentCoreApplication wrapper previously dropped this field entirely, so
+  // the engine and its policies were never actually synthesized into the CDK
+  // stack despite agentcore.json configuring them (#272).
+  policyEngines: projectSpec.policyEngines ?? [],
   harnesses: harnessSpecsWithAuth,
   mcpSpec: agentCoreGatewaysWithUniqueNames
     ? {
