@@ -212,7 +212,15 @@ export function eventToMessages(ev: StoredEvent, index: number): Message[] {
   // Emit the assistant/user message carrying text and any tool calls. Reasoning
   // and tool-result messages are ordered before it so the transcript reads
   // reasoning → answer → tool activity naturally on reload.
-  const content = textChunks.join('').trim();
+  //
+  // Each entry in textChunks is one already-assembled Converse text content
+  // block, not a raw streaming delta, so joining separate blocks with '\n\n'
+  // can't split a sentence that legitimately arrived as multiple deltas (those
+  // are concatenated into a single block's `text` upstream, before this file
+  // ever sees them). Without a separator here, a turn with more than one text
+  // block (e.g. #244 — a leaked multi-sentence Harmony response split across
+  // blocks) renders as one run-on paragraph with sentences glued together.
+  const content = textChunks.join('\n\n').trim();
   if (content || toolCalls.length) {
     const msg: Record<string, unknown> = { id: base, role };
     if (content) msg.content = content;
