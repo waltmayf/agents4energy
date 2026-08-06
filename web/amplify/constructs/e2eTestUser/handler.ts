@@ -6,6 +6,7 @@ import {
   AdminGetUserCommand,
   AdminSetUserPasswordCommand,
   AdminDeleteUserCommand,
+  AdminAddUserToGroupCommand,
 } from '@aws-sdk/client-cognito-identity-provider';
 import { SSMClient, PutParameterCommand, DeleteParameterCommand } from '@aws-sdk/client-ssm';
 
@@ -17,6 +18,7 @@ interface ResourceProperties {
   Email: string;
   EmailSsmPath: string;
   PasswordSsmPath: string;
+  Group: string;
 }
 
 // Cognito default password policy requires upper/lower/digit/symbol. A raw
@@ -108,6 +110,14 @@ export const handler = async (
       Password: password,
       Permanent: true,
     }));
+
+    if (props.Group) {
+      await cognito.send(new AdminAddUserToGroupCommand({
+        UserPoolId: props.UserPoolId,
+        Username: username,
+        GroupName: props.Group,
+      }));
+    }
 
     await putParameters(props, password);
 
