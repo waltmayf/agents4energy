@@ -12,6 +12,8 @@ If you would like to run an aws cli command you don't have access to, put the co
 ### GitHub Pull Requests
 Always type check your changes before pushing updates by running `npx tsc --noEmit`.
 
+If your change touches `web/amplify/` (backend/CDK — Lambdas, `backend.ts`, constructs, data schema, storage), also run `cd web && pnpm test:synth` before pushing. This is the credential-free CDK synth gate (issue #152): it catches CloudFormation errors `tsc` cannot — most importantly **cross-stack dependency cycles** (e.g. a `defineFunction` in Amplify's shared function stack that references data-stack tables via env/IAM/`DynamoEventSource`, which closes a `data → function → data` cycle). `tsc` passing does **not** mean the backend synthesizes; a cycle only surfaces at synth/deploy. When a Lambda must reference resources from another stack, put it in its own `backend.createStack(...)` as a raw `NodejsFunction` rather than a `defineFunction` — see the `SyncCedarPolicies` / `S3ToolsGatewayTarget` / `AgentWebhookStack` constructs for the pattern.
+
 ### GitHub Issues
 
 When you start working on an issue, inspect the code base to check if the description and comments in the issue are stale.

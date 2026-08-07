@@ -25,6 +25,7 @@ import { AgentCoreApplication, type HarnessDeployment } from './constructs/agent
 import type { HarnessSpec } from '@aws/agentcore-cdk';
 import { E2eTestUser } from './constructs/e2eTestUser/resource';
 import { AgentWebhookStack } from './constructs/agentWebhookStack';
+import { SyncCedarPolicies } from './constructs/syncCedarPolicies';
 import { S3ToolsGatewayTarget } from './constructs/s3ToolsGatewayTarget/resource';
 import { S3ToolsMcpServerSeed } from './constructs/s3ToolsMcpServerSeed/resource';
 
@@ -262,6 +263,10 @@ const longestResourceNameLength = Math.max(
   // Runtimes (e.g. ClaudeCode) share the same `${projectName}_${name}` naming
   // and 48-char cap as harnesses/memories.
   ...(projectSpec.runtimes ?? []).map((r: { name: string }) => r.name.length),
+  // Policy engines (e.g. DefaultCedar, #271) share the same
+  // `${projectName}_${name}` physical naming (see AgentCorePolicyEngine in
+  // @aws/agentcore-cdk).
+  ...(projectSpec.policyEngines ?? []).map((p: { name: string }) => p.name.length),
 );
 const uniqueProjectName = toAgentCoreProjectName(
   48 - 1 - longestResourceNameLength,
@@ -277,6 +282,11 @@ const agentCoreApp = new AgentCoreApplication(agentStack, 'AgentCoreApplication'
   // (invoked via @agentcore-claude on GitHub issues/PRs, see agent/default/app/
   // ClaudeCode). Built via CodeBuild → ECR → CfnRuntime by @aws/agentcore-cdk.
   runtimes: projectSpec.runtimes ?? [],
+  // Policy engines from agentcore.json (e.g. DefaultCedar, #271) — the
+  // AgentCoreApplication wrapper previously dropped this field entirely, so
+  // the engine and its policies were never actually synthesized into the CDK
+  // stack despite agentcore.json configuring them (#272).
+  policyEngines: projectSpec.policyEngines ?? [],
   harnesses: harnessSpecsWithAuth,
   mcpSpec: agentCoreGatewaysWithUniqueNames
     ? {
@@ -321,6 +331,10 @@ const memoryName = firstHarnessMemory?.mode === 'existing' ? firstHarnessMemory.
 // accessors would throw — treat the harness as absent (ARNs resolve to '').
 const harnessName = skipHarness ? undefined : harnessSpecs[0]?.name;
 const gatewayName = projectSpec.agentCoreGateways?.[0]?.name;
+// The Cedar policy engine attached to the first gateway (DefaultCedar, #271) —
+// used by the sync-cedar-policies Lambda (#272) to push generated policies.
+const policyEngineName: string | undefined = projectSpec.agentCoreGateways?.[0]?.policyEngineConfiguration
+  ?.policyEngineName;
 
 const AGENTCORE_MEMORY_ID = memoryName ? agentCoreApp.memoryId(memoryName) : '';
 const AGENTCORE_MEMORY_ARN = memoryName ? agentCoreApp.memoryArn(memoryName) : '';
@@ -329,6 +343,8 @@ const AGENTCORE_GATEWAY_ARN = gatewayName ? agentCoreApp.gatewayArn(gatewayName)
 const AGENTCORE_GATEWAY_ENDPOINT = gatewayName ? agentCoreApp.gatewayEndpoint(gatewayName) : '';
 const AGENTCORE_HARNESS_ARN = harnessName ? agentCoreApp.harnessArn(harnessName) : '';
 const AGENTCORE_HARNESS_ROLE_ARN = harnessName ? agentCoreApp.harnessRoleArn(harnessName) : '';
+const AGENTCORE_POLICY_ENGINE_ID = policyEngineName ? agentCoreApp.policyEngineId(policyEngineName) : '';
+const AGENTCORE_POLICY_ENGINE_ARN = policyEngineName ? agentCoreApp.policyEngineArn(policyEngineName) : '';
 const AGENTCORE_REGION = Stack.of(agentStack).region;
 
 // ClaudeCode AgentCore Runtime — the container agent invoked via
@@ -503,6 +519,35 @@ registerMcpTargetLambda.addToRolePolicy(new PolicyStatement({
   ],
   resources: ['*'],
 }));
+
+// ============================================================================
+// SYNC-CEDAR-POLICIES Lambda (#272) — generates Cedar policies from
+// GroupToolGrant rows and pushes them to the DefaultCedar policy engine (#271)
+// on every grant change. Triggered by a DynamoDB Stream on the GroupToolGrant
+// table rather than a build-time step, since grants are edited at runtime via
+// the #247 admin UI, not at deploy time — see docs/mcp-tool-permissions.md.
+// No-ops (skips the DynamoEventSource + env wiring) when no policy engine is
+// configured, so this stays inert until #271's DefaultCedar engine exists.
+// ============================================================================
+
+// Own stack (not the Amplify function stack): the handler references data-stack
+// tables via env, IAM, AND a DynamoDB Stream event source. A `defineFunction`
+// lives in the function stack, which the data stack already depends on — so any
+// function→data edge closes a `data -> function -> data` cycle CloudFormation
+// rejects at synth. This sink stack depends on the data stack (tables) and the
+// agent stack (policy engine ARN) and is depended on by neither. Inert until
+// #271's DefaultCedar engine exists (AGENTCORE_POLICY_ENGINE_ID === ''). See
+// the SyncCedarPolicies construct doc and the S3ToolsGatewayTarget precedent.
+if (AGENTCORE_POLICY_ENGINE_ID) {
+  const syncCedarPoliciesStack = backend.createStack('sync-cedar-policies');
+  new SyncCedarPolicies(syncCedarPoliciesStack, 'SyncCedarPolicies', {
+    policyEngineId: AGENTCORE_POLICY_ENGINE_ID,
+    policyEngineArn: AGENTCORE_POLICY_ENGINE_ARN,
+    gatewayId: AGENTCORE_GATEWAY_ID,
+    groupToolGrantTable: backend.data.resources.tables['GroupToolGrant'],
+    mcpServerTable: backend.data.resources.tables['McpServer'],
+  });
+}
 
 // ============================================================================
 // S3-TOOLS Lambda — ApplyDiff/ListFiles/ReadFile/DeleteFile filesystem tools,

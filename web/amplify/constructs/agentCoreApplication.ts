@@ -12,6 +12,7 @@ import type {
   AgentEnvSpec,
   AgentCoreProjectSpec,
   AgentCoreMcpSpec,
+  PolicyEngine,
 } from '@aws/agentcore-cdk';
 
 // @aws/agentcore-cdk (alpha) only declares a "require" condition in its
@@ -64,6 +65,8 @@ export interface AgentCoreApplicationProps {
   harnesses: HarnessDeployment[];
   /** Gateway/MCP spec (from agentcore.json `agentCoreGateways`), if any gateways are configured. */
   mcpSpec?: AgentCoreMcpSpec;
+  /** Policy engines to create (from agentcore.json `policyEngines`), if any are configured. */
+  policyEngines?: PolicyEngine[];
 }
 
 /**
@@ -75,10 +78,13 @@ export interface AgentCoreApplicationProps {
  *
  * The real `AgentCoreApplication` creates the **memories**, the **runtimes**
  * (AgentCore Runtimes — e.g. the ClaudeCode container agent, built via
- * CodeBuild → ECR), and — since @aws/agentcore-cdk 0.1.0-alpha.38 — each
- * **harness** (`AWS::BedrockAgentCore::Harness` + its execution role) when a
- * full `spec` is supplied. It does NOT create gateways, so those still come
- * from the separate `AgentCoreMcp` construct.
+ * CodeBuild → ECR), **policy engines** (Cedar, e.g. `DefaultCedar` from #271),
+ * and — since @aws/agentcore-cdk 0.1.0-alpha.38 — each **harness**
+ * (`AWS::BedrockAgentCore::Harness` + its execution role) when a full `spec`
+ * is supplied. It does NOT create gateways, so those still come from the
+ * separate `AgentCoreMcp` construct (which reads a gateway's
+ * `policyEngineConfiguration.policyEngineName` back off this app's
+ * `policyEngines` map to attach it — see @aws/agentcore-cdk's AgentCoreMcp).
  *
  * Harness/memory/runtime specs come from `agentcore.json` (memories/runtimes)
  * and `backend.ts` (harness specs, so the system prompt + Cognito authorizer
@@ -112,11 +118,13 @@ export class AgentCoreApplication extends Construct {
     }));
 
     // Minimal AgentCoreProjectSpec for the real construct. It reads
-    // name/tags/memories/runtimes off this and defaults everything else to [].
+    // name/tags/memories/runtimes/policyEngines off this and defaults
+    // everything else to [].
     const spec: AgentCoreProjectSpec = {
       name: projectName,
       memories: props.memories,
       runtimes: props.runtimes ?? [],
+      policyEngines: props.policyEngines ?? [],
     } as AgentCoreProjectSpec;
 
     this.app = new RealAgentCoreApplication(this, 'App', {
@@ -242,6 +250,20 @@ export class AgentCoreApplication extends Construct {
     const gateway = this.mcp?.gateways.get(name);
     if (!gateway) throw new Error(`Gateway "${name}" not found in AgentCoreApplication`);
     return gateway.attrGatewayIdentifier;
+  }
+
+  /** ARN of a policy engine by its logical name (the `PolicyEngine.name` from agentcore.json), e.g. "DefaultCedar". */
+  public policyEngineArn(name: string): string {
+    const policyEngine = this.app.policyEngines.get(name);
+    if (!policyEngine) throw new Error(`Policy engine "${name}" not found in AgentCoreApplication`);
+    return policyEngine.policyEngineArn;
+  }
+
+  /** Id of a policy engine by its logical name. */
+  public policyEngineId(name: string): string {
+    const policyEngine = this.app.policyEngines.get(name);
+    if (!policyEngine) throw new Error(`Policy engine "${name}" not found in AgentCoreApplication`);
+    return policyEngine.policyEngineId;
   }
 
   public gatewayEndpoint(name: string): string {
