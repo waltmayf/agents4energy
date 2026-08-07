@@ -293,3 +293,11 @@ HarnessAgent.refreshHistory()  — skipped while a local turn streams
        ▼ (only if fetched message count grew)
 setMessages(history) → onMessagesChanged → CopilotKit re-renders live
 ```
+
+---
+
+## Knowledge Graph
+
+The Knowledge Graph feature is documented in [knowledge-graph.md](knowledge-graph.md).
+---
+
