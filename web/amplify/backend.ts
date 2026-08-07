@@ -26,6 +26,7 @@ import type { HarnessSpec } from '@aws/agentcore-cdk';
 import { E2eTestUser } from './constructs/e2eTestUser/resource';
 import { AgentWebhookStack } from './constructs/agentWebhookStack';
 import { SyncCedarPolicies } from './constructs/syncCedarPolicies';
+import { RegisterMcpTargetOnMcpServer } from './constructs/registerMcpTargetOnMcpServer';
 import { S3ToolsGatewayTarget } from './constructs/s3ToolsGatewayTarget/resource';
 import { S3ToolsMcpServerSeed } from './constructs/s3ToolsMcpServerSeed/resource';
 
@@ -519,6 +520,16 @@ registerMcpTargetLambda.addToRolePolicy(new PolicyStatement({
   ],
   resources: ['*'],
 }));
+
+// Register MCP Server targets on default gateway
+if (AGENTCORE_GATEWAY_ID) {
+  const registerMcpTargetOnServerStack = backend.createStack('register-mcp-target-on-mcp-server');
+  new RegisterMcpTargetOnMcpServer(registerMcpTargetOnServerStack, 'RegisterMcpTargetOnMcpServer', {
+    gatewayId: AGENTCORE_GATEWAY_ID,
+    mcpServerTable: backend.data.resources.tables['McpServer'],
+  });
+}
+
 
 // ============================================================================
 // SYNC-CEDAR-POLICIES Lambda (#272) — generates Cedar policies from
