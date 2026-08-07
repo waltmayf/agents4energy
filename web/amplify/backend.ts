@@ -4,7 +4,6 @@ import { data } from './data/resource';
 import { listSessionMessages } from './functions/list-session-messages/resource';
 import { updateSessionSummary } from './functions/update-session-summary/resource';
 import { registerMcpTarget } from './functions/register-mcp-target/resource';
-import { syncCedarPolicies } from './functions/sync-cedar-policies/resource';
 import { listMcpTools } from './functions/list-mcp-tools/resource';
 import { invokeAgent } from './functions/invoke-agent/resource';
 import { mintGithubToken } from './functions/mint-github-token/resource';
@@ -16,8 +15,7 @@ import { agentWebhookAuthorizer } from './functions/agent-webhook-authorizer/res
 import { s3Tools } from './functions/s3-tools/resource';
 import { agentWorkspace } from './storage/resource';
 import { Policy, PolicyStatement, ServicePrincipal } from 'aws-cdk-lib/aws-iam';
-import { Function as LambdaFunction, StartingPosition } from 'aws-cdk-lib/aws-lambda';
-import { DynamoEventSource } from 'aws-cdk-lib/aws-lambda-event-sources';
+import { Function as LambdaFunction } from 'aws-cdk-lib/aws-lambda';
 import { Fn, Stack, CfnOutput } from 'aws-cdk-lib';
 import { fileURLToPath } from 'url';
 import { resolve, dirname } from 'path';
@@ -27,6 +25,7 @@ import { AgentCoreApplication, type HarnessDeployment } from './constructs/agent
 import type { HarnessSpec } from '@aws/agentcore-cdk';
 import { E2eTestUser } from './constructs/e2eTestUser/resource';
 import { AgentWebhookStack } from './constructs/agentWebhookStack';
+import { SyncCedarPolicies } from './constructs/syncCedarPolicies';
 import { S3ToolsGatewayTarget } from './constructs/s3ToolsGatewayTarget/resource';
 import { S3ToolsMcpServerSeed } from './constructs/s3ToolsMcpServerSeed/resource';
 
@@ -142,7 +141,6 @@ const backend = defineBackend({
   listSessionMessages,
   updateSessionSummary,
   registerMcpTarget,
-  syncCedarPolicies,
   listMcpTools,
   invokeAgent,
   mintGithubToken,
@@ -532,48 +530,23 @@ registerMcpTargetLambda.addToRolePolicy(new PolicyStatement({
 // configured, so this stays inert until #271's DefaultCedar engine exists.
 // ============================================================================
 
+// Own stack (not the Amplify function stack): the handler references data-stack
+// tables via env, IAM, AND a DynamoDB Stream event source. A `defineFunction`
+// lives in the function stack, which the data stack already depends on — so any
+// function→data edge closes a `data -> function -> data` cycle CloudFormation
+// rejects at synth. This sink stack depends on the data stack (tables) and the
+// agent stack (policy engine ARN) and is depended on by neither. Inert until
+// #271's DefaultCedar engine exists (AGENTCORE_POLICY_ENGINE_ID === ''). See
+// the SyncCedarPolicies construct doc and the S3ToolsGatewayTarget precedent.
 if (AGENTCORE_POLICY_ENGINE_ID) {
-  backend.syncCedarPolicies.addEnvironment('POLICY_ENGINE_ID', AGENTCORE_POLICY_ENGINE_ID);
-  backend.syncCedarPolicies.addEnvironment('GATEWAY_ID', AGENTCORE_GATEWAY_ID);
-  backend.syncCedarPolicies.addEnvironment(
-    'GROUP_TOOL_GRANT_TABLE_NAME',
-    backend.data.resources.tables['GroupToolGrant'].tableName,
-  );
-  backend.syncCedarPolicies.addEnvironment(
-    'MCP_SERVER_TABLE_NAME',
-    backend.data.resources.tables['McpServer'].tableName,
-  );
-
-  const syncCedarPoliciesLambda = backend.syncCedarPolicies.resources.lambda as LambdaFunction;
-  syncCedarPoliciesLambda.addToRolePolicy(new PolicyStatement({
-    actions: [
-      'bedrock-agentcore:ListPolicies',
-      'bedrock-agentcore:GetPolicy',
-      'bedrock-agentcore:CreatePolicy',
-      'bedrock-agentcore:UpdatePolicy',
-      'bedrock-agentcore:DeletePolicy',
-    ],
-    resources: [AGENTCORE_POLICY_ENGINE_ARN, `${AGENTCORE_POLICY_ENGINE_ARN}/*`],
-  }));
-  syncCedarPoliciesLambda.addToRolePolicy(new PolicyStatement({
-    actions: ['bedrock-agentcore:GetGatewayTarget'],
-    resources: ['*'],
-  }));
-  syncCedarPoliciesLambda.addToRolePolicy(new PolicyStatement({
-    actions: ['dynamodb:Scan'],
-    resources: [
-      backend.data.resources.tables['GroupToolGrant'].tableArn,
-      backend.data.resources.tables['McpServer'].tableArn,
-    ],
-  }));
-
-  backend.syncCedarPolicies.resources.lambda.addEventSource(
-    new DynamoEventSource(backend.data.resources.tables['GroupToolGrant'], {
-      startingPosition: StartingPosition.LATEST,
-      batchSize: 1,
-      retryAttempts: 3,
-    }),
-  );
+  const syncCedarPoliciesStack = backend.createStack('sync-cedar-policies');
+  new SyncCedarPolicies(syncCedarPoliciesStack, 'SyncCedarPolicies', {
+    policyEngineId: AGENTCORE_POLICY_ENGINE_ID,
+    policyEngineArn: AGENTCORE_POLICY_ENGINE_ARN,
+    gatewayId: AGENTCORE_GATEWAY_ID,
+    groupToolGrantTable: backend.data.resources.tables['GroupToolGrant'],
+    mcpServerTable: backend.data.resources.tables['McpServer'],
+  });
 }
 
 // ============================================================================
