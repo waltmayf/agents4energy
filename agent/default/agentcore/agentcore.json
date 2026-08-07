@@ -112,7 +112,7 @@
       "exceptionLevel": "DEBUG",
       "policyEngineConfiguration": {
         "policyEngineName": "DefaultCedar",
-        "mode": "LOG_ONLY"
+        "mode": "ENFORCE"
       }
     }
   ],
