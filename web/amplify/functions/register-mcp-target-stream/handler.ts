@@ -1,5 +1,5 @@
 import { DynamoDBStreamHandler } from 'aws-lambda';
-import { DynamoDBClient, UpdateItemCommand } from '@aws-sdk/client-dynamodb';
+import { AttributeValue, DynamoDBClient, UpdateItemCommand } from '@aws-sdk/client-dynamodb';
 import { BedrockAgentCoreControlClient, CreateGatewayTargetCommand } from '@aws-sdk/client-bedrock-agentcore-control';
 import { unmarshall } from '@aws-sdk/util-dynamodb';
 
@@ -23,7 +23,7 @@ export const handler: DynamoDBStreamHandler = async (event) => {
     if (record.eventName !== 'INSERT' && record.eventName !== 'MODIFY') continue;
     const newImage = record.dynamodb?.NewImage;
     if (!newImage) continue;
-    const item = unmarshall(newImage);
+    const item = unmarshall(newImage as unknown as Record<string, AttributeValue>);
     const { id, name, url, description, gatewayTargetId } = item as any;
     if (gatewayTargetId) continue; // already registered
     // Register gateway target
