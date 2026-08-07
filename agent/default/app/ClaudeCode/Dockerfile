@@ -14,10 +14,11 @@
 #   - MUST expose `GET /ping` (health) and `POST /invocations` (work)
 FROM --platform=linux/arm64 public.ecr.aws/docker/library/node:22-bookworm-slim
 
-# git + gh (repo work), plus certs/curl for gh's apt repo and Bedrock calls.
+# git + gh (repo work), plus certs/curl for gh's apt repo and Bedrock calls,
+# plus unzip to extract the AWS CLI v2 bundle below.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        git curl ca-certificates gnupg \
+        git curl ca-certificates gnupg unzip \
     && mkdir -p -m 755 /etc/apt/keyrings \
     && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
         | gpg --dearmor -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
@@ -27,6 +28,13 @@ RUN apt-get update \
     && apt-get update \
     && apt-get install -y --no-install-recommends gh \
     && rm -rf /var/lib/apt/lists/*
+
+# AWS CLI v2 (aarch64 — this image is linux/arm64). `apt-get install awscli`
+# would pull the old, unsupported v1, so install the official bundle instead.
+RUN curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o /tmp/awscliv2.zip \
+    && unzip -q /tmp/awscliv2.zip -d /tmp \
+    && /tmp/aws/install \
+    && rm -rf /tmp/awscliv2.zip /tmp/aws
 
 # Claude Code CLI (global). Pinning avoids surprise CLI-flag changes between
 # deploys; bump deliberately.
