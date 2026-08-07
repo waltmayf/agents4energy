@@ -445,12 +445,22 @@ function runClaudeCode({ prompt, workDir, repo, issueNumber, systemAppend, githu
   log(`spawning claude (model=${MODEL}) in ${workDir}`);
 
   return new Promise((resolve, reject) => {
-    const child = spawn('claude', args, { cwd: workDir, env });
+    // stdin: 'ignore' closes the child's stdin immediately — otherwise it
+    // stays an open pipe that's never written or ended, which is what
+    // triggers the CLI's benign "no stdin data received in 3s, proceeding
+    // without it" warning on every run (issue #257). That warning used to be
+    // the only thing left in `stderr` by the time a real failure surfaced,
+    // masking the actual cause.
+    const child = spawn('claude', args, { cwd: workDir, env, stdio: ['ignore', 'pipe', 'pipe'] });
     // Hand the child back so a cancel invocation (issue #182) can kill it.
     if (typeof onSpawn === 'function') onSpawn(child);
     let resultText = null;
     let stderr = '';
     let buffered = '';
+    // Raw stdout tail for failure diagnostics, kept separate from `buffered`
+    // (which is consumed line-by-line by handleLine and doesn't retain
+    // history) — capped so a long-running job can't grow this unbounded.
+    let stdoutTail = '';
 
     // ActiveRun producer (issue #15): a browserless run has no browser tab
     // producing the in-flight-message snapshot web/lib/harness-agent.ts writes
@@ -531,7 +541,9 @@ function runClaudeCode({ prompt, workDir, repo, issueNumber, systemAppend, githu
     };
 
     child.stdout.on('data', (d) => {
-      buffered += d.toString();
+      const chunk = d.toString();
+      stdoutTail = (stdoutTail + chunk).slice(-2000);
+      buffered += chunk;
       let newlineIndex;
       // eslint-disable-next-line no-cond-assign
       while ((newlineIndex = buffered.indexOf('\n')) !== -1) {
@@ -541,11 +553,20 @@ function runClaudeCode({ prompt, workDir, repo, issueNumber, systemAppend, githu
     });
     child.stderr.on('data', (d) => { stderr += d.toString(); log('claude:', d.toString().trimEnd()); });
     child.on('error', (err) => { settleActiveRun(); reject(err); });
-    child.on('close', (code) => {
+    child.on('close', (code, signal) => {
       if (buffered.trim()) handleLine(buffered);
       settleActiveRun();
       if (code !== 0) {
-        reject(new Error(`claude exited ${code}: ${stderr.slice(-2000)}`));
+        const redact = (s) => s.replace(/x-access-token:[^@]+@/g, 'x-access-token:***@');
+        // A signal (SIGTERM/SIGKILL) with code === null means the process was
+        // killed rather than crashing on its own — either the ceiling/cancel
+        // path (issue #182) or an OOM kill, not a genuine CLI-reported error.
+        const cause = signal
+          ? `claude killed by signal ${signal} (code=${code})`
+          : `claude exited ${code}`;
+        reject(new Error(
+          `${cause}\n--- stdout tail ---\n${redact(stdoutTail.slice(-2000))}\n--- stderr tail ---\n${redact(stderr.slice(-2000))}`,
+        ));
         return;
       }
       resolve(resultText ?? '');
