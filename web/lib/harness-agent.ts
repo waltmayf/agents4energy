@@ -81,6 +81,7 @@ export interface McpServerConfig {
   name: string;
   url: string;
   headers?: Record<string, string>;
+  gatewayTargetId?: string;
 }
 
 /**
@@ -127,7 +128,7 @@ async function buildTools(mcpServers: McpServerConfig[]): Promise<HarnessTool[] 
     name: s.name,
     config: {
       remoteMcp: {
-        url: s.url,
+        url: s.gatewayTargetId ? (outputs as any).custom?.agentcore_gateway_endpoint : s.url,
         ...(s.headers && Object.keys(s.headers).length ? { headers: s.headers } : {}),
       },
     },

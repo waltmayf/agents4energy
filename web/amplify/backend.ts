@@ -652,6 +652,7 @@ if (AGENTCORE_GATEWAY_ID) {
 // ============================================================================
 
 backend.invokeAgent.addEnvironment('HARNESS_ARN', AGENTCORE_HARNESS_ARN);
+backend.invokeAgent.addEnvironment('AGENTCORE_GATEWAY_ENDPOINT', AGENTCORE_GATEWAY_ENDPOINT);
 
 const invokeAgentLambda = backend.invokeAgent.resources.lambda as LambdaFunction;
 
