@@ -15,6 +15,7 @@ import { agentWebhookAuthorizer } from './functions/agent-webhook-authorizer/res
 import { s3Tools } from './functions/s3-tools/resource';
 import { agentWorkspace } from './storage/resource';
 import { Policy, PolicyStatement, ServicePrincipal } from 'aws-cdk-lib/aws-iam';
+import * as cognito from 'aws-cdk-lib/aws-cognito';
 import { Function as LambdaFunction } from 'aws-cdk-lib/aws-lambda';
 import { Fn, Stack, CfnOutput } from 'aws-cdk-lib';
 import { fileURLToPath } from 'url';
@@ -485,6 +486,35 @@ cfnUserPoolClient.explicitAuthFlows = [
   'ALLOW_USER_SRP_AUTH',
   'ALLOW_USER_PASSWORD_AUTH',
 ];
+
+// Hosted-UI domain + authorization-code OAuth flow on the existing app client
+// (#298), so a standard HTTP MCP client (e.g. Claude Code's `type: "http"` +
+// `oauth: { clientId, callbackPort }` config) can complete the PKCE handshake
+// against default-gateway. The gateway's CUSTOM_JWT authorizer already trusts
+// this pool/client (see allowedClients above) — no gateway change needed.
+//
+// Domain prefix must be globally unique per region; derive it from the stack
+// name (same pattern already used for physical resource names elsewhere in
+// this file) so it's stable across deploys but doesn't collide with other
+// stacks/sandboxes.
+const cognitoDomainPrefix = sanitizeForResourceName(backend.stack.stackName.toLowerCase()).slice(0, 63);
+new cognito.CfnUserPoolDomain(backend.stack, 'CognitoHostedUiDomain', {
+  domain: cognitoDomainPrefix,
+  userPoolId: backend.auth.resources.userPool.userPoolId,
+});
+
+// Merge (not replace) any existing callback/logout URLs on the client — Amplify
+// Auth may already populate these for other flows.
+const mcpOauthCallbackUrl = 'http://localhost:8080/callback';
+const mcpOauthLogoutUrl = 'http://localhost:8080';
+const existingCallbackUrls = Array.isArray(cfnUserPoolClient.callbackUrLs) ? cfnUserPoolClient.callbackUrLs : [];
+const existingLogoutUrls = Array.isArray(cfnUserPoolClient.logoutUrLs) ? cfnUserPoolClient.logoutUrLs : [];
+cfnUserPoolClient.callbackUrLs = Array.from(new Set([...existingCallbackUrls, mcpOauthCallbackUrl]));
+cfnUserPoolClient.logoutUrLs = Array.from(new Set([...existingLogoutUrls, mcpOauthLogoutUrl]));
+cfnUserPoolClient.allowedOAuthFlows = ['code'];
+cfnUserPoolClient.allowedOAuthScopes = ['openid', 'email', 'profile'];
+cfnUserPoolClient.allowedOAuthFlowsUserPoolClient = true;
+cfnUserPoolClient.supportedIdentityProviders = ['COGNITO'];
 
 // ============================================================================
 // AGENTCORE MEMORY — list-session-messages + update-session-summary Lambdas
