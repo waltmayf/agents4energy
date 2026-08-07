@@ -40,6 +40,7 @@ import { SFNClient, SendTaskSuccessCommand, SendTaskFailureCommand } from '@aws-
 import { BedrockAgentCoreClient } from '@aws-sdk/client-bedrock-agentcore';
 import { persistClaudeStreamEvent, persistUserPrompt, persistAwaitingInputMarker } from './memory.js';
 import { detectAwaitingInput } from './detect-awaiting-input.js';
+import { detectMonitorRequest } from './detect-monitor.js';
 import { startBrowserMcp } from './browser-mcp.js';
 import { upsertActiveRun, clearActiveRun } from './active-run.js';
 
@@ -241,17 +242,26 @@ app.post('/invocations', async (req, res) => {
             });
           }
         }
+        // Detect a monitor handoff request (issue #261): the run wants to wait
+        // on an external async condition rather than finish now. `awaiting`
+        // takes precedence — a run asking the user a question isn't monitoring
+        // — so only check for a monitor block when there's no question.
+        const monitorResult = awaiting ? { monitor: false } : detectMonitorRequest(finalText);
+        if (monitorResult.monitor) {
+          log(`monitoring handoff detected: ${JSON.stringify(monitorResult.spec)}`);
+        }
         log(`[callback] job finished (${finalText.length} chars); sending SendTaskSuccess`);
         // Output.Message.Content stays byte-for-byte identical to the pre-#185
         // shape (the native invokeHarness task produces the same shape) so
-        // PostFinalComment is unaffected. `agentStatus`/`awaitingQuestion` are
-        // additive top-level fields the SFN Choice below branches on; they are
-        // only ever present when awaiting === true.
+        // PostFinalComment is unaffected. `agentStatus`/`awaitingQuestion`/
+        // `monitorSpec` are additive top-level fields the SFN Choice below
+        // branches on; they are only ever present when detected.
         await sfn.send(new SendTaskSuccessCommand({
           taskToken,
           output: JSON.stringify({
             Output: { Message: { Role: 'assistant', Content: [{ Text: finalText }] } },
             ...(awaiting ? { agentStatus: 'awaiting_input', awaitingQuestion: question } : {}),
+            ...(monitorResult.monitor ? { agentStatus: 'monitoring', monitorSpec: monitorResult.spec } : {}),
           }),
         }));
       },
@@ -403,6 +413,17 @@ function runClaudeCode({ prompt, workDir, repo, issueNumber, systemAppend, githu
         : `When finished, summarize what you did and include the confirmed PR URL in your final message.`,
     );
   }
+  // Monitor handoff (issue #261): lets a run end its turn by asking the state
+  // machine to poll an external condition instead of busy-waiting in-session
+  // for a deploy/CI run/other long job to finish.
+  appendParts.push(
+    'MONITOR HANDOFF: if you are waiting on an external async condition (a deploy, a CI run, a long job) rather than doing work yourself, end your final message with a fenced ```monitor``` block instead of busy-waiting in-session:',
+    '```monitor',
+    '{"intervalSeconds": 120, "maxIterations": 20, "checkCommand": "gh run list --repo owner/name --branch main --limit 1 --json status --jq \'.[0].status\' | grep -q completed", "followUpPrompt": "The deploy finished — verify it succeeded and comment the result."}',
+    '```',
+    '`checkCommand` and `followUpPrompt` are required (a malformed block is ignored and the run just completes normally); `intervalSeconds` is clamped to [30, 900] and `maxIterations` to [1, 40].',
+    'IMPORTANT — the microVM running this session is RECLAIMED for the duration of the wait: `checkCommand` runs in a FRESH container on each tick, and only the /mnt/workspace mount persists across ticks — nothing else you installed or created outside it survives. So `checkCommand` must be fully self-contained: use `gh`/`curl`/`aws` directly, or re-bootstrap any tooling it needs, rather than relying on anything set up earlier in this session. Exit 0 means the condition is met (you will be re-invoked with `followUpPrompt`, same session/workspace); any non-zero exit means keep waiting. Keep checkCommand fast and its output tiny (see KEEP TOOL OUTPUT SMALL above).',
+  );
   if (systemAppend) appendParts.push(systemAppend);
 
   const args = [
