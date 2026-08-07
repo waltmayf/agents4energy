@@ -30,11 +30,11 @@ test('DENY grant becomes a forbid policy, not permit', () => {
   assert.doesNotMatch(policy.statement, /^permit\(/);
 });
 
-test('"*" toolName maps to a bare, unconstrained action (not scoped to one tool)', () => {
+test('"*" toolName maps to a target-scoped action (ensuring only its own tools are authorized)', () => {
   const [policy] = generateCedarPolicies([grant({ toolName: '*' })]);
-  // A bare `action,` clause — not `action == AgentCore::Action::"...___*"`.
-  assert.match(policy.statement, /,\n\s*action,\n/);
-  assert.doesNotMatch(policy.statement, /AgentCore::Action::/);
+  // The action clause should be scoped to the target name, not a generic bare action.
+  assert.match(policy.statement, /action == AgentCore::Action::"reservoir-target___\*"/);
+  assert.doesNotMatch(policy.statement, /,\n\s*action,\n/);
 });
 
 test('the principal check uses Set.contains on the cognito:groups tag, not string "like"', () => {
@@ -66,6 +66,15 @@ test('policy names are unique across different groups/targets/tools for the same
   );
   assert.equal(names.size, 5);
 });
+test('"*" grant for target A does not authorize tools on target B', () => {
+  const grantA = grant({ toolName: '*', targetName: 'target-A' });
+  const policyA = generateCedarPolicies([grantA])[0];
+  // Action should be scoped to target-A
+  assert.match(policyA.statement, /action == AgentCore::Action::"target-A___\*"/);
+  // Ensure it does not contain target-B pattern
+  assert.doesNotMatch(policyA.statement, /target-B___\*/);
+});
+
 
 test('policy names satisfy the agentcore CLI PolicyNameSchema (starts with a letter, alnum+underscore, <=48 chars)', () => {
   const longGrant = grant({

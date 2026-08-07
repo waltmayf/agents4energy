@@ -76,7 +76,7 @@ function simpleHash(input: string): number {
 }
 
 function cedarAction(grant: ToolGrantInput): string {
-  if (grant.toolName === '*') return 'action';
+  if (grant.toolName === '*') return `action == AgentCore::Action::"${grant.targetName}___*"`;
   const actionName = `${grant.targetName}___${grant.toolName}`;
   return `action == AgentCore::Action::"${actionName}"`;
 }
