@@ -13,6 +13,7 @@ import { agentWebhookInvokeAgent } from './functions/agent-webhook-invoke-agent/
 import { agentWebhookInvokeClaude } from './functions/agent-webhook-invoke-claude/resource';
 import { agentWebhookAuthorizer } from './functions/agent-webhook-authorizer/resource';
 import { s3Tools } from './functions/s3-tools/resource';
+import { graphTraverse } from './functions/graph-traverse/resource';
 import { agentWorkspace } from './storage/resource';
 import { Policy, PolicyStatement, ServicePrincipal } from 'aws-cdk-lib/aws-iam';
 import { Function as LambdaFunction } from 'aws-cdk-lib/aws-lambda';
@@ -151,6 +152,7 @@ const backend = defineBackend({
   agentWebhookInvokeClaude,
   agentWebhookAuthorizer,
   s3Tools,
+  graphTraverse,
   agentWorkspace,
 });
 
