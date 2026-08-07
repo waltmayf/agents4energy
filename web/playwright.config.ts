@@ -11,6 +11,9 @@ const remoteConfig = existsSync(e2eConfigPath)
   ? (JSON.parse(readFileSync(e2eConfigPath, 'utf8')) as { appUrl: string })
   : null;
 
+if (remoteConfig) {
+  process.env.SKIP_E2E_REMOTE = '1';
+}
 export default defineConfig({
   testDir: './e2e',
   fullyParallel: false,
