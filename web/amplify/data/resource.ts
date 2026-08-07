@@ -6,6 +6,8 @@ import { chatSchema } from './schemas/chat.schema';
 import { agentcoreMemorySchema } from './schemas/agentcoreMemory.schema';
 import { agentConfigSchema } from './schemas/agentConfig.schema';
 import { githubSchema } from './schemas/github.schema';
+import { nodeSchema } from './schemas/node.schema';
+import { edgeSchema } from './schemas/edge.schema';
 
 // Grant the invoke-agent Lambda function read access to the agent config models.
 // allow.resource() must be applied to an individual schema, not a.combine().
@@ -19,6 +21,8 @@ const schema = a.combine([
   agentcoreMemorySchema,
   agentConfigSchemaWithFunctionAccess,
   githubSchema,
+  nodeSchema,
+  edgeSchema,
 ]);
 
 export type Schema = ClientSchema<typeof schema>;
