@@ -24,7 +24,7 @@
  * MCP-server tool calls (which DO persist structured blocks) reconstruct
  * reliably and are covered by the converse-to-agui unit tests.
  */
-import { test, expect } from '@playwright/test';
+test.describe.configure({ skip: !!process.env.SKIP_E2E_REMOTE });
 
 // The built-in shell tool surfaces in the tool-call card by this name.
 const SHELL_TOOL_NAME = 'shell';

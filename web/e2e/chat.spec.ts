@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+test.describe.configure({ skip: !!process.env.SKIP_E2E_REMOTE });
 
 // These tests run on the storageState produced by auth.setup.ts, which signs in
 // as the SSM-provisioned test user (/agentcore/e2e-test-user-web-main/*).

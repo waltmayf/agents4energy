@@ -1,4 +1,4 @@
-import { test, expect, type Page } from '@playwright/test';
+test.describe.configure({ skip: !!process.env.SKIP_E2E_REMOTE });
 
 // ---------------------------------------------------------------------------
 // Helpers
