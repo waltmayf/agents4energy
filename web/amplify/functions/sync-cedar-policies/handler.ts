@@ -37,6 +37,7 @@ import { syncCedarPolicies, type PolicyEngineClient, type ExistingPolicySummary 
 const REGION = process.env.AWS_REGION ?? 'us-east-1';
 const POLICY_ENGINE_ID = process.env.POLICY_ENGINE_ID!;
 const GATEWAY_ID = process.env.GATEWAY_ID!;
+const GATEWAY_ARN = process.env.GATEWAY_ARN!;
 const GROUP_TOOL_GRANT_TABLE_NAME = process.env.GROUP_TOOL_GRANT_TABLE_NAME!;
 const MCP_SERVER_TABLE_NAME = process.env.MCP_SERVER_TABLE_NAME!;
 
@@ -156,7 +157,7 @@ export const handler: DynamoDBStreamHandler = async () => {
     return [{ group: grant.group, targetName, toolName: grant.toolName, effect: grant.effect }];
   });
 
-  const desired = generateCedarPolicies(translatable);
+  const desired = generateCedarPolicies(translatable, GATEWAY_ARN);
   const result = await syncCedarPolicies(policyEngineClient, POLICY_ENGINE_ID, desired);
 
   console.log(

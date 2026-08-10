@@ -17,6 +17,8 @@ export interface SyncCedarPoliciesProps {
   policyEngineArn: string;
   /** Gateway id the engine is attached to — used by the handler to resolve gateway-target names. */
   gatewayId: string;
+  /** ARN of the gateway the engine is attached to — Cedar policies must pin `resource` to this exact gateway (see cedar-policy-generation.ts). */
+  gatewayArn: string;
   /** GroupToolGrant table — the source of truth for grants, and the DynamoDB Stream trigger. */
   groupToolGrantTable: ITable;
   /** McpServer table — read to map mcpServerId → gatewayTargetId when generating Cedar actions. */
@@ -51,6 +53,7 @@ export class SyncCedarPolicies extends Construct {
       environment: {
         POLICY_ENGINE_ID: props.policyEngineId,
         GATEWAY_ID: props.gatewayId,
+        GATEWAY_ARN: props.gatewayArn,
         GROUP_TOOL_GRANT_TABLE_NAME: props.groupToolGrantTable.tableName,
         MCP_SERVER_TABLE_NAME: props.mcpServerTable.tableName,
       },
