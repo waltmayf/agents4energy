@@ -161,6 +161,8 @@ The system has two independently deployed halves that share Cognito auth:
 
 **Deployment wiring**: After `agentcore deploy`, `scripts/extract-deployment-info.js` reads `agent/default/agentcore/.cli/deployed-state.json` and CloudFormation outputs, then writes `web/deployment-info.json` which the frontend imports at build time for ARNs.
 
+**Monitor loop**: an `@agentcore-claude` webhook run can end its turn with a fenced ```monitor``` block instead of finishing, handing off to a Wait → RunMonitorCheck → re-invoke branch in the webhook Step Function (`web/amplify/constructs/agentWebhookStack.ts`) — the AgentCore microVM is fully reclaimed between checks, so polling an external condition (a deploy, CI, a long job) for hours costs near-zero compute. See [docs/monitor-loop.md](docs/monitor-loop.md).
+
 See [docs/agentic-architecture.md](docs/agentic-architecture.md) for the full data flow diagram.
 
 ## Key Constraints

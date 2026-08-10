@@ -96,10 +96,36 @@ Key properties:
   `Wait` or at the check task), so a superseding `@agentcore-claude` comment's
   last-write-wins `StopExecution` (issue #182) reaches and cancels it.
 
+## Debugging a monitor run
+
+`RunMonitorCheck` (`web/amplify/functions/agent-webhook-monitor-check/handler.ts`)
+runs `checkCommand` via `InvokeAgentRuntimeCommand` against the ClaudeCode
+runtime ARN, with `runtimeSessionId` set to the run's `runId` — the same
+session the original turn and every re-invoke use. Each tick:
+
+- writes `monitor check iteration <n> running: <checkCommand>` and, after the
+  exec completes, `exitCode=<n> conditionMet=<bool>` (plus truncated
+  stdout/stderr) to **the run's own CloudWatch Logs stream** — the same stream
+  the initial comment's Live Tail link points at, so a monitor's check history
+  is visible right alongside the original turn's output;
+- also logs the full stdout/stderr to the Lambda's own log group
+  (`/aws/lambda/agent-webhook-monitor-check`) for deeper debugging.
+- The exec itself is bounded to 90s (below the Lambda's own 120s timeout, so a
+  hung check surfaces as a non-zero result the loop can interpret, not an
+  unhandled Lambda timeout); the `RunMonitorCheck` task itself carries a 2-minute
+  `taskTimeout`.
+
+Reading the SFN execution graph (console or `aws stepfunctions
+describe-execution` / `get-execution-history`) shows the `MonitorWait` →
+`RunMonitorCheck` → `RouteCheck` states repeating once per tick — this is the
+quickest way to confirm ticks are actually happening and see each one's timing.
+
 ## Where the code lives
 
 - `agent/default/app/ClaudeCode/detect-monitor.js` — parses/validates the
-  ```monitor``` block; `server.js` emits `agentStatus: 'monitoring'`.
+  ```monitor``` block; `server.js` emits `agentStatus: 'monitoring'` (and its
+  `--append-system-prompt` "MONITOR HANDOFF" block is what teaches the agent
+  the block schema and the microVM-reclaim constraint in the first place).
 - `web/amplify/constructs/agentWebhookStack.ts` — the `RouteAgentResult` Choice
   and the `InitMonitor` / `MonitorWait` / `RunMonitorCheck` / `RouteCheck` /
   `PrepareMonitorReinvoke` / `IncrementIteration` / `PostMonitorStoppedComment`
