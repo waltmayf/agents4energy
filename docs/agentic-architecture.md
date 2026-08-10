@@ -2,7 +2,7 @@
 
 This document covers how the AI agent actually runs: the harness, memory, MCP tools, and the path from a user message to a streamed response.
 
-For cross-project deployment wiring (Amplify → AgentCore CDK) see [architecture.md](architecture.md).
+For cross-project deployment wiring (Amplify → AgentCore CDK) see [architecture.md](architecture.md). For the knowledge-graph data model and traversal tool contract, see [knowledge-graph.md](knowledge-graph.md).
 
 ---
 
@@ -184,6 +184,10 @@ Wiring, all in `web/amplify/backend.ts`:
 - **Target registration**: the `S3ToolsGatewayTarget` custom resource (`web/amplify/constructs/s3ToolsGatewayTarget/`) calls `CreateGatewayTarget` with `targetConfiguration.mcp.lambda` (an inline `ToolSchema` describing the four tools), listing existing targets by name first so redeploys update in place instead of erroring on "already exists".
 - **Demo wiring**: the `S3ToolsMcpServerSeed` custom resource (`web/amplify/constructs/s3ToolsMcpServerSeed/`) idempotently creates a demo `Agent` + `McpServer` (pointing at the gateway endpoint) + `AgentMcpServer` join row, so the tools are reachable end-to-end from the chat UI without manual setup. It signs AppSync requests directly with SigV4 (the custom-resource Lambda is an IAM principal, not a Cognito user) — the same approach `agent/default/app/ClaudeCode/active-run.js` uses for its server-side `ActiveRun` writes.
 - Both custom resources live in their own CDK stack (`backend.createStack('s3-tools')`), not `agentStack`, because they reference tokens from both the function stack and the data stack — nesting them in `agentStack` would form the same nested-stack dependency cycle documented next to `AgentWebhookStack`'s own stack placement.
+
+### Lambda-backed gateway target: knowledge-graph tools
+
+A second Lambda-backed gateway target, `graph-traverse`, exposes three tools — `TraverseGraph`, `UpsertNode`, `UpsertEdge` — backed by a single Lambda (`web/amplify/functions/graph-traverse/handler.ts`) that reads/writes the `Node`/`Edge` models over AppSync instead of DynamoDB directly, so the storage layer can later change without changing the agent-facing tools. See [`docs/knowledge-graph.md`](./knowledge-graph.md) for the data model, the traversal contract, and the design rationale for bounded-depth frontier expansion over a graph database.
 
 ---
 
