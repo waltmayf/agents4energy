@@ -413,7 +413,12 @@ export class AgentWebhookStack extends Construct {
       payload: sfn.TaskInput.fromObject({
         runId: sfn.JsonPath.stringAt('$.runId'),
         source: sfn.JsonPath.stringAt('$.source'),
-        stage: 'final',
+        // A dedicated stage (not 'final'): the plain 'final' success path runs
+        // a "did this GitHub run open a PR?" heuristic that overwrites
+        // responseText with an unrelated "ran out of turn" message whenever no
+        // PR exists — which is always, for a monitor run — silently discarding
+        // this explanatory text (confirmed end-to-end, issue #263).
+        stage: 'monitor_stopped',
         trigger: sfn.JsonPath.stringAt('$.trigger'),
         repo: sfn.JsonPath.stringAt('$.repo'),
         issueNumber: sfn.JsonPath.numberAt('$.issueNumber'),

@@ -24,7 +24,7 @@ is JSON:
 {
   "intervalSeconds": 60,
   "maxIterations": 10,
-  "checkCommand": "gh pr checks 123 --repo owner/repo --json state --jq 'any(.[]; .state==\"SUCCESS\")' | grep -q true",
+  "checkCommand": "bash -c \"gh pr checks 123 --repo owner/repo --json state --jq 'any(.[]; .state==\\\"SUCCESS\\\")' | grep -q true\"",
   "followUpPrompt": "CI is now green on PR #123. Review the run and address any remaining review comments."
 }
 ```
@@ -39,6 +39,15 @@ is JSON:
   **[30, 900]**, default **60**.
 - **`maxIterations`** — how many checks before giving up. Clamped to **[1, 40]**,
   default **10**.
+
+> **`checkCommand` runs with NO shell — wrap anything using a pipe, `&&`, or
+> quoting in `bash -c "..."`.** `RunMonitorCheck` passes `checkCommand` straight
+> to `InvokeAgentRuntimeCommand`, which execs it as a single command with its
+> raw string split into argv — it does **not** go through `/bin/sh`. A command
+> like `gh api ... --jq '...' | grep -q x` gets `|`, `grep`, and `-q` handed to
+> `gh` as literal extra arguments (confirmed end-to-end, issue #263: this
+> exact mistake made every check exit 1 with `gh`'s `accepts 1 arg(s), received
+> 4`). Always wrap multi-command checks in `bash -c "<command>"` as shown above.
 
 When a valid block is present, the runtime resumes the paused Step Functions
 task (`SendTaskSuccess`) with `{ agentStatus: 'monitoring', monitorSpec: {…} }`
@@ -95,6 +104,17 @@ Key properties:
 - **Cancellation still works.** A monitor execution is `RUNNING` (paused in
   `Wait` or at the check task), so a superseding `@agentcore-claude` comment's
   last-write-wins `StopExecution` (issue #182) reaches and cancels it.
+- **`checkCommand` execs have `git`'s credential store but not `gh`'s own auth.**
+  `githubToken`/`GH_TOKEN` is wired into the environment of the `claude` CLI
+  process `server.js` spawns for the agent's own turn, but `RunMonitorCheck`'s
+  `InvokeAgentRuntimeCommand` exec gets a fresh environment without it
+  (confirmed end-to-end: a `gh api ...` check failed asking for `gh auth
+  login`). The **git** credential store `setupWorkspace()` seeds at clone time
+  (`~/.git-credentials`) *is* still on disk and works fine for plain
+  `git`/HTTPS operations (`git ls-remote https://github.com/...` succeeds) —
+  it's specifically the `gh` CLI's own auth config that's missing. So a
+  `checkCommand` that needs the GitHub API should use `curl` (unauthenticated
+  for public repos; rate-limited without a token) or plain `git`, not `gh`.
 
 ## Debugging a monitor run
 

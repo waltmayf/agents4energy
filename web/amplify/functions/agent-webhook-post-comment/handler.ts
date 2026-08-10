@@ -25,7 +25,13 @@ interface PostCommentInput {
   // 'awaiting_input' (issue #185, increment 3): the Claude Code runtime ended
   // its run asking the user a question rather than finishing the work. Posts
   // a distinct "paused" comment and does NOT touch the agent-error label.
-  stage: 'initial' | 'final' | 'awaiting_input';
+  // 'monitor_stopped' (issue #262/#263): the monitor loop hit maxIterations
+  // without the check ever passing. Like 'awaiting_input', this posts
+  // `responseText` verbatim and clears agent-working without adding
+  // agent-error — it must NOT go through 'final's success-path "no PR was
+  // opened" heuristic, which would overwrite this stage's own explanatory
+  // message with a misleading "ran out of turn" one (confirmed end-to-end).
+  stage: 'initial' | 'final' | 'awaiting_input' | 'monitor_stopped';
   // github
   repo?: string;
   issueNumber?: number;
@@ -293,15 +299,15 @@ export const handler = async (input: PostCommentInput): Promise<PostCommentOutpu
     return { logGroupName: groupName, logStreamName: streamName, githubToken, githubTokenExpiresAt, agentsSystemPrompt: agentsSystemPrompt ?? '' };
   }
 
-  if (input.stage === 'awaiting_input') {
-    const body = sanitizeHarmony(
-      `⏸️ Paused — waiting for your input: ${input.awaitingQuestion || '(no question text captured)'}`,
-    );
+  if (input.stage === 'awaiting_input' || input.stage === 'monitor_stopped') {
+    const body = input.stage === 'awaiting_input'
+      ? sanitizeHarmony(`⏸️ Paused — waiting for your input: ${input.awaitingQuestion || '(no question text captured)'}`)
+      : sanitizeHarmony(input.responseText || 'Monitoring stopped without the condition being met.');
     if (input.source === 'github') {
       if (!input.repo || input.issueNumber === undefined) throw new Error('repo/issueNumber required for github source');
       const { token } = await postGithubComment(input.repo, input.issueNumber, body);
       // Clear agent-working like a normal completion, but never add agent-error —
-      // this is a pause, not a failure. Best-effort, matching the final stage.
+      // this is a pause/stop, not a failure. Best-effort, matching the final stage.
       if (input.trigger === 'label' || input.trigger === 'comment') {
         try {
           await removeLabel(input.repo, input.issueNumber, token, WORKING_LABEL);
