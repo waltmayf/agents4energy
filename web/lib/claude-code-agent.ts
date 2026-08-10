@@ -12,6 +12,7 @@ import { Observable, type Subscriber } from 'rxjs';
 import outputs from '../amplify_outputs.json';
 import { makeClient, messageText, loadHistory } from './harness-agent';
 import { parseInvokeResponseText } from './claude-code-invoke-response';
+import { chunkForSmoothScroll, SCROLL_CHUNK_DELAY_MS } from './smooth-scroll-chunk';
 import { buildRunErrorMessageEvents } from './harness-run-error';
 import { friendlyChatHarnessError } from './harness-error-message';
 
@@ -99,7 +100,22 @@ export class ClaudeCodeAgent extends AbstractAgent {
           const messageId = crypto.randomUUID();
           subscriber.next({ type: EventType.TEXT_MESSAGE_START, messageId, role: 'assistant' } as BaseEvent);
           if (text) {
-            subscriber.next({ type: EventType.TEXT_MESSAGE_CONTENT, messageId, delta: text } as BaseEvent);
+            // Emit the reply in incremental chunks rather than one giant delta
+            // (issue #268). This runtime is *buffered* — the full text arrives
+            // at once — but dumping it into a single TEXT_MESSAGE_CONTENT makes
+            // the message node grow in one large layout step, which escapes
+            // CopilotChat's use-stick-to-bottom smooth pin (it animates toward a
+            // target that jumps in one frame), so the view fails to auto-scroll
+            // and appears to jump around. Feeding a few deltas with a yield
+            // between them lets the scroll container observe each resize and stay
+            // pinned to the bottom, matching the token-stream path's behaviour.
+            for (const delta of chunkForSmoothScroll(text)) {
+              if (cancelled) return;
+              subscriber.next({ type: EventType.TEXT_MESSAGE_CONTENT, messageId, delta } as BaseEvent);
+              // Yield to the event loop so React commits the delta and the
+              // stick-to-bottom resize observer re-pins before the next chunk.
+              await new Promise((r) => setTimeout(r, SCROLL_CHUNK_DELAY_MS));
+            }
           }
           subscriber.next({ type: EventType.TEXT_MESSAGE_END, messageId } as BaseEvent);
 
