@@ -124,7 +124,13 @@ function buildTools(mcpServers: McpServerRecord[]): HarnessTool[] {
     name: s.name.replace(/[^a-zA-Z0-9_-]/g, '_'),
     config: {
       remoteMcp: {
-        url: s.gatewayTargetId ? process.env.AGENTCORE_GATEWAY_ENDPOINT! : s.url,
+        // Route through the AgentCore gateway when this server is registered as
+        // a gateway target (Cedar 3c, #279); fall back to the direct URL if the
+        // gateway endpoint isn't configured so a stray gatewayTargetId can never
+        // produce an empty url.
+        url: s.gatewayTargetId && process.env.AGENTCORE_GATEWAY_ENDPOINT
+          ? process.env.AGENTCORE_GATEWAY_ENDPOINT
+          : s.url,
         headers: s.headers?.length
           ? headersFromArray(s.headers.filter((h): h is { key: string | null; value: string | null } => h !== null))
           : undefined,
