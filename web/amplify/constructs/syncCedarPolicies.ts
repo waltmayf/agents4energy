@@ -81,9 +81,12 @@ export class SyncCedarPolicies extends Construct {
     // target-scoped — see cedar-policy-generation.ts) additionally requires
     // this action scoped to that gateway, confirmed live: "not authorized to
     // perform: bedrock-agentcore:ManageResourceScopedPolicy on resource:
-    // <gatewayArn>" without it.
+    // <gatewayArn>" without it. It also confirms the referenced gateway
+    // exists via GetGateway before applying that check — confirmed live:
+    // "Failed to confirm existence on AgentCore Gateway ..., please make sure
+    // you have "bedrock-agentcore:GetGateway" permissions" without it.
     fn.addToRolePolicy(new PolicyStatement({
-      actions: ['bedrock-agentcore:ManageResourceScopedPolicy'],
+      actions: ['bedrock-agentcore:ManageResourceScopedPolicy', 'bedrock-agentcore:GetGateway'],
       resources: [props.gatewayArn],
     }));
     fn.addToRolePolicy(new PolicyStatement({
