@@ -726,11 +726,16 @@ if (AGENTCORE_GATEWAY_ID) {
   // The traversal reads Node/Edge (and their nested outEdges/inEdges relations)
   // over AppSync with SigV4 (IAM auth). list-then-traverse silently no-ops
   // without the field-level grant, so grant the Query field ARNs for this API.
+  // The UpsertNode/UpsertEdge tools (#292) additionally call createNode/
+  // updateNode/createEdge — a Query-only grant would leave those silently
+  // no-op'd (AppSync returns an authorization error), so grant Mutation fields
+  // too.
   const { region: gtRegion, account: gtAccount } = Stack.of(graphTraverseStack);
   graphTraverseLambda.addToRolePolicy(new PolicyStatement({
     actions: ['appsync:GraphQL'],
     resources: [
       `arn:aws:appsync:${gtRegion}:${gtAccount}:apis/${graphqlApiId}/types/Query/fields/*`,
+      `arn:aws:appsync:${gtRegion}:${gtAccount}:apis/${graphqlApiId}/types/Mutation/fields/*`,
     ],
   }));
 
