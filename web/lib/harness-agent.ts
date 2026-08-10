@@ -32,9 +32,12 @@ import { buildRunErrorMessageEvents } from './harness-run-error';
 import { friendlyChatHarnessError } from './harness-error-message';
 import { encodeRuntimeUserId, type CallerIdentity } from './caller-identity';
 
-const custom = (outputs as { custom?: { agentcore_harness_arn?: string; agentcore_region?: string } }).custom;
+const custom = (outputs as {
+  custom?: { agentcore_harness_arn?: string; agentcore_region?: string; agentcore_gateway_endpoint?: string };
+}).custom;
 export const HARNESS_ARN = custom?.agentcore_harness_arn as string;
 export const DEPLOYMENT_REGION = custom?.agentcore_region ?? 'us-east-1';
+const GATEWAY_ENDPOINT = custom?.agentcore_gateway_endpoint;
 
 // The harness SDK stores memory under the agent name ("default") as the actorId,
 // not the Cognito user sub. Matches list-session-messages/handler.ts.
@@ -81,6 +84,7 @@ export interface McpServerConfig {
   name: string;
   url: string;
   headers?: Record<string, string>;
+  gatewayTargetId?: string;
 }
 
 /**
@@ -127,7 +131,10 @@ async function buildTools(mcpServers: McpServerConfig[]): Promise<HarnessTool[] 
     name: s.name,
     config: {
       remoteMcp: {
-        url: s.url,
+        // Route through the AgentCore gateway when this server is registered as
+        // a gateway target (Cedar 3c, #279); fall back to the direct URL if the
+        // gateway endpoint isn't configured.
+        url: s.gatewayTargetId && GATEWAY_ENDPOINT ? GATEWAY_ENDPOINT : s.url,
         ...(s.headers && Object.keys(s.headers).length ? { headers: s.headers } : {}),
       },
     },
