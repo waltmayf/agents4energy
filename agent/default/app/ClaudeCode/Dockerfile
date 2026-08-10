@@ -43,7 +43,11 @@ RUN npm install -g @anthropic-ai/claude-code@latest
 WORKDIR /app
 COPY package.json ./
 RUN npm install --omit=dev
-COPY server.js memory.js browser-mcp.js detect-awaiting-input.js active-run.js ./
+# Copy all runtime modules. Use a glob rather than an explicit file list: a
+# per-file list silently drops any newly-added module (server.js imports it →
+# the runtime crashes on boot with ERR_MODULE_NOT_FOUND, and nothing in CI/synth
+# builds this image to catch it). Tests are `*.test.mjs`, so `*.js` excludes them.
+COPY *.js ./
 
 # The harness overrides ENTRYPOINT/CMD when this image backs a *harness*, but
 # for a Runtime the CMD is honored — start the invocation server.
