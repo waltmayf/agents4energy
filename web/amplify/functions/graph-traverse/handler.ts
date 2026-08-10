@@ -90,7 +90,9 @@ async function fetchEdgesFromApi(
   edgeTypes: string[] | undefined,
 ): Promise<EdgePage> {
   const field = direction === 'out' ? 'outEdges' : 'inEdges';
-  const filter = edgeTypes?.length ? { type: { in: edgeTypes } } : undefined;
+  // Amplify's ModelStringInput has no `in` operator — express "type ∈ edgeTypes"
+  // as an OR of `eq` clauses (a single-element list still works as `or: [{...}]`).
+  const filter = edgeTypes?.length ? { or: edgeTypes.map((t) => ({ type: { eq: t } })) } : undefined;
 
   const data = await signedGraphqlRequest(
     `query GetNodeEdges($id: ID!, $limit: Int!, $filter: ModelEdgeFilterInput) {
