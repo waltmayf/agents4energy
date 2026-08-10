@@ -39,6 +39,13 @@ export interface AgentWebhookStackProps {
    */
   invokeClaudeLambda: lambda.IFunction;
   /**
+   * Lambda that runs a monitor spec's `checkCommand` in the ClaudeCode runtime
+   * session and returns `{ conditionMet, exitCode, stdout, stderr }` (issue
+   * #262). Only used by the monitor loop entered when InvokeClaude resolves with
+   * `agentStatus: 'monitoring'`; harness/label runs never reach it.
+   */
+  monitorCheckLambda: lambda.IFunction;
+  /**
    * ARN of the Claude Code AgentCore Runtime. The state machine role is granted
    * `bedrock-agentcore:InvokeAgentRuntime` on it so the InvokeClaude Lambda's
    * SigV4 call succeeds. May be empty at synth on branches that don't deploy the
@@ -321,16 +328,136 @@ export class AgentWebhookStack extends Construct {
     // is Claude-Code-only), so it always converges on PostFinalComment.
     invokeHarness.next(postFinal);
 
-    // The Claude Code branch can resume the paused task two ways (issue #185,
-    // increment 3): a normal completion (no agentStatus field, routed to the
-    // same PostFinalComment as the harness branch) or a run that ended asking
-    // the user a question (`agentStatus: 'awaiting_input'`, routed to the
-    // dedicated PostAwaitingInputComment so it isn't reported as "done").
-    // Guard with isPresent: a normal completion omits `agentStatus` entirely,
-    // and Choice evaluation THROWS on a stringEquals against a missing path
-    // rather than treating it as false — so the `isPresent` conjunct must come
-    // first to short-circuit before the comparison is attempted.
-    const routeAwaitingInput = new sfn.Choice(this, 'RouteAwaitingInput')
+    // ------------------------------------------------------------------
+    // Monitor loop (issue #262). When a Claude Code run ends in
+    // `agentStatus: 'monitoring'` (sub-issue 1, #261) it carries a
+    // `monitorSpec` = { intervalSeconds, maxIterations, checkCommand,
+    // followUpPrompt }. The state machine then polls: Wait (no runtime compute
+    // held — the microVM is reclaimed on idle /ping) → RunMonitorCheck (runs
+    // checkCommand in the SAME runtime session) → RouteCheck. A passing check
+    // re-invokes Claude with the follow-up prompt; a failing check waits and
+    // re-checks; hitting maxIterations posts a final "monitor stopped" comment.
+    // The loop is bounded by BOTH maxIterations and the state machine's 4h
+    // timeout, and reuses the same runId/session so /mnt/workspace + memory
+    // continuity hold across re-invokes.
+    // ------------------------------------------------------------------
+
+    // Seed $.monitor = { iteration: 0, spec: <the emitted monitorSpec> }.
+    const initMonitor = new sfn.Pass(this, 'InitMonitor', {
+      parameters: {
+        iteration: 0,
+        'spec.$': '$.agentResult.monitorSpec',
+      },
+      resultPath: '$.monitor',
+    });
+
+    // Hold with NO runtime compute for the spec's interval. SecondsPath reads
+    // the clamped intervalSeconds the runtime already validated (detect-monitor).
+    const monitorWait = new sfn.Wait(this, 'MonitorWait', {
+      time: sfn.WaitTime.secondsPath('$.monitor.spec.intervalSeconds'),
+    });
+
+    const runMonitorCheck = new tasks.LambdaInvoke(this, 'RunMonitorCheck', {
+      lambdaFunction: props.monitorCheckLambda,
+      payload: sfn.TaskInput.fromObject({
+        runId: sfn.JsonPath.stringAt('$.runId'),
+        spec: sfn.JsonPath.objectAt('$.monitor.spec'),
+        iteration: sfn.JsonPath.numberAt('$.monitor.iteration'),
+        logGroupName: sfn.JsonPath.stringAt('$.initialComment.logGroupName'),
+        logStreamName: sfn.JsonPath.stringAt('$.initialComment.logStreamName'),
+      }),
+      payloadResponseOnly: true,
+      resultPath: '$.monitorCheck',
+      taskTimeout: sfn.Timeout.duration(Duration.minutes(2)),
+    });
+
+    // A check failure (exec error, not a non-zero exit) shouldn't stamp
+    // agent-error and discard the run — treat it like a not-yet-met condition
+    // and keep looping until maxIterations. Route the Catch back to the
+    // iteration bump so a transient exec hiccup just costs one interval.
+    // (conditionMet defaults to false because $.monitorCheck is absent on Catch,
+    // so RouteCheck's isPresent guard short-circuits to the not-met branch.)
+
+    // On a passing check, swap the effective prompt for the monitor's follow-up
+    // (plus a short context note) and re-invoke Claude in the same session.
+    const prepareReinvoke = new sfn.Pass(this, 'PrepareMonitorReinvoke', {
+      parameters: {
+        'effectivePrompt.$':
+          "States.Format('<monitor_context>\\nYour monitor condition was met (check command exited 0). Continue with the follow-up task below in the same workspace/session.\\n</monitor_context>\\n\\n{}', $.monitor.spec.followUpPrompt)",
+      },
+      resultPath: '$.prepared',
+    });
+    prepareReinvoke.next(invokeClaude);
+
+    // Bump the iteration counter, then loop back to Wait.
+    const incrementIteration = new sfn.Pass(this, 'IncrementIteration', {
+      parameters: {
+        'iteration.$': 'States.MathAdd($.monitor.iteration, 1)',
+        'spec.$': '$.monitor.spec',
+      },
+      resultPath: '$.monitor',
+    });
+    incrementIteration.next(monitorWait);
+
+    // maxIterations reached without the condition being met — stop looping and
+    // post a normal (non-error) final comment explaining why.
+    const postMonitorStopped = new tasks.LambdaInvoke(this, 'PostMonitorStoppedComment', {
+      lambdaFunction: props.postCommentLambda,
+      payload: sfn.TaskInput.fromObject({
+        runId: sfn.JsonPath.stringAt('$.runId'),
+        source: sfn.JsonPath.stringAt('$.source'),
+        stage: 'final',
+        trigger: sfn.JsonPath.stringAt('$.trigger'),
+        repo: sfn.JsonPath.stringAt('$.repo'),
+        issueNumber: sfn.JsonPath.numberAt('$.issueNumber'),
+        issueKey: sfn.JsonPath.stringAt('$.issueKey'),
+        responseText: sfn.JsonPath.format(
+          'Monitoring stopped after {} check(s) without the condition being met.',
+          sfn.JsonPath.stringAt('$.monitor.spec.maxIterations'),
+        ),
+      }),
+      payloadResponseOnly: true,
+      resultPath: '$.finalComment',
+    });
+
+    // RouteCheck: passing → re-invoke; else if next iteration would reach
+    // maxIterations → stop; else → bump + loop. Guard the conditionMet read with
+    // isPresent (a Catch back-route leaves $.monitorCheck absent, and a
+    // booleanEquals against a missing path THROWS — same gotcha as
+    // RouteAgentResult below).
+    const routeCheck = new sfn.Choice(this, 'RouteCheck')
+      .when(
+        sfn.Condition.and(
+          sfn.Condition.isPresent('$.monitorCheck.conditionMet'),
+          sfn.Condition.booleanEquals('$.monitorCheck.conditionMet', true),
+        ),
+        prepareReinvoke,
+      )
+      .when(
+        // iteration is 0-based; the check just completed for `iteration`, so the
+        // next attempt is iteration+1. Stop once that would reach maxIterations.
+        sfn.Condition.numberGreaterThanEqualsJsonPath('$.monitor.iteration', '$.monitor.spec.maxIterations'),
+        postMonitorStopped,
+      )
+      .otherwise(incrementIteration);
+
+    runMonitorCheck.addCatch(incrementIteration, { resultPath: '$.monitorCheckError' });
+    initMonitor.next(monitorWait);
+    monitorWait.next(runMonitorCheck);
+    runMonitorCheck.next(routeCheck);
+
+    // The Claude Code branch can resume the paused task three ways (issues #185
+    // increment 3, and #262): a normal completion (no agentStatus field, routed
+    // to the same PostFinalComment as the harness branch); a run that ended
+    // asking the user a question (`agentStatus: 'awaiting_input'`, routed to the
+    // dedicated PostAwaitingInputComment); or a run that handed off a monitoring
+    // spec (`agentStatus: 'monitoring'`, routed into the Wait→check→re-invoke
+    // loop above). Guard each with isPresent: a normal completion omits
+    // `agentStatus` entirely, and Choice evaluation THROWS on a stringEquals
+    // against a missing path rather than treating it as false — so the
+    // `isPresent` conjunct must come first to short-circuit before the
+    // comparison is attempted.
+    const routeAgentResult = new sfn.Choice(this, 'RouteAgentResult')
       .when(
         sfn.Condition.and(
           sfn.Condition.isPresent('$.agentResult.agentStatus'),
@@ -338,8 +465,15 @@ export class AgentWebhookStack extends Construct {
         ),
         postAwaitingInputComment,
       )
+      .when(
+        sfn.Condition.and(
+          sfn.Condition.isPresent('$.agentResult.agentStatus'),
+          sfn.Condition.stringEquals('$.agentResult.agentStatus', 'monitoring'),
+        ),
+        initMonitor,
+      )
       .otherwise(postFinal);
-    invokeClaude.next(routeAwaitingInput);
+    invokeClaude.next(routeAgentResult);
 
     // After git-auth prep, branch on $.agent (set by agent-webhook-receiver from
     // the mention: 'claude' for @agentcore-claude, else 'harness'). Default to the

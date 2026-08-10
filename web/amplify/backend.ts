@@ -11,6 +11,7 @@ import { agentWebhookReceiver } from './functions/agent-webhook-receiver/resourc
 import { agentWebhookPostComment } from './functions/agent-webhook-post-comment/resource';
 import { agentWebhookInvokeAgent } from './functions/agent-webhook-invoke-agent/resource';
 import { agentWebhookInvokeClaude } from './functions/agent-webhook-invoke-claude/resource';
+import { agentWebhookMonitorCheck } from './functions/agent-webhook-monitor-check/resource';
 import { agentWebhookAuthorizer } from './functions/agent-webhook-authorizer/resource';
 import { s3Tools } from './functions/s3-tools/resource';
 import { agentWorkspace } from './storage/resource';
@@ -150,6 +151,7 @@ const backend = defineBackend({
   agentWebhookPostComment,
   agentWebhookInvokeAgent,
   agentWebhookInvokeClaude,
+  agentWebhookMonitorCheck,
   agentWebhookAuthorizer,
   s3Tools,
   agentWorkspace,
@@ -763,6 +765,7 @@ const webhookReceiverLambda = backend.agentWebhookReceiver.resources.lambda as L
 const webhookPostCommentLambda = backend.agentWebhookPostComment.resources.lambda as LambdaFunction;
 const webhookInvokeAgentLambda = backend.agentWebhookInvokeAgent.resources.lambda as LambdaFunction;
 const webhookInvokeClaudeLambda = backend.agentWebhookInvokeClaude.resources.lambda as LambdaFunction;
+const webhookMonitorCheckLambda = backend.agentWebhookMonitorCheck.resources.lambda as LambdaFunction;
 const webhookAuthorizerLambda = backend.agentWebhookAuthorizer.resources.lambda as LambdaFunction;
 
 // The harness INVOKE is now a native `bedrockagentcore:invokeHarness` Step
@@ -847,6 +850,26 @@ webhookInvokeClaudeLambda.addToRolePolicy(new PolicyStatement({
   resources: [`arn:aws:logs:${AGENTCORE_REGION}:${backend.stack.account}:log-group:/agent-webhook/*:log-stream:*`],
 }));
 
+// Monitor-loop check step (issue #262): runs the monitor spec's checkCommand in
+// the ClaudeCode runtime session via InvokeAgentRuntimeCommand — same runtime +
+// same grant shape as the @agentcore-claude branch above. Env + grant skipped
+// cleanly when the runtime isn't deployed on this branch (ARN empty).
+backend.agentWebhookMonitorCheck.addEnvironment('CLAUDE_CODE_RUNTIME_ARN', AGENTCORE_CLAUDE_CODE_RUNTIME_ARN);
+if (AGENTCORE_CLAUDE_CODE_RUNTIME_ARN) {
+  webhookMonitorCheckLambda.addToRolePolicy(new PolicyStatement({
+    actions: ['bedrock-agentcore:InvokeAgentRuntime'],
+    resources: [
+      AGENTCORE_CLAUDE_CODE_RUNTIME_ARN,
+      `${AGENTCORE_CLAUDE_CODE_RUNTIME_ARN}/runtime-endpoint/*`,
+    ],
+  }));
+}
+// Best-effort Live Tail logging from the monitor-check step (same scheme).
+webhookMonitorCheckLambda.addToRolePolicy(new PolicyStatement({
+  actions: ['logs:PutLogEvents'],
+  resources: [`arn:aws:logs:${AGENTCORE_REGION}:${backend.stack.account}:log-group:/agent-webhook/*:log-stream:*`],
+}));
+
 // Last-write-wins cancellation (issue #182): the receiver also calls
 // InvokeAgentRuntime on the ClaudeCode runtime — with a `{ action: 'cancel' }`
 // control payload rather than a real job — to kill a prior in-flight
@@ -879,6 +902,8 @@ const agentWebhookStack = new AgentWebhookStack(agentWebhookCdkStack, 'AgentWebh
   prepareGitAuthLambda: webhookInvokeAgentLambda,
   // @agentcore-claude branch — invokes the ClaudeCode runtime.
   invokeClaudeLambda: webhookInvokeClaudeLambda,
+  // Monitor loop (#262) — runs the check command in the ClaudeCode runtime session.
+  monitorCheckLambda: webhookMonitorCheckLambda,
   claudeCodeRuntimeArn: AGENTCORE_CLAUDE_CODE_RUNTIME_ARN,
   harnessArn: AGENTCORE_HARNESS_ARN,
   // Physical name unique per sandbox/branch (same scheme as the AgentCore
