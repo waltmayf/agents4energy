@@ -76,6 +76,16 @@ export class SyncCedarPolicies extends Construct {
       ],
       resources: [props.policyEngineArn, `${props.policyEngineArn}/*`],
     }));
+    // Create/Update/DeletePolicy on a policy whose statement's `resource`
+    // clause pins a concrete gateway (required once the action is
+    // target-scoped — see cedar-policy-generation.ts) additionally requires
+    // this action scoped to that gateway, confirmed live: "not authorized to
+    // perform: bedrock-agentcore:ManageResourceScopedPolicy on resource:
+    // <gatewayArn>" without it.
+    fn.addToRolePolicy(new PolicyStatement({
+      actions: ['bedrock-agentcore:ManageResourceScopedPolicy'],
+      resources: [props.gatewayArn],
+    }));
     fn.addToRolePolicy(new PolicyStatement({
       actions: ['bedrock-agentcore:GetGatewayTarget'],
       resources: ['*'],
