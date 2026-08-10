@@ -54,6 +54,13 @@ export class SyncCedarPolicies extends Construct {
         GROUP_TOOL_GRANT_TABLE_NAME: props.groupToolGrantTable.tableName,
         MCP_SERVER_TABLE_NAME: props.mcpServerTable.tableName,
       },
+      // NodejsFunction excludes @aws-sdk/* from the bundle by default on Node
+      // 18+ runtimes, relying on the SDK version baked into the Lambda
+      // runtime — which predates the Cedar Policy APIs (ListPolicies,
+      // CreatePolicy, etc; confirmed by "ListPoliciesCommand is not a
+      // constructor" at runtime). Bundle this client explicitly so the
+      // handler gets the version pinned in package.json.
+      bundling: { nodeModules: ['@aws-sdk/client-bedrock-agentcore-control'] },
     });
 
     fn.addToRolePolicy(new PolicyStatement({
