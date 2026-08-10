@@ -41,6 +41,12 @@ interface InvokeAgentEvent {
   // (allow.guest(), e.g. GitHub Actions) get an IAM identity shape instead, or
   // none at all in a unit-test invocation.
   identity?: AppSyncIdentityCognito | { sub?: never; groups?: never } | null;
+  // AppSync forwards the client's original HTTP headers to a direct Lambda
+  // resolver — for a userPool-authed call this includes the raw Cognito JWT
+  // the client authenticated with (Authorization: <idToken>, no Bearer
+  // prefix). Absent for allow.guest() (IAM-signed) callers, which never hold
+  // a Cognito JWT at all.
+  request?: { headers?: Record<string, string | undefined> };
 }
 
 // AppSync populates event.identity from the verified Cognito JWT when this
@@ -52,6 +58,12 @@ function callerIdentityFromEvent(event: InvokeAgentEvent): CallerIdentity {
   const sub = identity && 'sub' in identity ? identity.sub ?? null : null;
   const groups = identity && 'groups' in identity ? identity.groups ?? [] : [];
   return { sub, groups: groups ?? [] };
+}
+
+// Only present for userPool-authed callers (see InvokeAgentEvent.request comment) —
+// allow.guest() (IAM-signed) callers have no Cognito JWT to forward to the gateway.
+function callerIdTokenFromEvent(event: InvokeAgentEvent): string | null {
+  return event.request?.headers?.authorization ?? null;
 }
 
 interface InvokeAgentResult {
@@ -118,25 +130,35 @@ async function fetchAgentConfig(agentSlug: string) {
   };
 }
 
-function buildTools(mcpServers: McpServerRecord[]): HarnessTool[] {
-  return mcpServers.map((s) => ({
-    type: 'remote_mcp',
-    name: s.name.replace(/[^a-zA-Z0-9_-]/g, '_'),
-    config: {
-      remoteMcp: {
-        // Route through the AgentCore gateway when this server is registered as
-        // a gateway target (Cedar 3c, #279); fall back to the direct URL if the
-        // gateway endpoint isn't configured so a stray gatewayTargetId can never
-        // produce an empty url.
-        url: s.gatewayTargetId && process.env.AGENTCORE_GATEWAY_ENDPOINT
-          ? process.env.AGENTCORE_GATEWAY_ENDPOINT
-          : s.url,
-        headers: s.headers?.length
-          ? headersFromArray(s.headers.filter((h): h is { key: string | null; value: string | null } => h !== null))
-          : undefined,
+// `callerIdToken` is the caller's raw Cognito JWT (see callerIdTokenFromEvent),
+// present only for userPool-authed callers. Attached as `Authorization: Bearer`
+// on any server routed through the gateway, since default-gateway's CUSTOM_JWT
+// authorizer requires a real Cognito JWT (not the {sub,groups} runtimeUserId
+// blob) and Cedar reads `cognito:groups` off that same JWT as a principal tag.
+// A guest (IAM-signed) caller has no JWT, so gateway-routed servers silently
+// get no Authorization header for them — same as an anonymous gateway call.
+function buildTools(mcpServers: McpServerRecord[], callerIdToken: string | null): HarnessTool[] {
+  return mcpServers.map((s) => {
+    const routeThroughGateway = Boolean(s.gatewayTargetId && process.env.AGENTCORE_GATEWAY_ENDPOINT);
+    return {
+      type: 'remote_mcp',
+      name: s.name.replace(/[^a-zA-Z0-9_-]/g, '_'),
+      config: {
+        remoteMcp: {
+          // Route through the AgentCore gateway when this server is registered as
+          // a gateway target (Cedar 3c, #279); fall back to the direct URL if the
+          // gateway endpoint isn't configured so a stray gatewayTargetId can never
+          // produce an empty url.
+          url: routeThroughGateway ? process.env.AGENTCORE_GATEWAY_ENDPOINT : s.url,
+          headers: routeThroughGateway
+            ? (callerIdToken ? { Authorization: `Bearer ${callerIdToken}` } : undefined)
+            : (s.headers?.length
+              ? headersFromArray(s.headers.filter((h): h is { key: string | null; value: string | null } => h !== null))
+              : undefined),
+        },
       },
-    },
-  }));
+    };
+  });
 }
 
 async function invokeHarness(opts: {
@@ -146,10 +168,11 @@ async function invokeHarness(opts: {
   modelId: string | null;
   mcpServers: McpServerRecord[];
   callerIdentity: CallerIdentity;
+  callerIdToken: string | null;
 }): Promise<string> {
-  const { sessionId, prompt, systemPromptText, modelId, mcpServers, callerIdentity } = opts;
+  const { sessionId, prompt, systemPromptText, modelId, mcpServers, callerIdentity, callerIdToken } = opts;
 
-  const tools = buildTools(mcpServers);
+  const tools = buildTools(mcpServers, callerIdToken);
 
   const response = await agentCore.send(new InvokeHarnessCommand({
     harnessArn: HARNESS_ARN,
@@ -179,6 +202,7 @@ export const handler = async (event: InvokeAgentEvent): Promise<InvokeAgentResul
   const { agentSlug, prompt, sessionId: inputSessionId } = event.arguments;
   const sessionId = inputSessionId ?? randomUUID();
   const callerIdentity = callerIdentityFromEvent(event);
+  const callerIdToken = callerIdTokenFromEvent(event);
 
   const agentConfig = await fetchAgentConfig(agentSlug);
   if (!agentConfig) {
@@ -190,6 +214,7 @@ export const handler = async (event: InvokeAgentEvent): Promise<InvokeAgentResul
 
   const response = await invokeHarness({
     callerIdentity,
+    callerIdToken,
     sessionId,
     prompt,
     systemPromptText: agentConfig.systemPromptText,
