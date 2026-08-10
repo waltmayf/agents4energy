@@ -35,7 +35,12 @@ test.describe('Chat page (AG-UI / CopilotKit)', () => {
     await expect(textarea).toHaveValue('Hello');
   });
 
-  test('agent streams a response after sending a message', async ({ page }) => {
+  // @harness-stream — quarantined (#285): depends on the deployed harness
+  // streaming eventstream content-type, which is currently broken (harness
+  // returns application/json). Excluded from the CI e2e gate via
+  // --grep-invert @harness-stream; runs locally by default. Remove the tag
+  // once the harness streaming content-type is fixed.
+  test('agent streams a response after sending a message', { tag: '@harness-stream' }, async ({ page }) => {
     // Whole test must finish well under 90s (per issue #3); the individual
     // waits below are sized to fit comfortably inside this budget.
     test.setTimeout(90_000);
@@ -91,7 +96,8 @@ test.describe('Chat page (AG-UI / CopilotKit)', () => {
     await expect(submitButton.locator('.lucide-arrow-up')).toBeVisible({ timeout: 10_000 });
   });
 
-  test('new messages written to the session appear live without a reload', async ({ page, context }) => {
+  // @harness-stream — quarantined (#285); see note above.
+  test('new messages written to the session appear live without a reload', { tag: '@harness-stream' }, async ({ page, context }) => {
     // Establish a turn in this tab so the session exists in AgentCore memory.
     const textarea = page.getByTestId('copilot-chat-textarea');
     await textarea.fill('Output only this 5-character code, nothing else: A B C 1 2 (remove the spaces)');
@@ -147,7 +153,8 @@ test.describe('Chat page (AG-UI / CopilotKit)', () => {
     await page.waitForURL(/[?&]agentId=__claude_code__/, { timeout: 10_000 });
   });
 
-  test('conversation history is restored on reload', async ({ page }) => {
+  // @harness-stream — quarantined (#285); see note above.
+  test('conversation history is restored on reload', { tag: '@harness-stream' }, async ({ page }) => {
     const textarea = page.getByTestId('copilot-chat-textarea');
     await textarea.fill('Output only this 5-character code, nothing else: Z X Q 4 2 (remove the spaces)');
     await textarea.press('Enter');
