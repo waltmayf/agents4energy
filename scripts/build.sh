@@ -73,6 +73,10 @@ if [ -n "${GITHUB_REPOSITORY:-}" ]; then
       testUserEmailSsmPath: c.e2e_test_user_email_ssm_path,
       testUserPasswordSsmPath: c.e2e_test_user_password_ssm_path,
       agentWebhookStateMachineArn: c.agent_webhook_state_machine_arn,
+      // AppSync endpoint so the e2e suite can purge/tear-down its McpServer
+      // records directly via SigV4-signed GraphQL (issue #308) instead of the
+      // UI — an API delete can't be skipped by a timed-out UI assertion.
+      graphqlUrl: o.data.url,
     }));
   ")
   aws ssm put-parameter --name "$E2E_CONFIG_SSM_PATH" --type String --overwrite --value "$E2E_CONFIG_VALUE"

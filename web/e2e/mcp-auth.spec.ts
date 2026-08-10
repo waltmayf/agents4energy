@@ -1,8 +1,27 @@
 import { test, expect, type Page } from '@playwright/test';
+import { E2E_MCP_PREFIX, deleteMcpServersByIds } from './mcp-server-cleanup';
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+// Every McpServer this suite creates is tracked here and deleted directly via
+// the AppSync API in afterAll (issue #308) — an API delete can't be skipped by
+// a timed-out UI assertion the way the old UI-driven cleanup could, so orphans
+// no longer accumulate in the shared sandbox. All names use the E2E_MCP_PREFIX
+// sentinel so the global-setup purge (mcp-cleanup.setup.ts) can also sweep any
+// that still slip through.
+const createdServerIds: string[] = [];
+
+/** Build a unique, sentinel-prefixed server name so cleanup can always find it. */
+function e2eServerName(label: string): string {
+  return `${E2E_MCP_PREFIX}${label} ${Date.now()}`;
+}
+
+test.afterAll(async () => {
+  await deleteMcpServersByIds(createdServerIds);
+  createdServerIds.length = 0;
+});
 
 async function goToMcpServersTab(page: Page) {
   await page.goto('agents');
@@ -30,7 +49,10 @@ async function createMcpServer(
   const row = page.locator('[data-testid^="mcp-server-row-"]').filter({ hasText: opts.name });
   await expect(row).toBeVisible({ timeout: 10_000 });
   const testId = (await row.getAttribute('data-testid')) ?? '';
-  return testId.replace('mcp-server-row-', '');
+  const id = testId.replace('mcp-server-row-', '');
+  // Track for API-based teardown so a later timed-out assertion can't orphan it.
+  if (id) createdServerIds.push(id);
+  return id;
 }
 
 /** Close any open dialog (Escape), then delete the server with the given ID. */
@@ -137,7 +159,7 @@ test.describe('OAuth credential section', () => {
     const p = await ctx.newPage();
     await goToMcpServersTab(p);
     serverId = await createMcpServer(p, {
-      name: `OAuth Test ${Date.now()}`,
+      name: e2eServerName('OAuth Test'),
       url: 'https://example.invalid/mcp',
       oauthClientId: 'test-client-id-123',
     });
@@ -232,7 +254,7 @@ test.describe('MCP server lifecycle', () => {
   test('create, verify row appears, then delete', async ({ page }) => {
     await goToMcpServersTab(page);
 
-    const name = `Lifecycle Test ${Date.now()}`;
+    const name = e2eServerName('Lifecycle Test');
     const serverId = await createMcpServer(page, {
       name,
       url: 'https://lifecycle.invalid/mcp',

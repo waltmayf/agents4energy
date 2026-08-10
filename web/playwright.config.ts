@@ -31,12 +31,19 @@ export default defineConfig({
       testMatch: /auth\.setup\.ts/,
     },
     {
+      // Global purge of orphaned e2e-created MCP servers before the suite runs
+      // (issue #308). Runs after auth setup, before the chromium tests.
+      name: 'cleanup',
+      testMatch: /mcp-cleanup\.setup\.ts/,
+      dependencies: ['setup'],
+    },
+    {
       name: 'chromium',
       use: {
         ...devices['Desktop Chrome'],
         storageState: '.auth/user.json',
       },
-      dependencies: ['setup'],
+      dependencies: ['setup', 'cleanup'],
     },
   ],
 
