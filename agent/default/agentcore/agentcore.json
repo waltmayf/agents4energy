@@ -119,7 +119,7 @@
   "policyEngines": [
     {
       "name": "DefaultCedar",
-      "description": "Cedar policy engine for default-gateway. Associated in LOG_ONLY mode (evaluates and logs decisions without blocking) — tool calls are not yet routed through the gateway (#273), so ENFORCE has no effect yet. No static policies here: the sync-cedar-policies Lambda (#272, web/amplify/functions/sync-cedar-policies) generates and pushes Cedar policies directly via CreatePolicy/UpdatePolicy/DeletePolicy whenever a GroupToolGrant row changes (web/amplify/data/schemas/agentConfig.schema.ts), so this array intentionally stays empty — the live policy set lives on the deployed engine, not in this file.",
+      "description": "Cedar policy engine for default-gateway. Associated in ENFORCE mode (#280) — tool calls are routed through the gateway (#279), so a group without an ALLOW grant (or with an explicit DENY) for a tool is actually blocked, not just logged. No static policies here: the sync-cedar-policies Lambda (#272, web/amplify/functions/sync-cedar-policies) generates and pushes Cedar policies directly via CreatePolicy/UpdatePolicy/DeletePolicy whenever a GroupToolGrant row changes (web/amplify/data/schemas/agentConfig.schema.ts), so this array intentionally stays empty — the live policy set lives on the deployed engine, not in this file.",
       "policies": []
     }
   ],

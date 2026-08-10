@@ -43,9 +43,9 @@ test('the principal check uses Set.contains on the cognito:groups tag, not strin
   assert.doesNotMatch(policy.statement, /\blike\b/);
 });
 
-test('every generated policy is LOG_ONLY (matches the engine-level mode until #273 routes calls through the gateway)', () => {
+test('every generated policy is ACTIVE (matches the engine-level ENFORCE mode, #280)', () => {
   for (const policy of generateCedarPolicies([grant(), grant({ effect: 'DENY' }), grant({ toolName: '*' })])) {
-    assert.equal(policy.enforcementMode, 'LOG_ONLY');
+    assert.equal(policy.enforcementMode, 'ACTIVE');
   }
 });
 
