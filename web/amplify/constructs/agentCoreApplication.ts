@@ -117,15 +117,24 @@ export class AgentCoreApplication extends Construct {
       harnessDir,
     }));
 
-    // Minimal AgentCoreProjectSpec for the real construct. It reads
-    // name/tags/memories/runtimes/policyEngines off this and defaults
-    // everything else to [].
+    // The real construct only reads name/tags/memories/runtimes/policyEngines
+    // off this (see AgentCoreApplication.js), but AgentCoreProjectSpec's
+    // inferred type requires every field with a Zod default (version,
+    // managedBy, credentials, evaluators, onlineEvalConfigs,
+    // agentCoreGateways) to be present, so they're set to their schema
+    // defaults explicitly here instead of casting the object.
     const spec: AgentCoreProjectSpec = {
       name: projectName,
+      version: 1,
+      managedBy: 'CDK',
       memories: props.memories,
       runtimes: props.runtimes ?? [],
       policyEngines: props.policyEngines ?? [],
-    } as AgentCoreProjectSpec;
+      credentials: [],
+      evaluators: [],
+      onlineEvalConfigs: [],
+      agentCoreGateways: [],
+    };
 
     this.app = new RealAgentCoreApplication(this, 'App', {
       spec,
