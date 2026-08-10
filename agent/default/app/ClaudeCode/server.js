@@ -419,9 +419,10 @@ function runClaudeCode({ prompt, workDir, repo, issueNumber, systemAppend, githu
   appendParts.push(
     'MONITOR HANDOFF: if you are waiting on an external async condition (a deploy, a CI run, a long job) rather than doing work yourself, end your final message with a fenced ```monitor``` block instead of busy-waiting in-session:',
     '```monitor',
-    '{"intervalSeconds": 120, "maxIterations": 20, "checkCommand": "gh run list --repo owner/name --branch main --limit 1 --json status --jq \'.[0].status\' | grep -q completed", "followUpPrompt": "The deploy finished — verify it succeeded and comment the result."}',
+    '{"intervalSeconds": 120, "maxIterations": 20, "checkCommand": "bash -c \\"gh run list --repo owner/name --branch main --limit 1 --json status --jq \'.[0].status\' | grep -q completed\\"", "followUpPrompt": "The deploy finished — verify it succeeded and comment the result."}',
     '```',
     '`checkCommand` and `followUpPrompt` are required (a malformed block is ignored and the run just completes normally); `intervalSeconds` is clamped to [30, 900] and `maxIterations` to [1, 40].',
+    'IMPORTANT — `checkCommand` runs with NO shell: it is executed directly, not via `/bin/sh -c`, so pipes (`|`), `&&`, and quoting are NOT interpreted and get passed to your first command as literal extra arguments (e.g. a bare `gh api ... | grep -q x` fails with `gh`\'s own "accepts 1 arg(s), received N"). Wrap ANY checkCommand that uses a pipe, `&&`, or shell quoting in `bash -c "..."` as shown above.',
     'IMPORTANT — the microVM running this session is RECLAIMED for the duration of the wait: `checkCommand` runs in a FRESH container on each tick, and only the /mnt/workspace mount persists across ticks — nothing else you installed or created outside it survives. So `checkCommand` must be fully self-contained: use `gh`/`curl`/`aws` directly, or re-bootstrap any tooling it needs, rather than relying on anything set up earlier in this session. Exit 0 means the condition is met (you will be re-invoked with `followUpPrompt`, same session/workspace); any non-zero exit means keep waiting. Keep checkCommand fast and its output tiny (see KEEP TOOL OUTPUT SMALL above).',
   );
   if (systemAppend) appendParts.push(systemAppend);

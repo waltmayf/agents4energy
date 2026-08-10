@@ -65,6 +65,10 @@ GitHub issue_comment webhook          Jira comment_created webhook
            │      shape the harness task produces, so PostFinalComment reads both
            │      identically (SendTaskFailure on a non-zero CLI exit)
            │    • on failure/timeout: Catch → agent-webhook-post-comment (isError=true)
+           │    • RouteAgentResult (Choice on $.agentResult.agentStatus) can also
+           │      route here into a Wait → RunMonitorCheck → re-invoke loop instead
+           │      of PostFinalComment, when the run ends by handing off a
+           │      ```monitor``` block — see docs/monitor-loop.md
            └─ else      → InvokeHarness (NATIVE bedrockagentcore:invokeHarness task)
                 • the optimized Step Functions integration invokes the harness and
                   decodes the streamed response into a Converse-shaped result; the

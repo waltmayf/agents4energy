@@ -956,7 +956,12 @@ webhookInvokeClaudeLambda.addToRolePolicy(new PolicyStatement({
 backend.agentWebhookMonitorCheck.addEnvironment('CLAUDE_CODE_RUNTIME_ARN', AGENTCORE_CLAUDE_CODE_RUNTIME_ARN);
 if (AGENTCORE_CLAUDE_CODE_RUNTIME_ARN) {
   webhookMonitorCheckLambda.addToRolePolicy(new PolicyStatement({
-    actions: ['bedrock-agentcore:InvokeAgentRuntime'],
+    // The handler calls InvokeAgentRuntimeCommand (exec in the existing session,
+    // same API the git-auth Lambda uses against the harness), NOT
+    // InvokeAgentRuntime (which starts a new invocation) — granting only the
+    // latter yields AccessDeniedException on "...InvokeAgentRuntimeCommand
+    // action" at every check (confirmed end-to-end, issue #263).
+    actions: ['bedrock-agentcore:InvokeAgentRuntime', 'bedrock-agentcore:InvokeAgentRuntimeCommand'],
     resources: [
       AGENTCORE_CLAUDE_CODE_RUNTIME_ARN,
       `${AGENTCORE_CLAUDE_CODE_RUNTIME_ARN}/runtime-endpoint/*`,
