@@ -12,7 +12,7 @@ import { SignatureV4 } from '@aws-sdk/signature-v4';
 import { Sha256 } from '@aws-crypto/sha256-js';
 import { fromNodeProviderChain } from '@aws-sdk/credential-providers';
 import { ingestLineageSummary } from '../../../lib/graph-ingest-lineage';
-import type { SignedGraphqlRequest } from '../../../lib/graph-write';
+import { upsertNode, upsertEdge, type SignedGraphqlRequest } from '../../../lib/graph-write';
 
 const GRAPHQL_URL = process.env.GRAPHQL_URL!;
 const GRAPHQL_REGION = process.env.GRAPHQL_REGION ?? process.env.AWS_REGION ?? 'us-east-1';
@@ -72,7 +72,12 @@ export const handler: DynamoDBStreamHandler = async (event) => {
     }
 
     try {
-      const result = await ingestLineageSummary(signedGraphqlRequest, row.id, row.lineageSummary);
+      const result = await ingestLineageSummary(
+        { upsertNode, upsertEdge },
+        signedGraphqlRequest,
+        row.id,
+        row.lineageSummary,
+      );
       console.log(
         `Ingested lineageSummary for session ${row.id}: ${result.datasetNodeIds.length} dataset node(s), ${result.edgeIds.length} edge(s).`,
       );

@@ -2,13 +2,36 @@
  * Materializes `ChatSession.lineageSummary` (the per-session "consolidated
  * list of datasets accessed during the session") into the knowledge graph
  * (issue #292). Pluggable-ingestion-source pattern: this module knows only
- * how to turn a `ChatSession` row into upsertNode/upsertEdge calls via the
- * storage-agnostic helpers in graph-write.ts — a future S3-listing or
- * energy-domain source would be a sibling module with the same shape, not a
- * change to this one.
+ * how to turn a `ChatSession` row into upsertNode/upsertEdge calls — a future
+ * S3-listing or energy-domain source would be a sibling module with the same
+ * shape, not a change to this one.
+ *
+ * The write helpers are **injected** (`GraphWriteDeps`) rather than imported as
+ * runtime values, so this module carries only *type* imports from
+ * `./graph-write`. That keeps it consumable by both toolchains that load it:
+ * the Amplify backend build (tsc without `allowImportingTsExtensions`, which
+ * rejects a `.ts` import specifier — TS5097) and `node --test
+ * --experimental-strip-types` (whose ESM resolver requires the `.ts` extension
+ * for a *runtime* relative import). A type-only import is erased before either
+ * sees it, so there is no on-disk module to resolve.
  */
 
-import { upsertNode, upsertEdge, type SignedGraphqlRequest } from './graph-write.ts';
+import type {
+  SignedGraphqlRequest,
+  UpsertNodeInput,
+  UpsertEdgeInput,
+  UpsertResult,
+} from './graph-write';
+
+/**
+ * The subset of `graph-write.ts` this module needs, injected by the caller.
+ * The handler passes the real `upsertNode`/`upsertEdge`; tests pass the same
+ * real helpers wired to a fake `SignedGraphqlRequest`.
+ */
+export interface GraphWriteDeps {
+  upsertNode: (request: SignedGraphqlRequest, input: UpsertNodeInput) => Promise<UpsertResult>;
+  upsertEdge: (request: SignedGraphqlRequest, input: UpsertEdgeInput) => Promise<UpsertResult>;
+}
 
 /**
  * `lineageSummary` is stored as free-form JSON (`a.json()` on ChatSession) —
@@ -79,10 +102,12 @@ export interface IngestLineageResult {
  * rows (graph-write.ts's natural-key + (fromId,toId,type) de-dup).
  */
 export async function ingestLineageSummary(
+  deps: GraphWriteDeps,
   request: SignedGraphqlRequest,
   sessionId: string,
   lineageSummary: unknown,
 ): Promise<IngestLineageResult> {
+  const { upsertNode, upsertEdge } = deps;
   const entries = parseLineageSummary(lineageSummary);
 
   const session = await upsertNode(request, {

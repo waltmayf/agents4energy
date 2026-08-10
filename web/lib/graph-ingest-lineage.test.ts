@@ -1,7 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { ingestLineageSummary, parseLineageSummary } from './graph-ingest-lineage.ts';
-import type { SignedGraphqlRequest } from './graph-write.ts';
+import { upsertNode, upsertEdge, type SignedGraphqlRequest } from './graph-write.ts';
+
+// The real write helpers, injected into ingestLineageSummary. Exercising them
+// (not a mock) keeps the natural-key/idempotency de-dup under test.
+const deps = { upsertNode, upsertEdge };
 
 interface FakeNode {
   id: string;
@@ -72,7 +76,7 @@ test('parseLineageSummary ignores non-array / malformed input', () => {
 
 test('ingestLineageSummary creates a session node + one node/edge per dataset', async () => {
   const { request, nodes, edges } = makeFakeApi();
-  const result = await ingestLineageSummary(request, 'session-1', ['wells/a.csv', 'wells/b.csv']);
+  const result = await ingestLineageSummary(deps, request, 'session-1', ['wells/a.csv', 'wells/b.csv']);
 
   assert.equal(result.datasetNodeIds.length, 2);
   assert.equal(result.edgeIds.length, 2);
@@ -86,8 +90,8 @@ test('ingestLineageSummary creates a session node + one node/edge per dataset', 
 
 test('ingestLineageSummary is idempotent — re-running produces no new nodes/edges', async () => {
   const { request, nodes, edges } = makeFakeApi();
-  const first = await ingestLineageSummary(request, 'session-1', ['wells/a.csv', 'wells/b.csv']);
-  const second = await ingestLineageSummary(request, 'session-1', ['wells/a.csv', 'wells/b.csv']);
+  const first = await ingestLineageSummary(deps, request, 'session-1', ['wells/a.csv', 'wells/b.csv']);
+  const second = await ingestLineageSummary(deps, request, 'session-1', ['wells/a.csv', 'wells/b.csv']);
 
   assert.deepEqual(second.datasetNodeIds.sort(), first.datasetNodeIds.sort());
   assert.deepEqual(second.edgeIds.sort(), first.edgeIds.sort());
@@ -97,7 +101,7 @@ test('ingestLineageSummary is idempotent — re-running produces no new nodes/ed
 
 test('ingestLineageSummary handles an empty lineageSummary (session node only)', async () => {
   const { request, nodes, edges } = makeFakeApi();
-  const result = await ingestLineageSummary(request, 'session-1', null);
+  const result = await ingestLineageSummary(deps, request, 'session-1', null);
 
   assert.equal(result.datasetNodeIds.length, 0);
   assert.equal(nodes.size, 1);
@@ -106,7 +110,7 @@ test('ingestLineageSummary handles an empty lineageSummary (session node only)',
 
 test('ingestLineageSummary respects an explicit kind on object entries', async () => {
   const { request, nodes } = makeFakeApi();
-  await ingestLineageSummary(request, 'session-1', [{ path: 'reports/q3.pdf', kind: 'document' }]);
+  await ingestLineageSummary(deps, request, 'session-1', [{ path: 'reports/q3.pdf', kind: 'document' }]);
 
   const datasetNode = [...nodes.values()].find((n) => n.kind === 'document');
   assert.ok(datasetNode);
