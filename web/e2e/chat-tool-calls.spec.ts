@@ -38,7 +38,10 @@ test.describe('Chat page — live tool calls', () => {
     await page.waitForURL(/[?&]sessionId=/, { timeout: 20_000 });
   });
 
-  test('tool calls render live during the turn, without a reload', async ({ page }) => {
+  // @harness-stream — quarantined (#285): depends on the deployed harness
+  // streaming eventstream content-type (currently broken). Excluded from the
+  // CI e2e gate via --grep-invert @harness-stream; runs locally by default.
+  test('tool calls render live during the turn, without a reload', { tag: '@harness-stream' }, async ({ page }) => {
     // The whole flow (two model turns around a tool call, then a reload) can run
     // past Playwright's 30s default.
     test.setTimeout(TURN_TIMEOUT * 2);

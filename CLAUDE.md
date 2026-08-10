@@ -64,6 +64,25 @@ When you dispatch work to the `@agentcore-claude` webhook agent (by commenting o
 
 **Once no issue has `agent-working`, the remote agents are done and it's your turn to act** — review the resulting PR(s), and re-dispatch any issue that finished with no PR (it hit the ceiling; re-dispatch in smaller, independently-pushable slices). Scope each dispatch small: a run has a hard ~3h ceiling and anything not pushed is lost, so instruct the agent to push a draft PR as soon as its work type-checks.
 
+### Way of working: implement → deploy → test → merge (autonomous epic loop)
+
+The default mode for open work is an autonomous loop that drives issues to done without waiting for me between items:
+
+1. **Pick the next open item.** Work epics in dependency order — finish an epic's child issues (the `x/N` slices) before the epic itself. Skip anything blocked by an unmerged dependency; come back to it once the blocker lands.
+2. **Implement** the change on a feature branch (never commit straight to `main`).
+3. **Deploy** to the sandbox (`pnpm deploy`) and, for `web/amplify/` changes, first run the credential-free synth gate (`cd web && pnpm test:synth`). Always type-check (`npx tsc --noEmit`) before pushing.
+4. **Test** — run the relevant E2E/lint suite and confirm the change actually works against the deployed backend, not just that it compiles.
+5. **Merge** once green: open a PR with the auto-closing keyword, wait for checks, and merge. Then move to the next item.
+6. **Repeat** until all open work is done.
+
+**When you need input from me, don't block the whole loop:**
+- Add the `needs-review` label to that issue (`gh issue edit <n> --add-label needs-review --repo waltmayf/agents4energy`).
+- Post your specific question as an issue comment (state the options and your recommendation).
+- Leave any in-progress PR for that issue as a **draft**, and move on to the next open item.
+- Revisit `needs-review` issues once I've answered (the label is my signal back to you — I'll remove it or reply).
+
+Keep me informed by using the issue/PR trail as the source of truth: every decision, blocker, and question lives on the relevant issue, not only in this chat.
+
 ### Docuemntation
 Be sure to keep the documentation in the `./docs` folder fresh. After you make a change, make sure the relevant docs are still correct, and create a new doc if it's something either a developer or user would want to know about.
 
