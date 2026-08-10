@@ -17,6 +17,8 @@ export interface SyncCedarPoliciesProps {
   policyEngineArn: string;
   /** Gateway id the engine is attached to — used by the handler to resolve gateway-target names. */
   gatewayId: string;
+  /** ARN of the gateway the engine is attached to — Cedar policies must pin `resource` to this exact gateway (see cedar-policy-generation.ts). */
+  gatewayArn: string;
   /** GroupToolGrant table — the source of truth for grants, and the DynamoDB Stream trigger. */
   groupToolGrantTable: ITable;
   /** McpServer table — read to map mcpServerId → gatewayTargetId when generating Cedar actions. */
@@ -51,9 +53,17 @@ export class SyncCedarPolicies extends Construct {
       environment: {
         POLICY_ENGINE_ID: props.policyEngineId,
         GATEWAY_ID: props.gatewayId,
+        GATEWAY_ARN: props.gatewayArn,
         GROUP_TOOL_GRANT_TABLE_NAME: props.groupToolGrantTable.tableName,
         MCP_SERVER_TABLE_NAME: props.mcpServerTable.tableName,
       },
+      // NodejsFunction excludes @aws-sdk/* from the bundle by default on Node
+      // 18+ runtimes, relying on the SDK version baked into the Lambda
+      // runtime — which predates the Cedar Policy APIs (ListPolicies,
+      // CreatePolicy, etc; confirmed by "ListPoliciesCommand is not a
+      // constructor" at runtime). Bundle this client explicitly so the
+      // handler gets the version pinned in package.json.
+      bundling: { nodeModules: ['@aws-sdk/client-bedrock-agentcore-control'] },
     });
 
     fn.addToRolePolicy(new PolicyStatement({
@@ -65,6 +75,19 @@ export class SyncCedarPolicies extends Construct {
         'bedrock-agentcore:DeletePolicy',
       ],
       resources: [props.policyEngineArn, `${props.policyEngineArn}/*`],
+    }));
+    // Create/Update/DeletePolicy on a policy whose statement's `resource`
+    // clause pins a concrete gateway (required once the action is
+    // target-scoped — see cedar-policy-generation.ts) additionally requires
+    // this action scoped to that gateway, confirmed live: "not authorized to
+    // perform: bedrock-agentcore:ManageResourceScopedPolicy on resource:
+    // <gatewayArn>" without it. It also confirms the referenced gateway
+    // exists via GetGateway before applying that check — confirmed live:
+    // "Failed to confirm existence on AgentCore Gateway ..., please make sure
+    // you have "bedrock-agentcore:GetGateway" permissions" without it.
+    fn.addToRolePolicy(new PolicyStatement({
+      actions: ['bedrock-agentcore:ManageResourceScopedPolicy', 'bedrock-agentcore:GetGateway'],
+      resources: [props.gatewayArn],
     }));
     fn.addToRolePolicy(new PolicyStatement({
       actions: ['bedrock-agentcore:GetGatewayTarget'],

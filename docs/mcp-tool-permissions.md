@@ -1,6 +1,6 @@
 # MCP Tool Permissions (Cognito Group → Tool Grants)
 
-Tracks who is *supposed* to be able to call which MCP tool. This is the human-editable model from issue #247 — it is **not yet enforced server-side**. Enforcement (Cedar policy generation + gateway routing) is a separate, still-open issue (#248), split into three slices: #271 (policy engine config only), #272 (generate + sync policies from `GroupToolGrant` — this doc's Cedar section), #273 (route tool calls through the gateway so denial is authoritative).
+Tracks who is *supposed* to be able to call which MCP tool. This is the human-editable model from issue #247 and is now **enforced server-side** by a Cedar policy engine on `default-gateway` (issue #248, landed across #271 policy engine config, #272 generate + sync policies from `GroupToolGrant` — this doc's Cedar section, #279 route tool calls through the gateway, and #280 flip the engine to `ENFORCE`).
 
 ---
 
@@ -42,13 +42,13 @@ Two places apply this model purely for UX — hiding tools a user isn't expected
 
 Both reuse `web/lib/tool-permissions.ts` (`isToolGrantedToAnyGroup`).
 
-**This client-side filtering can be bypassed** by anyone with direct API/gateway access — a user's actual tool-call permissions are unenforced until #248 lands Cedar policy generation and routes calls through the gateway.
+**This client-side filtering is a UX convenience, not the enforcement boundary** — the real, unbypassable enforcement is the Cedar policy engine on `default-gateway` described below, which now runs in `ENFORCE` mode (#280).
 
 ---
 
 ## Cedar policy engine
 
-`agent/default/agentcore/agentcore.json` configures a Cedar `policyEngines` entry (`DefaultCedar`, #271) and associates it with `default-gateway` via `policyEngineConfiguration` in `mode: "LOG_ONLY"`. No tool calls are routed through the gateway yet (`web/lib/harness-agent.ts` still calls each `McpServer` URL directly as a `remote_mcp` tool), so the engine has nothing to evaluate in practice. `LOG_ONLY` is a placeholder — it becomes meaningful once #273 routes calls through the gateway, at which point it should move to `ENFORCE`.
+`agent/default/agentcore/agentcore.json` configures a Cedar `policyEngines` entry (`DefaultCedar`, #271) and associates it with `default-gateway` via `policyEngineConfiguration` in `mode: "ENFORCE"` (flipped from `LOG_ONLY` in #280, once #279 routed tool calls through the gateway so the engine has something real to evaluate).
 
 `agentcore.json`'s `policyEngines[].policies` array is intentionally **empty** — the live policy set is generated and pushed directly to the deployed engine (see below), not hand-written in this file. Two prior static smoke-test policies (`AdminAllowAllTools`, `DefaultDenyUnauthenticated`) were removed once the generator landed.
 
@@ -61,10 +61,10 @@ Both reuse `web/lib/tool-permissions.ts` (`isToolGrantedToAnyGroup`).
 - **Principal** — `principal is AgentCore::OAuthUser` guarded by `principal.getTag("cognito:groups").contains("<group>")`. Because `default-gateway` uses `authorizerType: "CUSTOM_JWT"` (Cognito), every JWT claim becomes a **tag** on the `AgentCore::OAuthUser` principal, readable via `principal.hasTag(...)`/`principal.getTag(...)`.
   - **Correction to the #271 placeholder:** Cognito's `cognito:groups` claim is a **JSON array** of group-name strings (confirmed against AWS's documented ID-token payload shape — `"cognito:groups": ["group-a", "group-b"]`), not a space/comma-joined string. So the tag value is a Cedar `Set<String>`, and the correct membership check is `.contains("<group>")`, **not** `like "*<group>*"` (a `like` string match against a stringified set could false-positive on group-name substrings, e.g. `"eng"` matching inside `"reservoir-eng"`).
 - **Action** — `AgentCore::Action::"<targetName>___<toolName>"` for an exact grant (matching the `agentcore add policy -g`/`--target` generated-policy convention, confirmed against the `agentcore` CLI's own policy-generation code), where `targetName` is the tool's registered gateway target name (resolved via `GetGatewayTarget` on the `McpServer`'s `gatewayTargetId` — see "Gateway registration" below). A `GroupToolGrant.toolName == "*"` row maps to a bare `action` (unconstrained) rather than an `in [...]` list.
-- **Resource** — `resource is AgentCore::Gateway` (one gateway per engine here; policies don't need to distinguish resources beyond that).
+- **Resource** — `resource == AgentCore::Gateway::"<gatewayArn>"`, pinned to the concrete gateway. AWS's Cedar analyzer rejects the unconstrained form (`resource is AgentCore::Gateway`) whenever the action clause is constrained — every action this generator emits is (an exact tool or a target-scoped wildcard, never bare `action`) — confirmed live: `CreatePolicy` 400s with "please constrain the resource to a specific AgentCore::Gateway resource when creating tool-specific policies" otherwise.
 - **Effect** — `GroupToolGrant.effect == "DENY"` maps to Cedar `forbid` (forbid always overrides permit — the same DENY-over-ALLOW semantics `web/lib/tool-permissions.ts` already implements client-side); `"ALLOW"` maps to `permit`.
 
-Every generated policy's `enforcementMode` is `LOG_ONLY`, matching the engine-level mode, and its name is deterministic (`Grant_<group>_<targetName>_<toolName>`, sanitized/hashed to fit Cedar's 48-char `PolicyNameSchema`) so repeated syncs update rather than duplicate.
+Every generated policy's `enforcementMode` is `ACTIVE` (#280), matching the engine-level `ENFORCE` mode — a policy's own `enforcementMode` and the engine's `policyEngineConfiguration.mode` are independent fields in the AgentCore API, so both had to move together for a grant to actually block/allow a call. Each policy's name is deterministic (`Grant_<group>_<targetName>_<toolName>`, sanitized/hashed to fit Cedar's 48-char `PolicyNameSchema`) so repeated syncs update rather than duplicate.
 
 ### Sync mechanism: DynamoDB Stream, not build-time (#272)
 
@@ -75,6 +75,6 @@ Every generated policy's `enforcementMode` is `LOG_ONLY`, matching the engine-le
 3. For each server with a registered `gatewayTargetId`, `GetGatewayTarget` resolves its Cedar `targetName`; grants on an unregistered/stale server are skipped for that round (picked up automatically once the server is (re)registered).
 4. `generateCedarPolicies` builds the desired policy set; `web/lib/cedar-policy-sync.ts` (`syncCedarPolicies`) diffs it against `ListPolicies` on the engine and calls `CreatePolicy`/`UpdatePolicy`/`DeletePolicy` — **only** ever touching policies whose name starts with `Grant_` (its own generated-policy prefix), so a future hand-written policy is never deleted by this sync.
 
-### What #273 still needs to do
+### Enforcement is live (#280)
 
-#273 needs to make the harness call gateway-registered targets (not raw `McpServer` URLs) so the policy engine is actually in the request path, and flip `default-gateway`'s `policyEngineConfiguration.mode` (and each generated policy's `enforcementMode`) from `LOG_ONLY` to `ACTIVE`/`ENFORCE` once policies have been validated in shadow mode. See the "Gateway registration" section of [`docs/agentic-architecture.md`](./agentic-architecture.md) for how `gatewayTargetId` already gets set today via `registerMcpTarget`.
+`default-gateway`'s `policyEngineConfiguration.mode` and every generated policy's `enforcementMode` are both `ENFORCE`/`ACTIVE` — a group without an `ALLOW` grant (or with an explicit `DENY`) for a tool now gets a real authorization error from the gateway when it tries to call that tool, not just a logged decision. See the "Gateway registration" section of [`docs/agentic-architecture.md`](./agentic-architecture.md) for how `gatewayTargetId` gets set via `registerMcpTarget`, and [`docs/cedar-enforce-demo.md`](./cedar-enforce-demo.md) for a captured denial/allow demonstration.

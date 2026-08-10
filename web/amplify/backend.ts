@@ -591,6 +591,7 @@ if (AGENTCORE_POLICY_ENGINE_ID) {
     policyEngineId: AGENTCORE_POLICY_ENGINE_ID,
     policyEngineArn: AGENTCORE_POLICY_ENGINE_ARN,
     gatewayId: AGENTCORE_GATEWAY_ID,
+    gatewayArn: AGENTCORE_GATEWAY_ARN,
     groupToolGrantTable: backend.data.resources.tables['GroupToolGrant'],
     mcpServerTable: backend.data.resources.tables['McpServer'],
   });

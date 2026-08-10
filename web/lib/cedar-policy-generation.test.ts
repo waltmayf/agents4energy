@@ -6,6 +6,8 @@ import {
   type ToolGrantInput,
 } from './cedar-policy-generation.ts';
 
+const TEST_GATEWAY_ARN = 'arn:aws:bedrock-agentcore:us-east-1:123456789012:gateway/test-gateway-abc123';
+
 function grant(overrides: Partial<ToolGrantInput> = {}): ToolGrantInput {
   return {
     group: 'admin',
@@ -17,35 +19,38 @@ function grant(overrides: Partial<ToolGrantInput> = {}): ToolGrantInput {
 }
 
 test('ALLOW grant on an exact tool becomes a permit policy scoped to that action', () => {
-  const [policy] = generateCedarPolicies([grant()]);
+  const [policy] = generateCedarPolicies([grant()], TEST_GATEWAY_ARN);
   assert.match(policy.statement, /^permit\(/);
   assert.match(policy.statement, /action == AgentCore::Action::"reservoir-target___get_well_data"/);
-  assert.match(policy.statement, /resource is AgentCore::Gateway/);
+  assert.match(policy.statement, new RegExp(`resource == AgentCore::Gateway::"${TEST_GATEWAY_ARN}"`));
   assert.match(policy.statement, /principal is AgentCore::OAuthUser/);
 });
 
 test('DENY grant becomes a forbid policy, not permit', () => {
-  const [policy] = generateCedarPolicies([grant({ effect: 'DENY' })]);
+  const [policy] = generateCedarPolicies([grant({ effect: 'DENY' })], TEST_GATEWAY_ARN);
   assert.match(policy.statement, /^forbid\(/);
   assert.doesNotMatch(policy.statement, /^permit\(/);
 });
 
 test('"*" toolName maps to a target-scoped action (ensuring only its own tools are authorized)', () => {
-  const [policy] = generateCedarPolicies([grant({ toolName: '*' })]);
+  const [policy] = generateCedarPolicies([grant({ toolName: '*' })], TEST_GATEWAY_ARN);
   // The action clause should be scoped to the target name, not a generic bare action.
   assert.match(policy.statement, /action == AgentCore::Action::"reservoir-target___\*"/);
   assert.doesNotMatch(policy.statement, /,\n\s*action,\n/);
 });
 
 test('the principal check uses Set.contains on the cognito:groups tag, not string "like"', () => {
-  const [policy] = generateCedarPolicies([grant({ group: 'reservoir-eng' })]);
+  const [policy] = generateCedarPolicies([grant({ group: 'reservoir-eng' })], TEST_GATEWAY_ARN);
   assert.match(policy.statement, /principal\.getTag\("cognito:groups"\)\.contains\("reservoir-eng"\)/);
   assert.doesNotMatch(policy.statement, /\blike\b/);
 });
 
-test('every generated policy is LOG_ONLY (matches the engine-level mode until #273 routes calls through the gateway)', () => {
-  for (const policy of generateCedarPolicies([grant(), grant({ effect: 'DENY' }), grant({ toolName: '*' })])) {
-    assert.equal(policy.enforcementMode, 'LOG_ONLY');
+test('every generated policy is ACTIVE (matches the engine-level ENFORCE mode, #280)', () => {
+  for (const policy of generateCedarPolicies(
+    [grant(), grant({ effect: 'DENY' }), grant({ toolName: '*' })],
+    TEST_GATEWAY_ARN,
+  )) {
+    assert.equal(policy.enforcementMode, 'ACTIVE');
   }
 });
 
@@ -56,19 +61,22 @@ test('policy names are deterministic and stable across repeated calls for the sa
 
 test('policy names are unique across different groups/targets/tools for the same base grant', () => {
   const names = new Set(
-    generateCedarPolicies([
-      grant({ group: 'admin' }),
-      grant({ group: 'drilling' }),
-      grant({ targetName: 'other-target' }),
-      grant({ toolName: 'other_tool' }),
-      grant({ toolName: '*' }),
-    ]).map((p) => p.name),
+    generateCedarPolicies(
+      [
+        grant({ group: 'admin' }),
+        grant({ group: 'drilling' }),
+        grant({ targetName: 'other-target' }),
+        grant({ toolName: 'other_tool' }),
+        grant({ toolName: '*' }),
+      ],
+      TEST_GATEWAY_ARN,
+    ).map((p) => p.name),
   );
   assert.equal(names.size, 5);
 });
 test('"*" grant for target A does not authorize tools on target B', () => {
   const grantA = grant({ toolName: '*', targetName: 'target-A' });
-  const policyA = generateCedarPolicies([grantA])[0];
+  const policyA = generateCedarPolicies([grantA], TEST_GATEWAY_ARN)[0];
   // Action should be scoped to target-A
   assert.match(policyA.statement, /action == AgentCore::Action::"target-A___\*"/);
   // Ensure it does not contain target-B pattern
@@ -88,14 +96,14 @@ test('policy names satisfy the agentcore CLI PolicyNameSchema (starts with a let
 });
 
 test('DENY and ALLOW for the same (group, target, tool) produce two distinct policies, both present — Cedar itself resolves forbid-wins at evaluation time, not the generator', () => {
-  const policies = generateCedarPolicies([grant({ effect: 'ALLOW' }), grant({ effect: 'DENY' })]);
+  const policies = generateCedarPolicies([grant({ effect: 'ALLOW' }), grant({ effect: 'DENY' })], TEST_GATEWAY_ARN);
   assert.equal(policies.length, 2);
   assert.ok(policies.some((p) => p.statement.startsWith('permit(')));
   assert.ok(policies.some((p) => p.statement.startsWith('forbid(')));
 });
 
 test('description documents the grant and flags the policy as generated (not hand-editable)', () => {
-  const [policy] = generateCedarPolicies([grant()]);
+  const [policy] = generateCedarPolicies([grant()], TEST_GATEWAY_ARN);
   assert.match(policy.description, /admin/);
   assert.match(policy.description, /reservoir-target/);
   assert.match(policy.description, /get_well_data/);

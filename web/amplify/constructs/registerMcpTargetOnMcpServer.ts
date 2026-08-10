@@ -34,6 +34,13 @@ export class RegisterMcpTargetOnMcpServer extends Construct {
         GATEWAY_ID: props.gatewayId,
         MCP_SERVER_TABLE_NAME: props.mcpServerTable.tableName,
       },
+      // NodejsFunction excludes @aws-sdk/* from the bundle by default on Node
+      // 18+ runtimes, relying on the (older) SDK baked into the Lambda
+      // runtime, which throws at runtime on newer client-bedrock-agentcore-control
+      // request shapes (confirmed: "Cannot read properties of undefined
+      // (reading '0')" inside se_CreateGatewayTargetCommand). Bundle this
+      // client explicitly so the handler gets the version pinned in package.json.
+      bundling: { nodeModules: ['@aws-sdk/client-bedrock-agentcore-control'] },
     });
 
     // Grant permissions to create gateway targets.
