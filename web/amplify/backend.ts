@@ -16,8 +16,9 @@ import { s3Tools } from './functions/s3-tools/resource';
 import { agentWorkspace } from './storage/resource';
 import { Policy, PolicyStatement, ServicePrincipal } from 'aws-cdk-lib/aws-iam';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
-import { Function as LambdaFunction } from 'aws-cdk-lib/aws-lambda';
-import { Fn, Stack, CfnOutput } from 'aws-cdk-lib';
+import { Function as LambdaFunction, Runtime } from 'aws-cdk-lib/aws-lambda';
+import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
+import { Fn, Stack, CfnOutput, Duration } from 'aws-cdk-lib';
 import { fileURLToPath } from 'url';
 import { resolve, dirname } from 'path';
 import { readFileSync } from 'fs';
@@ -30,6 +31,8 @@ import { SyncCedarPolicies } from './constructs/syncCedarPolicies';
 import { RegisterMcpTargetOnMcpServer } from './constructs/registerMcpTargetOnMcpServer';
 import { S3ToolsGatewayTarget } from './constructs/s3ToolsGatewayTarget/resource';
 import { S3ToolsMcpServerSeed } from './constructs/s3ToolsMcpServerSeed/resource';
+import { GraphTraverseGatewayTarget } from './constructs/graphTraverseGatewayTarget/resource';
+import { GraphTraverseMcpServerSeed } from './constructs/graphTraverseMcpServerSeed/resource';
 
 import { StringParameter } from 'aws-cdk-lib/aws-ssm';
 
@@ -683,6 +686,102 @@ if (AGENTCORE_GATEWAY_ID) {
       graphqlUrl: backend.data.resources.cfnResources.cfnGraphqlApi.attrGraphQlUrl,
       graphqlRegion: AGENTCORE_REGION,
       graphqlApiId: backend.data.resources.cfnResources.cfnGraphqlApi.attrApiId,
+      gatewayEndpoint: AGENTCORE_GATEWAY_ENDPOINT,
+    });
+  }
+}
+
+// ============================================================================
+// KNOWLEDGE-GRAPH TRAVERSAL — the graph-traverse Lambda (#290) exposed as a
+// Lambda-backed AgentCore Gateway target (issue #291).
+// ============================================================================
+//
+// Unlike s3-tools (a `defineFunction` in the shared function stack), the
+// traversal Lambda reads the Node/Edge models over AppSync and so needs the
+// data stack's GraphQL URL as an env var. A `defineFunction` taking that token
+// would close the data -> function -> data CFN cycle (the data stack already
+// depends on the function stack via allow.resource(invokeAgent)). So the Lambda
+// itself lives here as a raw NodejsFunction in a dedicated sink stack that
+// depends on BOTH the data stack (GraphQL URL/API id) and the agent stack
+// (gateway id/arn/role) without either depending back on it — the same
+// cycle-free pattern as SyncCedarPolicies / AgentWebhookStack.
+if (AGENTCORE_GATEWAY_ID) {
+  const graphTraverseStack = backend.createStack('graph-traverse');
+
+  const graphqlUrl = backend.data.resources.cfnResources.cfnGraphqlApi.attrGraphQlUrl;
+  const graphqlApiId = backend.data.resources.cfnResources.cfnGraphqlApi.attrApiId;
+
+  const graphTraverseLambda = new NodejsFunction(graphTraverseStack, 'GraphTraverseFn', {
+    entry: resolve(__dirname, 'functions/graph-traverse/handler.ts'),
+    runtime: Runtime.NODEJS_20_X,
+    timeout: Duration.seconds(30),
+    environment: {
+      GRAPHQL_URL: graphqlUrl,
+      GRAPHQL_REGION: AGENTCORE_REGION,
+    },
+  });
+
+  // The traversal reads Node/Edge (and their nested outEdges/inEdges relations)
+  // over AppSync with SigV4 (IAM auth). list-then-traverse silently no-ops
+  // without the field-level grant, so grant the Query field ARNs for this API.
+  const { region: gtRegion, account: gtAccount } = Stack.of(graphTraverseStack);
+  graphTraverseLambda.addToRolePolicy(new PolicyStatement({
+    actions: ['appsync:GraphQL'],
+    resources: [
+      `arn:aws:appsync:${gtRegion}:${gtAccount}:apis/${graphqlApiId}/types/Query/fields/*`,
+    ],
+  }));
+
+  // Resource-based permission letting the gateway service invoke the Lambda.
+  if (AGENTCORE_GATEWAY_ARN) {
+    graphTraverseLambda.addPermission('AllowGatewayInvoke', {
+      principal: new ServicePrincipal('bedrock-agentcore.amazonaws.com'),
+      action: 'lambda:InvokeFunction',
+      sourceArn: AGENTCORE_GATEWAY_ARN,
+    });
+  }
+
+  // Identity-based grant on the gateway's execution role — the other half
+  // CreateGatewayTarget validates synchronously (see the s3-tools comment
+  // above). Owned by this sink stack (which already depends on both the agent
+  // and data stacks) so it adds no new cross-stack edge.
+  let gtGatewayInvokeGrant: Policy | undefined;
+  if (gatewayName) {
+    gtGatewayInvokeGrant = new Policy(graphTraverseStack, 'GraphTraverseGatewayInvokeGrant', {
+      roles: [agentCoreApp.gatewayRole(gatewayName)],
+      statements: [
+        new PolicyStatement({
+          actions: ['lambda:InvokeFunction'],
+          resources: [graphTraverseLambda.functionArn, `${graphTraverseLambda.functionArn}:*`],
+        }),
+      ],
+    });
+  }
+
+  const graphTraverseTargetName = toGatewayResourceName(
+    'graph-traverse',
+    backendNamespace ?? '',
+    backendName ?? '',
+  ).slice(0, 100);
+
+  const graphTraverseGatewayTarget = new GraphTraverseGatewayTarget(graphTraverseStack, 'GraphTraverseGatewayTarget', {
+    gatewayIdentifier: AGENTCORE_GATEWAY_ID,
+    gatewayArn: AGENTCORE_GATEWAY_ARN,
+    targetName: graphTraverseTargetName,
+    lambdaArn: graphTraverseLambda.functionArn,
+  });
+
+  // CreateGatewayTarget synchronously validates the gateway role can invoke
+  // the Lambda, so the invoke grant must exist before the target is created.
+  if (gtGatewayInvokeGrant) {
+    graphTraverseGatewayTarget.node.addDependency(gtGatewayInvokeGrant);
+  }
+
+  if (AGENTCORE_GATEWAY_ENDPOINT) {
+    new GraphTraverseMcpServerSeed(graphTraverseStack, 'GraphTraverseMcpServerSeed', {
+      graphqlUrl,
+      graphqlRegion: AGENTCORE_REGION,
+      graphqlApiId,
       gatewayEndpoint: AGENTCORE_GATEWAY_ENDPOINT,
     });
   }
