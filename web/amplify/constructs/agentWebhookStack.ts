@@ -382,8 +382,15 @@ export class AgentWebhookStack extends Construct {
     // (plus a short context note) and re-invoke Claude in the same session.
     const prepareReinvoke = new sfn.Pass(this, 'PrepareMonitorReinvoke', {
       parameters: {
+        // NOTE: inside an ASL intrinsic (States.Format) string literal the only
+        // valid backslash escapes are \\ \' \{ \} — a `\n` is rejected as an
+        // invalid escape and SFN fails the whole state machine at deploy with
+        // SCHEMA_VALIDATION_FAILED (the synth gate can't catch this; it's SFN's
+        // own service-side parse). Keep the template newline-free — the
+        // <monitor_context> tags carry the semantics; newline formatting is
+        // cosmetic and the agent reads the wrapped prompt fine on one line.
         'effectivePrompt.$':
-          "States.Format('<monitor_context>\\nYour monitor condition was met (check command exited 0). Continue with the follow-up task below in the same workspace/session.\\n</monitor_context>\\n\\n{}', $.monitor.spec.followUpPrompt)",
+          "States.Format('<monitor_context>Your monitor condition was met (the check command exited 0). Continue with the follow-up task in the same workspace/session.</monitor_context> {}', $.monitor.spec.followUpPrompt)",
       },
       resultPath: '$.prepared',
     });
