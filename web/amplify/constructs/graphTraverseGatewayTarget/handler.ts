@@ -20,6 +20,15 @@ interface ResourceProperties {
   LambdaArn: string;
 }
 
+// Shared by UpsertNode/UpsertEdge below — free-form metadata on a Node/Edge,
+// capped at MAX_PROPS_BYTES in the handler (issue #292).
+const PROPS_PROPERTY = {
+  type: SchemaType.OBJECT,
+  description:
+    'Optional free-form metadata as a JSON object (e.g. {"units":"bbl"}). Capped at 8KB; oversized props are rejected. '
+    + 'Include a "naturalKey" string field to control de-duplication explicitly instead of the default (kind,label) key.',
+};
+
 // Keep in sync with the graph-traverse handler's TraverseEvent + the
 // MAX_DEPTH/DEFAULT_* clamps in web/lib/graph-traverse-bfs.ts.
 const toolDefinitions = (): ToolDefinition[] => [
@@ -62,6 +71,54 @@ const toolDefinitions = (): ToolDefinition[] => [
         },
       },
       required: ['rootId'],
+    },
+  },
+  {
+    name: 'UpsertNode',
+    description:
+      'Create or update an entity node in the knowledge graph (a well, field, document, dataset, …). Idempotent: '
+      + 'looks up an existing node by natural key (props.naturalKey, or "kind:label" if omitted) and updates it '
+      + 'instead of creating a duplicate. Returns { id, created }.',
+    inputSchema: {
+      type: SchemaType.OBJECT,
+      properties: {
+        kind: {
+          type: SchemaType.STRING,
+          description: 'Entity kind, e.g. "well" | "field" | "document" | "dataset" | "session" (required).',
+        },
+        label: {
+          type: SchemaType.STRING,
+          description: 'Human-readable name for the node.',
+        },
+        props: PROPS_PROPERTY,
+      },
+      required: ['kind'],
+    },
+  },
+  {
+    name: 'UpsertEdge',
+    description:
+      'Create a directed relationship between two nodes (e.g. "belongs_to", "mentions", "derived_from", '
+      + '"accessed_in_session"). Idempotent: a no-op if an edge with the same (fromId,toId,type) already exists. '
+      + 'Returns { id, created }.',
+    inputSchema: {
+      type: SchemaType.OBJECT,
+      properties: {
+        fromId: {
+          type: SchemaType.STRING,
+          description: 'Id of the source node (required).',
+        },
+        toId: {
+          type: SchemaType.STRING,
+          description: 'Id of the target node (required).',
+        },
+        type: {
+          type: SchemaType.STRING,
+          description: 'Edge type, e.g. "belongs_to" | "mentions" | "derived_from" | "accessed_in_session" (required).',
+        },
+        props: PROPS_PROPERTY,
+      },
+      required: ['fromId', 'toId', 'type'],
     },
   },
 ];

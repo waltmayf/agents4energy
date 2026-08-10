@@ -12,6 +12,7 @@ import {
   type GraphNode,
   type TraverseInput,
 } from '../../../lib/graph-traverse-bfs';
+import { upsertNode, upsertEdge, type UpsertNodeInput, type UpsertEdgeInput } from '../../../lib/graph-write';
 
 // The AppSync GraphQL endpoint + region are injected in backend.ts once the
 // data stack exists (see the GRAPHQL_URL/GRAPHQL_REGION wiring). The traversal
@@ -138,8 +139,22 @@ async function fetchNodesFromApi(ids: string[]): Promise<GraphNode[]> {
 }
 
 // The gateway invokes this Lambda directly — the event IS the tool's input
-// arguments (see s3-tools/handler.ts). One tool (`TraverseGraph`) backs this
-// target, so we don't need to dispatch on bedrockAgentCoreToolName.
+// arguments (see s3-tools/handler.ts). Three tools (`TraverseGraph`,
+// `UpsertNode`, `UpsertEdge`) back this target, so dispatch on
+// bedrockAgentCoreToolName the same way s3-tools does.
+interface GatewayClientContext {
+  custom?: {
+    bedrockAgentCoreToolName?: string;
+  };
+}
+
+function extractToolName(context: Context): string {
+  const raw = (context.clientContext as GatewayClientContext | undefined)?.custom?.bedrockAgentCoreToolName;
+  if (!raw) return 'TraverseGraph'; // Backward-compatible default when invoked outside the gateway (e.g. direct test).
+  const idx = raw.lastIndexOf('___');
+  return idx === -1 ? raw : raw.slice(idx + 3);
+}
+
 interface TraverseEvent {
   rootId?: string;
   depth?: number;
@@ -152,19 +167,35 @@ function normalizeDirection(direction: string | undefined): Direction {
   return direction === 'in' || direction === 'both' ? direction : 'out';
 }
 
-export const handler = async (event: TraverseEvent, _context: Context): Promise<unknown> => {
+async function handleTraverse(event: TraverseEvent): Promise<unknown> {
+  if (!event.rootId) throw new Error('rootId is required');
+
+  const input: TraverseInput = {
+    rootId: event.rootId,
+    depth: event.depth,
+    edgeTypes: event.edgeTypes,
+    direction: normalizeDirection(event.direction),
+    perLevelLimit: event.perLevelLimit,
+  };
+
+  return await traverse(input, fetchEdgesFromApi, fetchNodesFromApi);
+}
+
+type ToolEvent = TraverseEvent & UpsertNodeInput & UpsertEdgeInput;
+
+export const handler = async (event: ToolEvent, context: Context): Promise<unknown> => {
+  const toolName = extractToolName(context);
+
   try {
-    if (!event.rootId) throw new Error('rootId is required');
-
-    const input: TraverseInput = {
-      rootId: event.rootId,
-      depth: event.depth,
-      edgeTypes: event.edgeTypes,
-      direction: normalizeDirection(event.direction),
-      perLevelLimit: event.perLevelLimit,
-    };
-
-    return await traverse(input, fetchEdgesFromApi, fetchNodesFromApi);
+    switch (toolName) {
+      case 'UpsertNode':
+        return await upsertNode(signedGraphqlRequest, event);
+      case 'UpsertEdge':
+        return await upsertEdge(signedGraphqlRequest, event);
+      case 'TraverseGraph':
+      default:
+        return await handleTraverse(event);
+    }
   } catch (err) {
     // Gateway-target tools return errors as a value, not by throwing (matches
     // s3-tools) so the agent sees a readable message instead of a 500.
