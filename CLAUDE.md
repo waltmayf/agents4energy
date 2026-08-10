@@ -64,6 +64,8 @@ When you dispatch work to the `@agentcore-claude` webhook agent (by commenting o
 
 **Once no issue has `agent-working`, the remote agents are done and it's your turn to act** — review the resulting PR(s), and re-dispatch any issue that finished with no PR (it hit the ceiling; re-dispatch in smaller, independently-pushable slices). Scope each dispatch small: a run has a hard ~3h ceiling and anything not pushed is lost, so instruct the agent to push a draft PR as soon as its work type-checks.
 
+These scripts are portable across repos: they resolve the target repo from `REPO` → a `.agents-wait.json` config file → the current directory's git `origin` remote → a built-in fallback, so a bare call from inside any clone targets that clone's repo. See [docs/waiting-for-remote-agents.md](docs/waiting-for-remote-agents.md) for the config keys (`repo`, `workLabel`, `bot`, `sentinel`) and how to wire this into a coding workflow.
+
 ### Way of working: implement → deploy → test → merge (autonomous epic loop)
 
 The default mode for open work is an autonomous loop that drives issues to done without waiting for me between items:

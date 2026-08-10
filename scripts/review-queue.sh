@@ -20,11 +20,14 @@
 #                                          # (open PRs OR finished-no-PR), 0 if all quiet,
 #                                          # useful for `watch`/polling loops.
 #
-# Always targets the fork where CI runs. Override with REPO=owner/name.
+# Config (repo, working label, bot, sentinel) is resolved by lib/agents-wait-config.sh:
+# env vars > nearest .agents-wait.json > built-in defaults. Defaults target the
+# fork where CI runs. Override with REPO=owner/name or a .agents-wait.json file.
 set -euo pipefail
 
-REPO="${REPO:-waltmayf/agents4energy}"
-WORK_LABEL="agent-working"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$script_dir/lib/agents-wait-config.sh"
+load_agents_wait_config
 
 want_exit_code=0
 [[ "${1:-}" == "--exit-code" ]] && want_exit_code=1
@@ -56,7 +59,7 @@ echo
 issues_json="$(gh issue list --repo "$REPO" --state open --limit 200 \
   --json number,title,labels)"
 
-working="$(jq -r --arg L "$WORK_LABEL" \
+working="$(jq -r --arg L "$AGENTS_WORK_LABEL" \
   '[.[] | select(any(.labels[]; .name == $L))]' <<<"$issues_json")"
 working_count="$(jq 'length' <<<"$working")"
 
@@ -80,13 +83,14 @@ pr_issue_refs="$(gh pr list --repo "$REPO" --state open --json number,body,headR
 # run (labels can be []), so we detect via the bot's own sign-off comment, not a
 # label. Only issues NOT currently working are candidates.
 bold "── Finished, no PR (re-dispatch these) ──"
-# Regex the webhook bot uses when a run ends without pushing anything.
-SENTINEL='no PR was created|ended before pushing|no text response|hit the per-turn ceiling'
-BOT='waltmayf-claude-code-app'
+# Regex the webhook bot uses when a run ends without pushing anything, and the
+# bot login to attribute sign-off comments to (both from resolved config).
+SENTINEL="$AGENTS_SENTINEL"
+BOT="$AGENTS_BOT"
 
 # Candidate issues: open, not currently working. Bounded to recently-updated
 # ones so we don't fetch comments for the entire backlog.
-candidates="$(jq -r --arg W "$WORK_LABEL" \
+candidates="$(jq -r --arg W "$AGENTS_WORK_LABEL" \
   '.[] | select(all(.labels[]; .name != $W)) | .number' <<<"$issues_json")"
 
 any_finished=0
