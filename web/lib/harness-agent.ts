@@ -66,18 +66,20 @@ export function makeClient(): BedrockAgentCoreClient {
 
 /**
  * Read the signed-in caller's `sub` + `cognito:groups` off the Cognito ID
- * token (see caller-identity.ts). The harness itself authorizes this call
- * via SigV4/Identity Pool credentials, not this JWT — so this claim is only
- * ever read here to be forwarded as a trusted invoke argument, never used for
- * authorization by the browser itself.
+ * token (see caller-identity.ts), plus the raw ID token itself. The harness
+ * authorizes InvokeHarness via SigV4/Identity Pool credentials, not this JWT
+ * — `identity` is forwarded as a trusted invoke argument (never used for
+ * authorization by the browser itself), while `idToken` is the one credential
+ * the *gateway's* CUSTOM_JWT authorizer actually accepts (see buildTools).
  */
-async function fetchCallerIdentity(): Promise<CallerIdentity> {
+async function fetchCallerIdentity(): Promise<{ identity: CallerIdentity; idToken: string | null }> {
   const session = await fetchAuthSession();
   const payload = session.tokens?.idToken?.payload;
   const sub = typeof payload?.sub === 'string' ? payload.sub : null;
   const groupsClaim = payload?.['cognito:groups'];
   const groups = Array.isArray(groupsClaim) ? groupsClaim.filter((g): g is string => typeof g === 'string') : [];
-  return { sub, groups };
+  const idToken = session.tokens?.idToken?.toString() ?? null;
+  return { identity: { sub, groups }, idToken };
 }
 
 export interface McpServerConfig {
@@ -99,8 +101,18 @@ export interface HarnessAgentConfig {
   mcpServers?: McpServerConfig[];
 }
 
-/** Resolve MCP server configs into remote_mcp HarnessTools, injecting stored OAuth tokens. */
-async function buildTools(mcpServers: McpServerConfig[]): Promise<HarnessTool[] | undefined> {
+/**
+ * Resolve MCP server configs into remote_mcp HarnessTools, injecting stored
+ * OAuth tokens. `callerIdToken` is the signed-in user's raw Cognito ID token
+ * (see fetchCallerIdentity) — attached as `Authorization: Bearer` for any
+ * server routed through the gateway, since `default-gateway`'s CUSTOM_JWT
+ * authorizer only accepts a real Cognito JWT (not the {sub,groups} runtimeUserId
+ * blob), and Cedar reads `cognito:groups` off that same JWT as a principal tag.
+ */
+async function buildTools(
+  mcpServers: McpServerConfig[],
+  callerIdToken: string | null,
+): Promise<HarnessTool[] | undefined> {
   if (!mcpServers.length) return undefined;
 
   // Map URL -> server ID so we can look up stored credentials.
@@ -126,19 +138,28 @@ async function buildTools(mcpServers: McpServerConfig[]): Promise<HarnessTool[] 
     }),
   );
 
-  return resolved.map((s) => ({
-    type: 'remote_mcp',
-    name: s.name,
-    config: {
-      remoteMcp: {
-        // Route through the AgentCore gateway when this server is registered as
-        // a gateway target (Cedar 3c, #279); fall back to the direct URL if the
-        // gateway endpoint isn't configured.
-        url: s.gatewayTargetId && GATEWAY_ENDPOINT ? GATEWAY_ENDPOINT : s.url,
-        ...(s.headers && Object.keys(s.headers).length ? { headers: s.headers } : {}),
+  return resolved.map((s) => {
+    const routeThroughGateway = Boolean(s.gatewayTargetId && GATEWAY_ENDPOINT);
+    return {
+      type: 'remote_mcp',
+      name: s.name,
+      config: {
+        remoteMcp: {
+          // Route through the AgentCore gateway when this server is registered as
+          // a gateway target (Cedar 3c, #279); fall back to the direct URL if the
+          // gateway endpoint isn't configured.
+          url: routeThroughGateway ? GATEWAY_ENDPOINT : s.url,
+          // The gateway's CUSTOM_JWT authorizer requires the caller's own Cognito
+          // JWT as `Authorization: Bearer` (not a per-server OAuth token, which
+          // is only meaningful on the direct-URL connection) — this is also how
+          // Cedar reads `cognito:groups` as a principal tag on the gateway side.
+          headers: routeThroughGateway
+            ? (callerIdToken ? { Authorization: `Bearer ${callerIdToken}` } : undefined)
+            : (s.headers && Object.keys(s.headers).length ? s.headers : undefined),
+        },
       },
-    },
-  }));
+    };
+  });
 }
 
 /** Extract the plain text of an AG-UI message (user turns are simple text). */
@@ -211,10 +232,8 @@ export class HarnessAgent extends AbstractAgent {
         subscriber.next({ type: EventType.RUN_STARTED, threadId: sessionId, runId } as BaseEvent);
 
         try {
-          const [tools, callerIdentity] = await Promise.all([
-            buildTools(config.mcpServers ?? []),
-            fetchCallerIdentity(),
-          ]);
+          const { identity: callerIdentity, idToken: callerIdToken } = await fetchCallerIdentity();
+          const tools = await buildTools(config.mcpServers ?? [], callerIdToken);
 
           const response = await client.send(
             new InvokeHarnessCommand({
