@@ -42,10 +42,13 @@ interface InvokeAgentEvent {
   // none at all in a unit-test invocation.
   identity?: AppSyncIdentityCognito | { sub?: never; groups?: never } | null;
   // AppSync forwards the client's original HTTP headers to a direct Lambda
-  // resolver — for a userPool-authed call this includes the raw Cognito JWT
-  // the client authenticated with (Authorization: <idToken>, no Bearer
-  // prefix). Absent for allow.guest() (IAM-signed) callers, which never hold
-  // a Cognito JWT at all.
+  // resolver. For a userPool-authed call the `Authorization` header holds the
+  // raw Cognito *ID* token — which the gateway's CUSTOM_JWT authorizer rejects
+  // with HTTP 403 `insufficient_scope` (#327), so it's useless for gateway
+  // routing. The gateway needs the ACCESS token, which the Lambda cannot mint;
+  // a client that wants gateway-routed tools must send it explicitly in the
+  // `x-cognito-access-token` header (AppSync forwards all client headers).
+  // Absent for allow.guest() (IAM-signed) callers, which never hold a JWT.
   request?: { headers?: Record<string, string | undefined> };
 }
 
@@ -60,10 +63,15 @@ function callerIdentityFromEvent(event: InvokeAgentEvent): CallerIdentity {
   return { sub, groups: groups ?? [] };
 }
 
-// Only present for userPool-authed callers (see InvokeAgentEvent.request comment) —
-// allow.guest() (IAM-signed) callers have no Cognito JWT to forward to the gateway.
-function callerIdTokenFromEvent(event: InvokeAgentEvent): string | null {
-  return event.request?.headers?.authorization ?? null;
+// The gateway's CUSTOM_JWT authorizer requires the caller's Cognito ACCESS
+// token (the ID token that AppSync forwards in `Authorization` 403s with
+// `insufficient_scope`, #327). The Lambda can't mint one, so it reads an
+// explicit `x-cognito-access-token` header the client must set for gateway
+// routing. Absent for allow.guest() (IAM-signed) callers, and for userPool
+// callers that don't opt in — those get no gateway Authorization header, same
+// as an anonymous gateway call.
+function callerAccessTokenFromEvent(event: InvokeAgentEvent): string | null {
+  return event.request?.headers?.['x-cognito-access-token'] ?? null;
 }
 
 interface InvokeAgentResult {
@@ -130,14 +138,16 @@ async function fetchAgentConfig(agentSlug: string) {
   };
 }
 
-// `callerIdToken` is the caller's raw Cognito JWT (see callerIdTokenFromEvent),
-// present only for userPool-authed callers. Attached as `Authorization: Bearer`
-// on any server routed through the gateway, since default-gateway's CUSTOM_JWT
-// authorizer requires a real Cognito JWT (not the {sub,groups} runtimeUserId
-// blob) and Cedar reads `cognito:groups` off that same JWT as a principal tag.
-// A guest (IAM-signed) caller has no JWT, so gateway-routed servers silently
-// get no Authorization header for them — same as an anonymous gateway call.
-function buildTools(mcpServers: McpServerRecord[], callerIdToken: string | null): HarnessTool[] {
+// `callerAccessToken` is the caller's raw Cognito ACCESS token (see
+// callerAccessTokenFromEvent), present only when a userPool caller opts in via
+// the x-cognito-access-token header. Attached as `Authorization: Bearer` on any
+// server routed through the gateway, since default-gateway's CUSTOM_JWT
+// authorizer requires a real Cognito access token (the ID token 403s with
+// `insufficient_scope`, #327) and Cedar reads `cognito:groups` off that same JWT
+// as a principal tag. A guest (IAM-signed) caller has no token, so gateway-routed
+// servers silently get no Authorization header for them — same as an anonymous
+// gateway call.
+function buildTools(mcpServers: McpServerRecord[], callerAccessToken: string | null): HarnessTool[] {
   return mcpServers.map((s) => {
     const routeThroughGateway = Boolean(s.gatewayTargetId && process.env.AGENTCORE_GATEWAY_ENDPOINT);
     return {
@@ -151,7 +161,7 @@ function buildTools(mcpServers: McpServerRecord[], callerIdToken: string | null)
           // produce an empty url.
           url: routeThroughGateway ? process.env.AGENTCORE_GATEWAY_ENDPOINT : s.url,
           headers: routeThroughGateway
-            ? (callerIdToken ? { Authorization: `Bearer ${callerIdToken}` } : undefined)
+            ? (callerAccessToken ? { Authorization: `Bearer ${callerAccessToken}` } : undefined)
             : (s.headers?.length
               ? headersFromArray(s.headers.filter((h): h is { key: string | null; value: string | null } => h !== null))
               : undefined),
@@ -168,11 +178,11 @@ async function invokeHarness(opts: {
   modelId: string | null;
   mcpServers: McpServerRecord[];
   callerIdentity: CallerIdentity;
-  callerIdToken: string | null;
+  callerAccessToken: string | null;
 }): Promise<string> {
-  const { sessionId, prompt, systemPromptText, modelId, mcpServers, callerIdentity, callerIdToken } = opts;
+  const { sessionId, prompt, systemPromptText, modelId, mcpServers, callerIdentity, callerAccessToken } = opts;
 
-  const tools = buildTools(mcpServers, callerIdToken);
+  const tools = buildTools(mcpServers, callerAccessToken);
 
   const response = await agentCore.send(new InvokeHarnessCommand({
     harnessArn: HARNESS_ARN,
@@ -202,7 +212,7 @@ export const handler = async (event: InvokeAgentEvent): Promise<InvokeAgentResul
   const { agentSlug, prompt, sessionId: inputSessionId } = event.arguments;
   const sessionId = inputSessionId ?? randomUUID();
   const callerIdentity = callerIdentityFromEvent(event);
-  const callerIdToken = callerIdTokenFromEvent(event);
+  const callerAccessToken = callerAccessTokenFromEvent(event);
 
   const agentConfig = await fetchAgentConfig(agentSlug);
   if (!agentConfig) {
@@ -214,7 +224,7 @@ export const handler = async (event: InvokeAgentEvent): Promise<InvokeAgentResul
 
   const response = await invokeHarness({
     callerIdentity,
-    callerIdToken,
+    callerAccessToken,
     sessionId,
     prompt,
     systemPromptText: agentConfig.systemPromptText,

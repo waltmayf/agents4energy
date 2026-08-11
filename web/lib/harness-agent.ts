@@ -66,20 +66,26 @@ export function makeClient(): BedrockAgentCoreClient {
 
 /**
  * Read the signed-in caller's `sub` + `cognito:groups` off the Cognito ID
- * token (see caller-identity.ts), plus the raw ID token itself. The harness
+ * token (see caller-identity.ts), plus the raw ACCESS token. The harness
  * authorizes InvokeHarness via SigV4/Identity Pool credentials, not this JWT
  * — `identity` is forwarded as a trusted invoke argument (never used for
- * authorization by the browser itself), while `idToken` is the one credential
- * the *gateway's* CUSTOM_JWT authorizer actually accepts (see buildTools).
+ * authorization by the browser itself), while `accessToken` is the credential
+ * the *gateway's* CUSTOM_JWT authorizer requires (see buildTools).
+ *
+ * The gateway authorizer needs the ACCESS token, not the ID token: the ID
+ * token carries `token_use: "id"` with no `scope`, so the authorizer rejects
+ * it with HTTP 403 `insufficient_scope` before Cedar even runs (#327). The
+ * access token carries `scope: "aws.cognito.signin.user.admin"`, and both
+ * tokens carry `cognito:groups`, so Cedar's group matching still works.
  */
-async function fetchCallerIdentity(): Promise<{ identity: CallerIdentity; idToken: string | null }> {
+async function fetchCallerIdentity(): Promise<{ identity: CallerIdentity; accessToken: string | null }> {
   const session = await fetchAuthSession();
   const payload = session.tokens?.idToken?.payload;
   const sub = typeof payload?.sub === 'string' ? payload.sub : null;
   const groupsClaim = payload?.['cognito:groups'];
   const groups = Array.isArray(groupsClaim) ? groupsClaim.filter((g): g is string => typeof g === 'string') : [];
-  const idToken = session.tokens?.idToken?.toString() ?? null;
-  return { identity: { sub, groups }, idToken };
+  const accessToken = session.tokens?.accessToken?.toString() ?? null;
+  return { identity: { sub, groups }, accessToken };
 }
 
 export interface McpServerConfig {
@@ -103,15 +109,16 @@ export interface HarnessAgentConfig {
 
 /**
  * Resolve MCP server configs into remote_mcp HarnessTools, injecting stored
- * OAuth tokens. `callerIdToken` is the signed-in user's raw Cognito ID token
- * (see fetchCallerIdentity) — attached as `Authorization: Bearer` for any
+ * OAuth tokens. `callerAccessToken` is the signed-in user's raw Cognito ACCESS
+ * token (see fetchCallerIdentity) — attached as `Authorization: Bearer` for any
  * server routed through the gateway, since `default-gateway`'s CUSTOM_JWT
- * authorizer only accepts a real Cognito JWT (not the {sub,groups} runtimeUserId
- * blob), and Cedar reads `cognito:groups` off that same JWT as a principal tag.
+ * authorizer requires a real Cognito access token (the ID token 403s with
+ * `insufficient_scope`, #327), and Cedar reads `cognito:groups` off that same
+ * JWT as a principal tag.
  */
 async function buildTools(
   mcpServers: McpServerConfig[],
-  callerIdToken: string | null,
+  callerAccessToken: string | null,
 ): Promise<HarnessTool[] | undefined> {
   if (!mcpServers.length) return undefined;
 
@@ -150,11 +157,12 @@ async function buildTools(
           // gateway endpoint isn't configured.
           url: routeThroughGateway ? GATEWAY_ENDPOINT : s.url,
           // The gateway's CUSTOM_JWT authorizer requires the caller's own Cognito
-          // JWT as `Authorization: Bearer` (not a per-server OAuth token, which
-          // is only meaningful on the direct-URL connection) — this is also how
-          // Cedar reads `cognito:groups` as a principal tag on the gateway side.
+          // ACCESS token as `Authorization: Bearer` (the ID token 403s with
+          // `insufficient_scope`, #327; a per-server OAuth token is only
+          // meaningful on the direct-URL connection) — this is also how Cedar
+          // reads `cognito:groups` as a principal tag on the gateway side.
           headers: routeThroughGateway
-            ? (callerIdToken ? { Authorization: `Bearer ${callerIdToken}` } : undefined)
+            ? (callerAccessToken ? { Authorization: `Bearer ${callerAccessToken}` } : undefined)
             : (s.headers && Object.keys(s.headers).length ? s.headers : undefined),
         },
       },
@@ -232,8 +240,8 @@ export class HarnessAgent extends AbstractAgent {
         subscriber.next({ type: EventType.RUN_STARTED, threadId: sessionId, runId } as BaseEvent);
 
         try {
-          const { identity: callerIdentity, idToken: callerIdToken } = await fetchCallerIdentity();
-          const tools = await buildTools(config.mcpServers ?? [], callerIdToken);
+          const { identity: callerIdentity, accessToken: callerAccessToken } = await fetchCallerIdentity();
+          const tools = await buildTools(config.mcpServers ?? [], callerAccessToken);
 
           const response = await client.send(
             new InvokeHarnessCommand({
