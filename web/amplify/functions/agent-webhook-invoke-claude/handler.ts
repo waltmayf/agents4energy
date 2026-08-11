@@ -1,13 +1,61 @@
 import { BedrockAgentCoreClient, InvokeAgentRuntimeCommand } from '@aws-sdk/client-bedrock-agentcore';
+import { CognitoIdentityProviderClient, InitiateAuthCommand } from '@aws-sdk/client-cognito-identity-provider';
+import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
 import { appendLog } from '../_shared/liveTail';
 
 const REGION = process.env.AWS_REGION ?? 'us-east-1';
 const CLAUDE_CODE_RUNTIME_ARN = process.env.CLAUDE_CODE_RUNTIME_ARN ?? '';
+const SERVICE_WEBHOOK_USER_POOL_CLIENT_ID = process.env.SERVICE_WEBHOOK_USER_POOL_CLIENT_ID ?? '';
+const SERVICE_WEBHOOK_EMAIL_SSM_PATH = process.env.SERVICE_WEBHOOK_EMAIL_SSM_PATH ?? '';
+const SERVICE_WEBHOOK_PASSWORD_SSM_PATH = process.env.SERVICE_WEBHOOK_PASSWORD_SSM_PATH ?? '';
 
 // The Claude Code runtime authorizes with AWS_IAM (the default when a runtime
 // has no CUSTOM_JWT authorizer), so the SDK signs InvokeAgentRuntime with this
 // Lambda's execution-role credentials.
 const agentCore = new BedrockAgentCoreClient({ region: REGION });
+const cognito = new CognitoIdentityProviderClient({ region: REGION });
+const ssm = new SSMClient({ region: REGION });
+
+/**
+ * Mints a fresh Cognito access token for the dedicated `service-webhook`
+ * machine user (#340, slice 3/3 of the auth-unify epic #337), so this run's
+ * gateway-routed MCP tools are authorized by Cedar against that group
+ * instead of bypassing it (same relayed-token design as #339's browser-
+ * invoked ClaudeCode/AguiAgent paths — see gateway-mcp.js).
+ *
+ * Best-effort: if anything here fails (env not configured on this branch,
+ * the machine user's credentials rotated out from under us, a transient
+ * Cognito error, ...) the run proceeds WITHOUT a relayed token — same as a
+ * browser caller with no signed-in session — rather than failing the whole
+ * webhook run over a tool-access concern.
+ */
+async function mintServiceWebhookAccessToken(log: (msg: string) => void): Promise<string | undefined> {
+  if (!SERVICE_WEBHOOK_USER_POOL_CLIENT_ID || !SERVICE_WEBHOOK_EMAIL_SSM_PATH || !SERVICE_WEBHOOK_PASSWORD_SSM_PATH) {
+    log('service-webhook machine identity is not configured on this branch; skipping gateway MCP tools.');
+    return undefined;
+  }
+  try {
+    const [{ Parameter: emailParam }, { Parameter: passwordParam }] = await Promise.all([
+      ssm.send(new GetParameterCommand({ Name: SERVICE_WEBHOOK_EMAIL_SSM_PATH })),
+      ssm.send(new GetParameterCommand({ Name: SERVICE_WEBHOOK_PASSWORD_SSM_PATH, WithDecryption: true })),
+    ]);
+    const email = emailParam?.Value;
+    const password = passwordParam?.Value;
+    if (!email || !password) throw new Error('service-webhook SSM parameters are missing a value');
+
+    const auth = await cognito.send(new InitiateAuthCommand({
+      AuthFlow: 'USER_PASSWORD_AUTH',
+      ClientId: SERVICE_WEBHOOK_USER_POOL_CLIENT_ID,
+      AuthParameters: { USERNAME: email, PASSWORD: password },
+    }));
+    const accessToken = auth.AuthenticationResult?.AccessToken;
+    if (!accessToken) throw new Error('InitiateAuth did not return an AccessToken');
+    return accessToken;
+  } catch (err) {
+    log(`failed to mint a service-webhook access token; continuing without gateway MCP tools: ${err instanceof Error ? err.message : String(err)}`);
+    return undefined;
+  }
+}
 
 // Mirrors the git-auth step's input — the state machine passes the same fields
 // (plus the token minted by PostInitialComment) to whichever agent branch runs.
@@ -52,6 +100,10 @@ export const handler = async (input: InvokeClaudeInput): Promise<{ started: true
 
   await log(logGroupName, logStreamName, `[${runId}] starting Claude Code runtime (repo=${repo ?? '(none)'} issue=${issueNumber ?? '(none)'})`);
 
+  const cognitoAccessToken = await mintServiceWebhookAccessToken((msg) => {
+    void log(logGroupName, logStreamName, `[${runId}] ${msg}`);
+  });
+
   // The runtime's server.js reads these fields (see agent/default/app/ClaudeCode/server.js).
   // When `taskToken` is present the runtime runs the job in the background and
   // resumes this paused task itself; the HTTP ack below is just "job accepted".
@@ -67,6 +119,12 @@ export const handler = async (input: InvokeClaudeInput): Promise<{ started: true
     // AGENTS.md-derived system prompt (fetched by PostInitialComment), passed
     // through so the runtime can append it to Claude Code's system prompt.
     systemAppend: agentsSystemPrompt ?? undefined,
+    // service-webhook machine identity's access token (#340), relayed to the
+    // gateway exactly like a browser caller's token (#339) — see
+    // gateway-mcp.js. Undefined (omitted) when minting failed or this branch
+    // has no service-webhook identity configured; the runtime simply skips
+    // gateway MCP tools in that case, same as before this feature.
+    cognitoAccessToken,
   };
 
   const response = await agentCore.send(new InvokeAgentRuntimeCommand({
