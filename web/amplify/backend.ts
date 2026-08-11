@@ -188,12 +188,21 @@ const agentStack = backend.createStack('agent');
 
 // Cognito discovery URL: https://cognito-idp.{region}.amazonaws.com/{userPoolId}
 const userPoolId = backend.auth.resources.userPool.userPoolId;
+// Cognito discovery URL (control-plane) - kept for reference
 const cognitoDiscoveryUrl = Fn.join('', [
   'https://cognito-idp.',
   Stack.of(backend.auth.resources.userPool).region,
   '.amazonaws.com/',
   userPoolId,
   '/.well-known/openid-configuration',
+]);
+// Hosted UI discovery URL (used for OAuth flow)
+const cognitoHostedDiscoveryUrl = Fn.join('', [
+  'https://',
+  sanitizeForResourceName(backend.stack.stackName.toLowerCase()).slice(0, 63),
+  '.auth.',
+  Stack.of(backend.auth.resources.userPool).region,
+  '.amazoncognito.com/.well-known/openid-configuration',
 ]);
 
 // MyHarness authorizes with AWS_IAM (SigV4), not CUSTOM_JWT: omitting
@@ -253,7 +262,7 @@ const agentCoreGatewaysWithUniqueNames = projectSpec.agentCoreGateways?.length
       authorizerType: 'CUSTOM_JWT',
       authorizerConfiguration: {
         customJwtAuthorizer: {
-          discoveryUrl: cognitoDiscoveryUrl,
+          discoveryUrl: cognitoHostedDiscoveryUrl,
           allowedClients: [backend.auth.resources.userPoolClient.userPoolClientId],
         },
       },
