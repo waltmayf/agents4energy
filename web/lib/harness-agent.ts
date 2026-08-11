@@ -30,7 +30,7 @@ import {
 } from './harness-stream-to-agui';
 import { buildRunErrorMessageEvents } from './harness-run-error';
 import { friendlyChatHarnessError } from './harness-error-message';
-import { encodeRuntimeUserId, type CallerIdentity } from './caller-identity';
+import { encodeRuntimeUserId, SHARED_ACTOR_ID, type CallerIdentity } from './caller-identity';
 
 const custom = (outputs as {
   custom?: { agentcore_harness_arn?: string; agentcore_region?: string; agentcore_gateway_endpoint?: string };
@@ -39,9 +39,11 @@ export const HARNESS_ARN = custom?.agentcore_harness_arn as string;
 export const DEPLOYMENT_REGION = custom?.agentcore_region ?? 'us-east-1';
 const GATEWAY_ENDPOINT = custom?.agentcore_gateway_endpoint;
 
-// The harness SDK stores memory under the agent name ("default") as the actorId,
-// not the Cognito user sub. Matches list-session-messages/handler.ts.
-const ACTOR_ID = 'default';
+// Per-user memory scoping (issue #256, Option A). Browser harness chats scope
+// AgentCore memory to the signed-in user's Cognito `sub` (see run()'s
+// InvokeHarnessCommand.actorId below); loadHistory then dual-reads the caller's
+// own `sub` namespace AND the shared SHARED_ACTOR_ID namespace so webhook-
+// initiated runs (which have no browser `sub`) still appear in the transcript.
 
 // AppSync data client: maps MCP server URLs -> IDs when injecting stored OAuth
 // credentials, and loads session history for connect().
@@ -252,6 +254,11 @@ export class HarnessAgent extends AbstractAgent {
               model: config.modelId ? { bedrockModelConfig: { modelId: config.modelId } } : undefined,
               tools,
               runtimeUserId: encodeRuntimeUserId(callerIdentity),
+              // Scope all memory ops (events + SUMMARIZATION) for this chat to the
+              // signed-in user (issue #256). Falls back to the shared actor when
+              // the sub is somehow absent, so an unauthenticated edge never writes
+              // to an unreadable namespace. loadHistory dual-reads both.
+              actorId: callerIdentity.sub ?? SHARED_ACTOR_ID,
             }),
             { abortSignal: abort.signal },
           );
@@ -427,21 +434,32 @@ export class HarnessAgent extends AbstractAgent {
  * once, in converse-to-agui.ts.
  */
 export async function loadHistory(sessionId: string): Promise<Message[]> {
-  const all: StoredEvent[] = [];
-  let nextToken: string | null | undefined = null;
+  // Dual-read (issue #256, Option A): the signed-in user's own `sub` namespace
+  // (where browser harness chats now persist) AND the shared SHARED_ACTOR_ID
+  // namespace (where webhook/ClaudeCode/AguiAgent runs persist), so a
+  // GitHub-dispatched run still shows up in the chat transcript. The two actors'
+  // event sets are disjoint by construction; the sort+dedupe below merges them.
+  const { identity } = await fetchCallerIdentity();
+  const actorIds = identity.sub && identity.sub !== SHARED_ACTOR_ID
+    ? [identity.sub, SHARED_ACTOR_ID]
+    : [SHARED_ACTOR_ID];
 
-  do {
-    const result = await dataClient.queries.listSessionMessages({
-      sessionId,
-      actorId: ACTOR_ID,
-      ...(nextToken ? { nextToken } : {}),
-    });
-    if (result.errors?.length) break;
-    for (const e of result.data?.events ?? []) {
-      if (e) all.push(e as StoredEvent);
-    }
-    nextToken = result.data?.nextToken;
-  } while (nextToken);
+  const all: StoredEvent[] = [];
+  for (const actorId of actorIds) {
+    let nextToken: string | null | undefined = null;
+    do {
+      const result = await dataClient.queries.listSessionMessages({
+        sessionId,
+        actorId,
+        ...(nextToken ? { nextToken } : {}),
+      });
+      if (result.errors?.length) break;
+      for (const e of result.data?.events ?? []) {
+        if (e) all.push(e as StoredEvent);
+      }
+      nextToken = result.data?.nextToken;
+    } while (nextToken);
+  }
 
   // Events may be returned in descending order per page. Sort them chronologically
   // (oldest first) before converting to AG-UI messages to ensure correct display order.

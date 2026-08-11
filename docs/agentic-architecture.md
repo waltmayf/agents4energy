@@ -118,6 +118,17 @@ The harness returns a binary AWS event stream (Smithy protocol). The SDK client 
 
 The harness reads relevant memory automatically before each inference call and writes new events after each turn. Memory events expire after 30 days.
 
+### Actor scoping — per-user memory with cross-surface visibility (issue #256)
+
+The `actorId` in every namespace above determines *whose* memory a read or write touches. Two actor scopes coexist:
+
+- **Browser harness chats scope to the signed-in user's Cognito `sub`.** Both invoke paths — the browser (`web/lib/harness-agent.ts`) and the `invoke-agent` Lambda — pass `InvokeHarnessCommand.actorId = <sub>`, which overrides the actor for *all* memory ops (events, `SEMANTIC`, `USER_PREFERENCE`, and `SUMMARIZATION`). So one user's chats, facts, and summaries are isolated from another's.
+- **Webhook-initiated runs keep a shared actor (`"default"`).** A `@agentcore-claude` run (ClaudeCode/AguiAgent runtimes) has no browser `sub` to attribute to, so it writes under the shared `SHARED_ACTOR_ID` constant (`web/lib/caller-identity.ts`; the two runtime writers hard-code the same string since they're separate Docker artifacts).
+
+To keep GitHub-dispatched runs visible in the chat UI, `HarnessAgent.loadHistory` **dual-reads**: it queries `list-session-messages` for both the caller's own `sub` namespace *and* the shared `"default"` namespace, then merges (the two event sets are disjoint by construction; the existing sort+dedupe handles it). Trade-off (Option A of #256): the shared namespace is readable by any signed-in user — acceptable because webhook runs aren't attributable to a browser user anyway. Old sessions written under `"default"` before this change remain readable through the shared read-leg.
+
+`list-session-messages` **authorizes the requested `actorId` server-side** against the verified Cognito `sub` on `event.identity` (`isActorAuthorized`): a caller may read only their own `sub` namespace or the shared one. This closes a prior hole where `actorId` was a caller-supplied argument, letting any authenticated user read any actor's memory by passing an arbitrary value.
+
 ### Viewing past sessions
 
 The Amplify Lambda `list-session-messages` queries `ListEvents` on the memory ARN for a given session ID and parses each stored harness payload **once** into two fields per event: `text` (flattened plain text, for simple consumers) and `contentJson` (the full Bedrock Converse `ContentBlock[]` as a JSON string — text, `toolUse`, `toolResult`, `reasoningContent`).
@@ -130,7 +141,7 @@ The chat UI restores history through the AG-UI agent, not a bespoke render path.
 
 `converse-to-agui.ts` also splits inline `<reasoning>…</reasoning>` tags out of assistant text blocks into their own `reasoning` messages (`splitInlineReasoning()`) — some models (e.g. `openai.gpt-oss-120b`) emit chain-of-thought this way instead of as a `reasoningContent` block, and without this split it renders as visible prose in the assistant bubble.
 
-**The Claude Code AgentCore Runtime writes to this same memory.** `@agentcore-claude` runs aren't a harness invocation, but `agent/default/app/ClaudeCode/server.js` calls `CreateEvent` on `MyHarnessMemory` itself (same actor id, same Converse-shaped payload) as the CLI streams its turns, so those runs restore through this exact path too — see [`docs/claude-code-agentcore-runtime.md`](./claude-code-agentcore-runtime.md#memory-persistence-agentcore-claude-turns-in-the-chat-ui) (issue #186).
+**The Claude Code AgentCore Runtime writes to this same memory.** `@agentcore-claude` runs aren't a harness invocation, but `agent/default/app/ClaudeCode/server.js` calls `CreateEvent` on `MyHarnessMemory` itself (under the shared `"default"` actor, same Converse-shaped payload) as the CLI streams its turns, so those runs restore through this exact path too — and the browser's dual-read (see "Actor scoping" above) is what surfaces them alongside the viewer's own per-`sub` chats. See [`docs/claude-code-agentcore-runtime.md`](./claude-code-agentcore-runtime.md#memory-persistence-agentcore-claude-turns-in-the-chat-ui) (issue #186).
 
 **A `@agentcore-claude` run can hand off to a monitor loop instead of finishing.** Ending a turn with a fenced ```monitor``` block pauses the webhook Step Function in a `Wait → RunMonitorCheck → Choice` loop (same `MyHarnessMemory` session, reclaimed microVM between checks) that re-invokes the runtime once the check passes. See [`docs/monitor-loop.md`](./monitor-loop.md).
 

@@ -13,7 +13,7 @@ import {
   InvokeHarnessCommand,
   type HarnessTool,
 } from '@aws-sdk/client-bedrock-agentcore';
-import { encodeRuntimeUserId, type CallerIdentity } from '../../../lib/caller-identity';
+import { encodeRuntimeUserId, SHARED_ACTOR_ID, type CallerIdentity } from '../../../lib/caller-identity';
 
 const HARNESS_ARN = process.env.HARNESS_ARN!;
 const REGION = process.env.AWS_REGION ?? 'us-east-1';
@@ -192,6 +192,9 @@ async function invokeHarness(opts: {
     model: modelId ? { bedrockModelConfig: { modelId } } : undefined,
     tools: tools.length ? tools : undefined,
     runtimeUserId: encodeRuntimeUserId(callerIdentity),
+    // Scope memory to the verified caller's sub (issue #256); guest/IAM callers
+    // with no sub fall back to the shared actor, which the chat UI dual-reads.
+    actorId: callerIdentity.sub ?? SHARED_ACTOR_ID,
   }));
 
   const chunks: string[] = [];
