@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { generateClient } from 'aws-amplify/data';
 import type { Schema } from '@/amplify/data/resource';
+import { DEFAULT_SESSION_NAME } from '@/lib/session-title';
 
 const amplifyClient = generateClient<Schema>({ authMode: 'userPool' });
 
@@ -36,13 +37,18 @@ export function useChatSession(): ChatSessionResult {
     router.replace(`?${params.toString()}`);
   }
 
+  // Keyed on `sessionIdParam` (not mount) so client-side navigation between
+  // sessions — the history sidebar's links and its "New chat" button, both of
+  // which change the URL without remounting the page — re-bootstraps correctly:
+  // an explicit id resumes that session; a bare /chat creates a fresh one.
   useEffect(() => {
     let cancelled = false;
+    setReady(false);
 
     async function bootstrap() {
       if (!sessionIdParam) {
         const { data: session, errors } = await amplifyClient.models.ChatSession.create({
-          name: 'New Chat',
+          name: DEFAULT_SESSION_NAME,
           agentId: agentIdParam ?? undefined,
         });
         if (errors || !session) {
@@ -57,6 +63,8 @@ export function useChatSession(): ChatSessionResult {
         router.replace(`?${params.toString()}`);
         setReady(true);
       } else {
+        sessionIdRef.current = sessionIdParam;
+        setSessionId(sessionIdParam);
         // Fetch existing session to get its agentId if not in URL
         if (!agentIdParam) {
           const { data: session } = await amplifyClient.models.ChatSession.get({ id: sessionIdParam });
@@ -64,7 +72,7 @@ export function useChatSession(): ChatSessionResult {
             setAgentIdState(session.agentId);
           }
         }
-        setReady(true);
+        if (!cancelled) setReady(true);
       }
     }
 
@@ -73,7 +81,7 @@ export function useChatSession(): ChatSessionResult {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [sessionIdParam]);
 
   return { ready, sessionId, sessionIdRef, agentId, setAgentId };
 }

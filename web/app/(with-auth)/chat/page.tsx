@@ -30,6 +30,8 @@ import { ToolCallRenderer } from './tool-call-renderer';
 import { UserMessageMarkdown } from './user-message-renderer';
 import { AwaitingInputBanner } from './awaiting-input-banner';
 import { ChatComposerInput } from './chat-composer-input';
+import { SessionSidebar } from './session-sidebar';
+import { useAutoNameSession } from './use-auto-name-session';
 
 /**
  * Shows the signed-in user's Cognito groups (issue #246) — the identity
@@ -237,15 +239,18 @@ function ChatView({
   // same session) render live, without a page reload. See issue #63.
   useSessionMessagePolling(activeAgent);
 
+  // Auto-name the session from its first user message (issue #352).
+  useAutoNameSession(activeAgent, sessionId);
+
   return (
     <CopilotKitProvider selfManagedAgents={agentsMap}>
       {/* Registers a wildcard tool-call renderer so tool activity (name/args/result)
           renders as a collapsible card instead of an empty bubble. Side-effect only. */}
       <ToolCallRenderer />
-      {/* h-dvh anchors this to the viewport directly — no ancestor layout sets an
-          explicit height, so `h-full` would resolve to nothing and let the page
-          grow with the message list instead of clipping to a scrollable region. */}
-      <div className="flex flex-col h-dvh min-h-0">
+      {/* The page shell (Page) now sets an explicit `h-dvh` on the flex row that
+          wraps the sidebar + this view, so `h-full` resolves here and clips the
+          message list to a scrollable region instead of growing the page. */}
+      <div className="flex flex-col h-full min-h-0">
         <AwaitingInputBanner agent={activeAgent} />
         <div className="flex-1 min-h-0">
           <CopilotChat
@@ -313,16 +318,23 @@ const Chat = function Page() {
   const agents = agentsState.status === 'ready' ? agentsState.agents : [];
   const selectedAgent = agents.find((a) => a.id === agentId);
 
-  if (!ready || !sessionId) return null;
-
   return (
-    <ChatView
-      sessionId={sessionId}
-      selectedAgent={selectedAgent}
-      agents={agents}
-      agentId={agentId}
-      onAgentChange={setAgentId}
-    />
+    <div className="flex h-dvh min-h-0">
+      {/* Chat history sidebar (issue #351) — lists/reopens/renames past sessions. */}
+      <SessionSidebar activeSessionId={sessionId} />
+      <div className="min-w-0 flex-1">
+        {ready && sessionId && (
+          <ChatView
+            key={sessionId}
+            sessionId={sessionId}
+            selectedAgent={selectedAgent}
+            agents={agents}
+            agentId={agentId}
+            onAgentChange={setAgentId}
+          />
+        )}
+      </div>
+    </div>
   );
 };
 
