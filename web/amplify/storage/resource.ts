@@ -11,4 +11,7 @@ import { defineStorage } from '@aws-amplify/backend';
 // access to this bucket.
 export const agentWorkspace = defineStorage({
   name: 'agentWorkspace',
+  access: (allow) => ({
+    'files/*': [allow.authenticated.to(['read'])],
+  }),
 });
