@@ -171,6 +171,8 @@ MCP servers can also be registered as targets on the AgentCore Gateway. Register
 
 Registration happens via the `registerMcpTarget` GraphQL mutation → Amplify Lambda → `CreateGatewayTarget` API. The returned `gatewayTargetId` is saved on the `McpServer` record.
 
+**Tool calls to a registered server route through the gateway, under Cedar.** Once a server has a `gatewayTargetId`, both invoke paths (`web/lib/harness-agent.ts` and `web/amplify/functions/invoke-agent/handler.ts`) send its `tools/call` to the gateway `/mcp` endpoint — not the direct URL — attaching the caller's Cognito **access token** as `Authorization: Bearer` (the ID token 403s at the `CUSTOM_JWT` authorizer with `insufficient_scope`, #327). The gateway's Cedar policy engine then authoritatively **permits or denies each call by the signed-in user's `cognito:groups`**, running in `ENFORCE` mode. This supersedes the older "harness bypasses the gateway" behavior. See [`docs/tool-governance.md`](./tool-governance.md) for the identity/permission model and a two-user demo.
+
 ### Validating connectivity
 
 Before saving an MCP server, the frontend can call the `listMcpTools` GraphQL query. This Lambda probes the server using the same `url` + `headers` that the harness would use (MCP `initialize` → `tools/list` sequence). If the query succeeds, the harness invocation will too.
