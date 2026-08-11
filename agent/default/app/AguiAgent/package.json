@@ -13,6 +13,7 @@
     "@ag-ui/core": "^0.0.57",
     "@ag-ui/encoder": "^0.0.57",
     "@aws-sdk/client-bedrock-agentcore": "^3.1065.0",
+    "@modelcontextprotocol/sdk": "^1.25.2",
     "@strands-agents/sdk": "^1.11.2",
     "cors": "^2.8.5",
     "express": "^5.1.0"

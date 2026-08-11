@@ -18,7 +18,7 @@
 import express from 'express';
 import cors from 'cors';
 import { randomUUID } from 'node:crypto';
-import { Agent } from '@strands-agents/sdk';
+import { Agent, McpClient } from '@strands-agents/sdk';
 import { StrandsAgent } from '@ag-ui/aws-strands';
 import { EventEncoder } from '@ag-ui/encoder';
 import { RunAgentInputSchema, type BaseEvent, EventType } from '@ag-ui/core';
@@ -34,6 +34,19 @@ const MODEL_ID = process.env.BEDROCK_MODEL_ID || 'us.anthropic.claude-sonnet-5';
 const SYSTEM_PROMPT = process.env.AGUI_SYSTEM_PROMPT
   || 'You are a helpful assistant embedded in the agents4energy platform. Be concise and accurate.';
 
+// AgentCore gateway (issue #339, slice 2/3 of the auth-unify epic #337). Every
+// MCP tool call from this runtime must go through the same CUSTOM_JWT +
+// Cedar chokepoint the browser HarnessAgent path uses (buildTools in
+// web/lib/harness-agent.ts, #338) — never a container-local MCP connection.
+// This runtime fabricates no `{sub,groups}` blob: the invoking caller relays
+// their real Cognito ACCESS token (the gateway 403s an ID token with
+// insufficient_scope, #327) via `RunAgentInput.forwardedProps.cognitoAccessToken`
+// — the AG-UI-native carrier for per-request extras that don't belong on the
+// message list — and it's forwarded verbatim as `Authorization: Bearer` so
+// Cedar reads `cognito:groups` off that same JWT as a principal tag,
+// identically to the harness path.
+const GATEWAY_ENDPOINT = process.env.AGENTCORE_GATEWAY_ENDPOINT || '';
+
 // AgentCore Memory (MyHarnessMemory, shared with MyHarness and ClaudeCode —
 // see agent/default/app/ClaudeCode/memory.js for the sibling implementation).
 // Both env vars are set by backend.ts (agentCoreApp.addRuntimeEnvironmentVariable);
@@ -43,18 +56,51 @@ const MEMORY_ID = process.env.AGENTCORE_MEMORY_ID || '';
 const MEMORY_REGION = process.env.AGENTCORE_MEMORY_REGION || process.env.AWS_REGION;
 const memoryClient = MEMORY_ID ? new BedrockAgentCoreClient({ region: MEMORY_REGION }) : null;
 
-// One Strands agent template, cloned per-thread by StrandsAgent (see
-// @ag-ui/aws-strands) so each AG-UI threadId gets its own conversation state.
-const strandsAgent = new Agent({
-  model: MODEL_ID,
-  systemPrompt: SYSTEM_PROMPT,
-});
+/**
+ * Builds a fresh Strands agent (+ AG-UI adapter) for a single `/invocations`
+ * request. Built per-request rather than once at module load, because the
+ * gateway MCP tool's Bearer token is the *caller's* Cognito access token —
+ * baking it into a long-lived, cross-request singleton (or a per-thread
+ * cache keyed only on the first request, per StrandsAgent's own caching
+ * caveat) would either leak one user's token to another's thread or go
+ * stale. This mirrors buildTools() in web/lib/harness-agent.ts, which
+ * likewise rebuilds gateway-routed tools fresh on every harness invocation
+ * rather than caching them.
+ *
+ * Returns the MCP client too (when one was created) so the caller can
+ * disconnect it once the run finishes.
+ */
+function buildAguiAgent(cognitoAccessToken: string, log: (...args: unknown[]) => void): {
+  strandsAgent: StrandsAgent;
+  mcpClient: McpClient | null;
+} {
+  let mcpClient: McpClient | null = null;
+  if (!GATEWAY_ENDPOINT) {
+    log('AGENTCORE_GATEWAY_ENDPOINT is not configured; skipping gateway MCP tools.');
+  } else if (!cognitoAccessToken) {
+    log('no caller Cognito access token was relayed (forwardedProps.cognitoAccessToken); skipping gateway MCP tools.');
+  } else {
+    mcpClient = new McpClient({
+      url: GATEWAY_ENDPOINT,
+      headers: { Authorization: `Bearer ${cognitoAccessToken}` },
+    });
+  }
 
-const aguiAgent = new StrandsAgent({
-  agent: strandsAgent,
-  name: 'agui_agent',
-  description: 'AG-UI-native agent for agents4energy',
-});
+  const strandsAgent = new Agent({
+    model: MODEL_ID,
+    systemPrompt: SYSTEM_PROMPT,
+    tools: mcpClient ? [mcpClient] : [],
+  });
+
+  return {
+    strandsAgent: new StrandsAgent({
+      agent: strandsAgent,
+      name: 'agui_agent',
+      description: 'AG-UI-native agent for agents4energy',
+    }),
+    mcpClient,
+  };
+}
 
 const app = express();
 app.use(cors({ origin: '*' }));
@@ -101,6 +147,14 @@ app.post('/invocations', async (req, res) => {
 
   log(`threadId=${input.threadId} runId=${input.runId} sessionId=${sessionId}`);
 
+  // See buildAguiAgent's docstring for why this token is relayed per-request
+  // rather than read from a module-level/per-thread cache.
+  const forwardedProps = input.forwardedProps as Record<string, unknown> | undefined;
+  const cognitoAccessToken = typeof forwardedProps?.cognitoAccessToken === 'string'
+    ? forwardedProps.cognitoAccessToken
+    : '';
+  const { strandsAgent: requestAgent, mcpClient } = buildAguiAgent(cognitoAccessToken, log);
+
   const encoder = new EventEncoder({ accept: req.get('accept') ?? undefined });
   res.setHeader('Content-Type', encoder.getContentType());
   res.setHeader('Cache-Control', 'no-cache');
@@ -126,7 +180,7 @@ app.post('/invocations', async (req, res) => {
   req.once('aborted', stop);
 
   try {
-    for await (const event of aguiAgent.run(input)) {
+    for await (const event of requestAgent.run(input)) {
       if (stopped || res.writableEnded || res.destroyed) break;
       accumulator.push(event);
       write(event);
@@ -145,6 +199,13 @@ app.post('/invocations', async (req, res) => {
     req.removeListener('aborted', stop);
     if (!res.writableEnded) res.end();
     await persistAssistantTurn(memoryClient, { memoryId: MEMORY_ID, sessionId, accumulator, log });
+    if (mcpClient) {
+      try {
+        await mcpClient.disconnect();
+      } catch (err) {
+        log('error disconnecting gateway MCP client:', err instanceof Error ? err.message : String(err));
+      }
+    }
   }
 });
 

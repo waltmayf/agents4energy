@@ -10,18 +10,23 @@
 //   3. Point `@playwright/mcp` at that CDP endpoint (`--cdp-endpoint`/`--cdp-header`)
 //      instead of launching its own local Chromium — it becomes a thin MCP
 //      wrapper over the already-running, AWS-managed remote browser.
-//   4. Write a `.mcp.json` the `claude` CLI loads via `--mcp-config`, so the
-//      model gets navigate/click/type/screenshot/etc. tools through the
-//      standard MCP tool-call surface.
+//   4. Return the `.mcp.json` server entry the `claude` CLI loads via
+//      `--mcp-config` (see mcp-config.js, which merges it with the gateway
+//      MCP entry from gateway-mcp.js into one file), so the model gets
+//      navigate/click/type/screenshot/etc. tools through the standard MCP
+//      tool-call surface.
 //
 // One browser session per Claude Code job (not shared across concurrent runs
 // on the same microVM) — sessions are cheap to start/stop and isolating them
 // avoids one job's navigation clobbering another's.
+//
+// This is a direct AWS-managed-service connection (SigV4, not a registered
+// gateway target) — distinct from the Cedar-gated MCP tools routed through
+// the AgentCore gateway (see gateway-mcp.js, issue #339).
 
 import { Browser } from 'bedrock-agentcore/browser';
-import { writeFile, rm } from 'node:fs/promises';
-import { join, dirname } from 'node:path';
 import { createRequire } from 'node:module';
+import { join, dirname } from 'node:path';
 
 const AWS_REGION = process.env.AWS_REGION || 'us-east-1';
 
@@ -36,9 +41,10 @@ const AWS_REGION = process.env.AWS_REGION || 'us-east-1';
 const require = createRequire(import.meta.url);
 const PLAYWRIGHT_MCP_CLI = join(dirname(require.resolve('@playwright/mcp/package.json')), 'cli.js');
 
-// Starts a fresh AgentCore Browser session and returns everything needed to
-// tear it down later plus the `.mcp.json` config Claude Code should load.
-export async function startBrowserMcp({ workDir, log }) {
+// Starts a fresh AgentCore Browser session and returns its `.mcp.json` server
+// entry (merged into the combined MCP config by mcp-config.js) plus a `stop()`
+// to tear the session down later.
+export async function startBrowserMcp({ log }) {
   const browser = new Browser({ region: AWS_REGION });
   // Claude Code jobs can run for hours (see server.js's callback-path
   // comments — the webhook's state machine task timeout is 3h), so use the
@@ -47,32 +53,20 @@ export async function startBrowserMcp({ workDir, log }) {
   await browser.startSession({ sessionName: `claude-code-${Date.now()}`, timeout: 28800 });
   const { url, headers } = await browser.generateWebSocketUrl();
 
-  const mcpConfigPath = join(workDir, '.mcp-agentcore-browser.json');
   const cdpHeaderArgs = Object.entries(headers).flatMap(([name, value]) => [
     '--cdp-header',
     `${name}: ${value}`,
   ]);
-  await writeFile(
-    mcpConfigPath,
-    JSON.stringify(
-      {
-        mcpServers: {
-          'agentcore-browser': {
-            command: process.execPath,
-            args: [PLAYWRIGHT_MCP_CLI, '--cdp-endpoint', url, ...cdpHeaderArgs],
-          },
-        },
-      },
-      null,
-      2,
-    ),
-  );
-  log(`[browser-mcp] started AgentCore Browser session, wrote MCP config to ${mcpConfigPath}`);
+  log('[browser-mcp] started AgentCore Browser session');
 
   return {
-    mcpConfigPath,
+    mcpServerEntry: {
+      'agentcore-browser': {
+        command: process.execPath,
+        args: [PLAYWRIGHT_MCP_CLI, '--cdp-endpoint', url, ...cdpHeaderArgs],
+      },
+    },
     async stop() {
-      await rm(mcpConfigPath, { force: true }).catch(() => {});
       try {
         await browser.stopSession();
         log('[browser-mcp] stopped AgentCore Browser session');
