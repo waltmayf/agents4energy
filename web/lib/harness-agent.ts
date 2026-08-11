@@ -145,29 +145,25 @@ async function buildTools(
     }),
   );
 
-  return resolved.map((s) => {
-    const routeThroughGateway = Boolean(s.gatewayTargetId && GATEWAY_ENDPOINT);
-    return {
-      type: 'remote_mcp',
-      name: s.name,
-      config: {
-        remoteMcp: {
-          // Route through the AgentCore gateway when this server is registered as
-          // a gateway target (Cedar 3c, #279); fall back to the direct URL if the
-          // gateway endpoint isn't configured.
-          url: routeThroughGateway ? GATEWAY_ENDPOINT : s.url,
-          // The gateway's CUSTOM_JWT authorizer requires the caller's own Cognito
-          // ACCESS token as `Authorization: Bearer` (the ID token 403s with
-          // `insufficient_scope`, #327; a per-server OAuth token is only
-          // meaningful on the direct-URL connection) — this is also how Cedar
-          // reads `cognito:groups` as a principal tag on the gateway side.
-          headers: routeThroughGateway
-            ? (callerAccessToken ? { Authorization: `Bearer ${callerAccessToken}` } : undefined)
-            : (s.headers && Object.keys(s.headers).length ? s.headers : undefined),
+  const tools: HarnessTool[] = [];
+    for (const s of resolved) {
+      const routeThroughGateway = Boolean(s.gatewayTargetId && GATEWAY_ENDPOINT);
+      if (!routeThroughGateway) {
+        console.warn(`McpServer ${s.name} missing gatewayTargetId or gateway endpoint; skipping tool.`);
+        continue;
+      }
+      tools.push({
+        type: 'remote_mcp',
+        name: s.name,
+        config: {
+          remoteMcp: {
+            url: GATEWAY_ENDPOINT,
+            headers: callerAccessToken ? { Authorization: `Bearer ${callerAccessToken}` } : undefined,
+          },
         },
-      },
-    };
-  });
+      });
+    }
+    return tools;
 }
 
 /** Extract the plain text of an AG-UI message (user turns are simple text). */
