@@ -266,6 +266,11 @@ export class AgentWebhookStack extends Construct {
         repo: sfn.JsonPath.stringAt('$.repo'),
         issueNumber: sfn.JsonPath.numberAt('$.issueNumber'),
         issueKey: sfn.JsonPath.stringAt('$.issueKey'),
+        // Total run duration (issue #321): the execution's ISO-8601 start time
+        // from the Step Functions context object. The Lambda diffs it against
+        // `now` to prepend an "Agent finished after N" line to the final comment.
+        // Free from the context object — no extra state or bookkeeping needed.
+        executionStartTime: sfn.JsonPath.stringAt('$$.Execution.StartTime'),
         // Pass the whole content-block array (always present, even when empty)
         // and let the Lambda join the text blocks with a fallback. A direct
         // `Content[0].Text` JSONPath crashes the state when the agent's final
@@ -312,6 +317,8 @@ export class AgentWebhookStack extends Construct {
         repo: sfn.JsonPath.stringAt('$.repo'),
         issueNumber: sfn.JsonPath.numberAt('$.issueNumber'),
         issueKey: sfn.JsonPath.stringAt('$.issueKey'),
+        // Total run duration (issue #321) — a failed run is still a finished run.
+        executionStartTime: sfn.JsonPath.stringAt('$$.Execution.StartTime'),
         responseText: sfn.JsonPath.stringAt('$.error.Cause'),
       }),
       payloadResponseOnly: true,
