@@ -113,40 +113,45 @@ interface McpServerRow {
 export const GATEWAY_URL_FRAGMENT = 'gateway.bedrock-agentcore';
 
 /**
- * Return the distinct URLs of every deployed AgentCore gateway MCP server,
- * queried straight from AppSync (SigV4-signed) rather than scraped from the UI.
+ * Return the distinct URLs of every deployed AgentCore gateway MCP endpoint.
  * Used by mcp-gateway-oauth-discovery.spec.ts (#328) so the discovery-chain
- * assertion runs against the real deployed gateway instead of vacuously
- * skipping when the UI row isn't rendered. Returns [] when no endpoint resolves
- * or no gateway server exists.
+ * assertion runs against the real deployed gateway instead of vacuously skipping.
+ *
+ * Reads the endpoint from the STATIC build outputs — `agentcoreGatewayEndpoint`
+ * in web/e2e-config.json (published by scripts/build.sh), falling back to
+ * `custom.agentcore_gateway_endpoint` in web/amplify_outputs.json for a local
+ * run. It deliberately does NOT query AppSync: the CI e2e IAM role isn't granted
+ * `appsync:GraphQL`, so a SigV4-signed `listMcpServers` returned
+ * `UnauthorizedException: Permission denied` and failed the guard test. The
+ * gateway URL is a fixed deploy output, so no authorized query is needed.
+ * Returns [] when no endpoint is configured (the spec then skips).
  */
 export async function listGatewayMcpServerUrls(): Promise<string[]> {
-  const cfg = resolveGraphqlConfig();
-  if (!cfg) {
-    console.warn('[mcp-gateway] No GraphQL endpoint resolved; cannot list gateway servers.');
+  const endpoint = resolveGatewayEndpoint();
+  if (!endpoint) {
+    console.warn('[mcp-gateway] No AgentCore gateway endpoint configured; skipping discovery test.');
     return [];
   }
-  type Row = { id: string; url: string | null };
-  const urls = new Set<string>();
-  let nextToken: string | null = null;
-  do {
-    type ListResult = { listMcpServers: { items: Row[]; nextToken: string | null } };
-    const data: ListResult = await signedGraphql<ListResult>(
-      cfg,
-      `query ListUrls($nextToken: String) {
-         listMcpServers(limit: 1000, nextToken: $nextToken) {
-           items { id url }
-           nextToken
-         }
-       }`,
-      { nextToken },
-    );
-    for (const row of data.listMcpServers.items) {
-      if (row.url?.includes(GATEWAY_URL_FRAGMENT)) urls.add(row.url);
-    }
-    nextToken = data.listMcpServers.nextToken;
-  } while (nextToken);
-  return [...urls];
+  return endpoint.includes(GATEWAY_URL_FRAGMENT) ? [endpoint] : [];
+}
+
+/**
+ * Resolve the AgentCore gateway MCP endpoint from the same static build outputs
+ * resolveGraphqlConfig() reads: e2e-config.json first (CI), then
+ * amplify_outputs.json (local sandbox). Returns null when neither carries it.
+ */
+function resolveGatewayEndpoint(): string | null {
+  const e2eConfigPath = resolve(__dirname, '../e2e-config.json');
+  if (existsSync(e2eConfigPath)) {
+    const cfg = JSON.parse(readFileSync(e2eConfigPath, 'utf8'));
+    if (cfg.agentcoreGatewayEndpoint) return cfg.agentcoreGatewayEndpoint as string;
+  }
+  const outputsPath = resolve(__dirname, '../amplify_outputs.json');
+  if (existsSync(outputsPath)) {
+    const o = JSON.parse(readFileSync(outputsPath, 'utf8'));
+    if (o?.custom?.agentcore_gateway_endpoint) return o.custom.agentcore_gateway_endpoint as string;
+  }
+  return null;
 }
 
 /** List every McpServer (following pagination). */
