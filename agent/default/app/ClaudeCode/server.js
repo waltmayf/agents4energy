@@ -42,6 +42,8 @@ import { persistClaudeStreamEvent, persistUserPrompt, persistAwaitingInputMarker
 import { detectAwaitingInput } from './detect-awaiting-input.js';
 import { detectMonitorRequest } from './detect-monitor.js';
 import { startBrowserMcp } from './browser-mcp.js';
+import { gatewayMcpServerEntry } from './gateway-mcp.js';
+import { writeMcpConfig, removeMcpConfig } from './mcp-config.js';
 import { upsertActiveRun, clearActiveRun } from './active-run.js';
 
 const PORT = 8080;
@@ -168,6 +170,12 @@ app.post('/invocations', async (req, res) => {
   const githubToken = typeof payload.githubToken === 'string' ? payload.githubToken : '';
   const baseBranch = typeof payload.branch === 'string' ? payload.branch : '';
   const systemAppend = typeof payload.systemAppend === 'string' ? payload.systemAppend : '';
+  // The signed-in caller's Cognito ACCESS token (#339), relayed verbatim by
+  // web/lib/claude-code-agent.ts so this run's gateway-routed MCP tools are
+  // authorized against the invoking user's own cognito:groups — see
+  // gateway-mcp.js. Absent on the webhook (@agentcore-claude) path, which has
+  // no signed-in browser user (#340 covers that path separately).
+  const cognitoAccessToken = typeof payload.cognitoAccessToken === 'string' ? payload.cognitoAccessToken : '';
   // Present only on the Step Functions callback path (issue #175).
   const taskToken = typeof payload.taskToken === 'string' ? payload.taskToken : '';
   // InvokeAgentRuntime forwards runtimeSessionId as this header (not the JSON
@@ -184,7 +192,7 @@ app.post('/invocations', async (req, res) => {
     await persistUserPrompt(memoryClient, { memoryId: MEMORY_ID, sessionId: memorySessionId, prompt, log });
   }
 
-  const runJob = (onSpawn) => runManagedJob({ prompt, repo, issueNumber, githubToken, baseBranch, systemAppend, memorySessionId, log, onSpawn });
+  const runJob = (onSpawn) => runManagedJob({ prompt, repo, issueNumber, githubToken, baseBranch, systemAppend, memorySessionId, log, onSpawn, cognitoAccessToken });
 
   // CALLBACK PATH: a Claude Code run can outlast the 15-min invoke ceiling, so
   // ack immediately and drive the (possibly hours-long) job in the background,
@@ -314,24 +322,34 @@ app.post('/invocations', async (req, res) => {
 // Shared job body for both invocation paths: set up the workspace, then run
 // Claude Code to completion. Kept separate so the sync and callback paths never
 // drift. Leaves the git clone under WORKSPACE_ROOT (persistent) for reuse.
-async function runManagedJob({ prompt, repo, issueNumber, githubToken, baseBranch, systemAppend, memorySessionId, log, onSpawn }) {
+async function runManagedJob({ prompt, repo, issueNumber, githubToken, baseBranch, systemAppend, memorySessionId, log, onSpawn, cognitoAccessToken }) {
   const workDir = await setupWorkspace({ repo, githubToken, baseBranch, log });
   // Give Claude Code the AgentCore Browser tool as an MCP server for this run
   // (issue #183). A failure here (e.g. AccessDenied on a role that predates the
   // browser connection) shouldn't block the whole job — fall back to no browser.
   let browserMcp = null;
   try {
-    browserMcp = await startBrowserMcp({ workDir, log });
+    browserMcp = await startBrowserMcp({ log });
   } catch (err) {
     log('[browser-mcp] failed to start; continuing without browser tool:', err?.message || String(err));
   }
+  // Route every other MCP tool through the AgentCore gateway (issue #339) —
+  // never a container-local/direct connection — using the caller's relayed
+  // Cognito access token. Merged with the browser entry above into one
+  // `.mcp.json` so the CLI needs only a single --mcp-config flag.
+  const gatewayEntry = gatewayMcpServerEntry({ accessToken: cognitoAccessToken, log });
+  const mcpConfigPath = await writeMcpConfig(workDir, {
+    ...(browserMcp?.mcpServerEntry ?? {}),
+    ...(gatewayEntry ?? {}),
+  });
   try {
     return await runClaudeCode({
       prompt, workDir, repo, issueNumber, systemAppend, githubToken, memorySessionId, log, onSpawn,
-      mcpConfigPath: browserMcp?.mcpConfigPath,
+      mcpConfigPath,
     });
   } finally {
     if (browserMcp) await browserMcp.stop();
+    await removeMcpConfig(mcpConfigPath);
   }
 }
 

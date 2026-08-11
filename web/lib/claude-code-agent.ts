@@ -10,7 +10,7 @@ import {
 import { Observable, type Subscriber } from 'rxjs';
 
 import outputs from '../amplify_outputs.json';
-import { makeClient, messageText, loadHistory } from './harness-agent';
+import { makeClient, messageText, loadHistory, fetchCallerIdentity } from './harness-agent';
 import { parseInvokeResponseText } from './claude-code-invoke-response';
 import { chunkForSmoothScroll, SCROLL_CHUNK_DELAY_MS } from './smooth-scroll-chunk';
 import { buildRunErrorMessageEvents } from './harness-run-error';
@@ -73,7 +73,15 @@ export class ClaudeCodeAgent extends AbstractAgent {
             throw new Error('The ClaudeCode runtime is not deployed on this branch (no runtime ARN configured).');
           }
 
-          const payload = { prompt, runId: sessionId };
+          // Relay the signed-in caller's Cognito ACCESS token (#339) so the
+          // container can present it to the AgentCore gateway as
+          // `Authorization: Bearer` — same token, same reason as
+          // buildTools() in harness-agent.ts (#327: the ID token 403s on the
+          // gateway's CUSTOM_JWT authorizer with insufficient_scope). The
+          // container must never fabricate a {sub,groups} blob; Cedar reads
+          // cognito:groups off this real JWT.
+          const { accessToken: cognitoAccessToken } = await fetchCallerIdentity();
+          const payload = { prompt, runId: sessionId, cognitoAccessToken };
 
           const response = await client.send(
             new InvokeAgentRuntimeCommand({

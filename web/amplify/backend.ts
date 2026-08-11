@@ -1165,6 +1165,21 @@ if (aguiRuntimeName && AGENTCORE_MEMORY_ID) {
   }));
 }
 
+// Auth unify 2/3 (#339): give the ClaudeCode and AguiAgent runtimes the same
+// gateway endpoint the browser HarnessAgent path uses (buildTools in
+// web/lib/harness-agent.ts, #338), so their MCP tool calls route through the
+// same CUSTOM_JWT authorizer + Cedar chokepoint instead of a container-local
+// connection. Each runtime relays the invoking caller's own Cognito access
+// token per-invocation (ClaudeCode: the `cognitoAccessToken` payload field,
+// see server.js; AguiAgent: `RunAgentInput.forwardedProps.cognitoAccessToken`,
+// see server.ts) — this env var only tells the container where the gateway is.
+if (claudeCodeRuntimeName && AGENTCORE_GATEWAY_ENDPOINT) {
+  agentCoreApp.addRuntimeEnvironmentVariable(claudeCodeRuntimeName, 'AGENTCORE_GATEWAY_ENDPOINT', AGENTCORE_GATEWAY_ENDPOINT);
+}
+if (aguiRuntimeName && AGENTCORE_GATEWAY_ENDPOINT) {
+  agentCoreApp.addRuntimeEnvironmentVariable(aguiRuntimeName, 'AGENTCORE_GATEWAY_ENDPOINT', AGENTCORE_GATEWAY_ENDPOINT);
+}
+
 // ============================================================================
 // E2E TEST USER — Cognito user + SSM-stored credentials for Playwright auth.
 //

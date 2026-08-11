@@ -78,7 +78,7 @@ export function makeClient(): BedrockAgentCoreClient {
  * access token carries `scope: "aws.cognito.signin.user.admin"`, and both
  * tokens carry `cognito:groups`, so Cedar's group matching still works.
  */
-async function fetchCallerIdentity(): Promise<{ identity: CallerIdentity; accessToken: string | null }> {
+export async function fetchCallerIdentity(): Promise<{ identity: CallerIdentity; accessToken: string | null }> {
   const session = await fetchAuthSession();
   const payload = session.tokens?.idToken?.payload;
   const sub = typeof payload?.sub === 'string' ? payload.sub : null;

@@ -186,6 +186,15 @@ Registration happens automatically: `register-mcp-target-stream` (a DynamoDB-str
 
 `web/amplify/functions/invoke-agent/handler.ts` (the webhook-invoked `invokeAgent` mutation path) still has a direct-URL fallback for a server without a `gatewayTargetId` — bringing that path under mandatory gateway routing too is tracked separately as part of the webhook machine-identity work (#337/#340), since it needs its own relayed-JWT design first.
 
+### Gateway registration for ClaudeCode and AguiAgent (#339)
+
+The `ClaudeCode` (`agent/default/app/ClaudeCode/`) and `AguiAgent` (`agent/default/app/AguiAgent/`) runtimes route their own MCP tool access through the same gateway, using the same relayed-access-token pattern as `buildTools` above — but each speaks a different native MCP client, so the wiring is per-runtime rather than a shared function:
+
+- **ClaudeCode**: `web/lib/claude-code-agent.ts` relays the signed-in caller's Cognito access token as a `cognitoAccessToken` field on the `InvokeAgentRuntime` payload. `gateway-mcp.js` turns that into a `.mcp.json` server entry (`{"type": "http", "url": AGENTCORE_GATEWAY_ENDPOINT, "headers": {"Authorization": "Bearer <token>"}}`) that `mcp-config.js` merges with the AgentCore Browser tool's entry (`browser-mcp.js`) into one file, so the `claude` CLI's `--mcp-config` flag sees both. Either entry is dropped independently if it isn't available for a given run (e.g. no token on the webhook path, #340; no browser session).
+- **AguiAgent**: `server.ts` reads the token from `RunAgentInput.forwardedProps.cognitoAccessToken` (the AG-UI-native carrier for per-request extras — untyped/`z.any()` in `@ag-ui/core`, so no schema change was needed) and builds a **per-request** Strands `Agent` + `McpClient` pointed at the gateway. It's rebuilt fresh per request rather than cached per-thread, for the same reason `buildTools` is called fresh on every harness invocation: the token belongs to whichever user is calling *this* request, not whichever user happened to call first on a cached thread.
+
+Neither runtime fabricates a `{sub, groups}` claims blob for the gateway — both simply relay the real JWT the browser already holds, so Cedar's `cognito:groups` tag match (see [`docs/mcp-tool-permissions.md`](./mcp-tool-permissions.md)) behaves identically to the harness path. `AguiAgent` currently has no chat-UI or webhook invoker of its own (see [`docs/agui-runtime.md`](./agui-runtime.md)) — this wiring makes its container ready for whichever caller invokes it next, without waiting on that separate frontend-integration work.
+
 ### Validating connectivity
 
 Before saving an MCP server, the frontend can call the `listMcpTools` GraphQL query. This Lambda probes the server using the same `url` + `headers` that the harness would use (MCP `initialize` → `tools/list` sequence). If the query succeeds, the harness invocation will too.
