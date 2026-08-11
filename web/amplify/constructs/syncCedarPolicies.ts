@@ -93,6 +93,24 @@ export class SyncCedarPolicies extends Construct {
       actions: ['bedrock-agentcore:GetGatewayTarget'],
       resources: ['*'],
     }));
+    // Creating/updating a policy whose action is target-scoped
+    // (`action == AgentCore::Action::"<target>___<tool>"`, see
+    // cedar-policy-generation.ts) makes Cedar synchronously VALIDATE the policy
+    // during CreatePolicy/UpdatePolicy — and it does so under THIS Lambda's
+    // calling principal (confirmed via CloudTrail: the AccessDenied is on the
+    // SyncCedarPoliciesHandler role, not the gateway execution role, #325).
+    // Validation resolves the action name against the gateway's registered
+    // targets (needs ListGatewayTargets) and then confirms it can reach the
+    // gateway (needs InvokeGateway); without BOTH the policy lands
+    // CREATE_FAILED/UPDATE_FAILED ("Insufficient permissions to list targets on
+    // gateway …" then "… to call gateway …"), never goes ACTIVE, and ENFORCE
+    // denies every call by default. Verified live: this exact pair, scoped to
+    // the gateway ARN, flips the policy to ACTIVE and a tool call from DENY to
+    // ALLOW (see docs/cedar-enforce-demo.md).
+    fn.addToRolePolicy(new PolicyStatement({
+      actions: ['bedrock-agentcore:ListGatewayTargets', 'bedrock-agentcore:InvokeGateway'],
+      resources: [props.gatewayArn],
+    }));
     fn.addToRolePolicy(new PolicyStatement({
       actions: ['dynamodb:Scan'],
       resources: [props.groupToolGrantTable.tableArn, props.mcpServerTable.tableArn],

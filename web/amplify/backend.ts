@@ -595,6 +595,13 @@ if (AGENTCORE_POLICY_ENGINE_ID) {
     groupToolGrantTable: backend.data.resources.tables['GroupToolGrant'],
     mcpServerTable: backend.data.resources.tables['McpServer'],
   });
+  // NOTE: Cedar's synchronous validation of each generated (target-scoped)
+  // policy runs under the sync Lambda's own principal and needs
+  // ListGatewayTargets + InvokeGateway on the gateway (#325). That grant lives
+  // inside the SyncCedarPolicies construct (on the handler's role), not here —
+  // an earlier attempt to grant it to the GATEWAY execution role from backend.ts
+  // was wrong (CloudTrail showed the AccessDenied on the Lambda role) and has
+  // been removed.
 }
 
 // ============================================================================

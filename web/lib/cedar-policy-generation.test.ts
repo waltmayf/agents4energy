@@ -39,10 +39,26 @@ test('"*" toolName maps to a target-scoped action (ensuring only its own tools a
   assert.doesNotMatch(policy.statement, /,\n\s*action,\n/);
 });
 
-test('the principal check uses Set.contains on the cognito:groups tag, not string "like"', () => {
+test('the principal check string-matches the cognito:groups tag with a quote-delimited `like` (the tag is a JSON-array string, not a Cedar Set — #325)', () => {
   const [policy] = generateCedarPolicies([grant({ group: 'reservoir-eng' })], TEST_GATEWAY_ARN);
-  assert.match(policy.statement, /principal\.getTag\("cognito:groups"\)\.contains\("reservoir-eng"\)/);
-  assert.doesNotMatch(policy.statement, /\blike\b/);
+  // AgentCore surfaces cognito:groups as the JSON string of the claim array
+  // (e.g. `["reservoir-eng"]`), so it is String-typed: `.contains(...)` is a
+  // Set op and fails policy validation ("expected Set but saw String"), leaving
+  // the policy UPDATE_FAILED and ENFORCE denying by default. Use `like` on the
+  // group wrapped in its surrounding JSON quotes so it matches a distinct array
+  // element (delimiter-safe: `reservoir-eng` must not match `reservoir-engineering`).
+  assert.match(policy.statement, /principal\.getTag\("cognito:groups"\) like "\*\\"reservoir-eng\\"\*"/);
+  assert.doesNotMatch(policy.statement, /\.contains\(/);
+});
+
+test('the `like` pattern is delimiter-safe — a group name is not a prefix-match of a longer group', () => {
+  const [policy] = generateCedarPolicies([grant({ group: 'reservoir-eng' })], TEST_GATEWAY_ARN);
+  // The quotes around the group name in the pattern ensure `["reservoir-engineering"]`
+  // does NOT satisfy a policy granted to `reservoir-eng`.
+  assert.ok(
+    policy.statement.includes('like "*\\"reservoir-eng\\"*"'),
+    `expected quote-delimited like pattern, got: ${policy.statement}`,
+  );
 });
 
 test('every generated policy is ACTIVE (matches the engine-level ENFORCE mode, #280)', () => {
