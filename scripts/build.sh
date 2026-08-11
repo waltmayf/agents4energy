@@ -77,6 +77,12 @@ if [ -n "${GITHUB_REPOSITORY:-}" ]; then
       // records directly via SigV4-signed GraphQL (issue #308) instead of the
       // UI — an API delete can't be skipped by a timed-out UI assertion.
       graphqlUrl: o.data.url,
+      // AgentCore gateway MCP endpoint (issue #328). Published as a static build
+      // output so the OAuth-discovery guard test can walk the .well-known chain
+      // against the real deployed gateway WITHOUT an authorized AppSync query —
+      // the CI e2e IAM role isn't granted appsync:GraphQL, so a signed listMcpServers
+      // returned UnauthorizedException.
+      agentcoreGatewayEndpoint: c.agentcore_gateway_endpoint ?? null,
     }));
   ")
   aws ssm put-parameter --name "$E2E_CONFIG_SSM_PATH" --type String --overwrite --value "$E2E_CONFIG_VALUE"
