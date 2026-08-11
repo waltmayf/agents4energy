@@ -197,6 +197,86 @@ const cognitoDiscoveryUrl = Fn.join('', [
   '/.well-known/openid-configuration',
 ]);
 
+// ============================================================================
+// SERVICE-WEBHOOK MACHINE IDENTITY (#340, slice 3/3 of the auth-unify epic
+// #337) — models the `@agentcore-claude` webhook as a first-class Cognito
+// principal instead of a container-local MCP bypass.
+//
+// The webhook has no browser session and no human to sign in, so it can't
+// relay a user's JWT the way ClaudeCode/AguiAgent's browser-invoked callers do
+// (#339). Instead it authenticates as a dedicated Cognito USER (reusing
+// E2eTestUser's create-user-with-SSM-credentials custom resource verbatim —
+// that construct is already fully generic despite its e2e-scoped name) in the
+// reserved `service-webhook` group (see auth/resource.ts). The invoke-claude
+// Lambda mints that user's access token via InitiateAuth (USER_PASSWORD_AUTH)
+// immediately before each run and relays it to the ClaudeCode runtime exactly
+// like a browser caller's token (#339's `payload.cognitoAccessToken` field) —
+// same gateway, same CUSTOM_JWT authorizer, same Cedar `cognito:groups` tag
+// match. No `{sub,groups}` blob is ever fabricated.
+//
+// This needs its OWN app client (not backend.auth.resources.userPoolClient,
+// the browser's shared one), declared up here — before agentCoreGateways'
+// authorizerConfiguration and the #328 reconcile block below both read
+// `allowedClients` — for two reasons:
+//   1. Token lifetime: a Claude Code job can run for hours (InvokeClaude's SFN
+//      task waits up to 3h on its task token, see agentWebhookStack.ts) and
+//      the token is baked into one static MCP config for that whole run
+//      (Claude Code's http MCP transport has no mid-run bearer-token refresh),
+//      so it must outlive the run. Rather than build a refresh loop, this
+//      client's AccessTokenValidity is set above the 3h ceiling. That's safe
+//      ONLY because it's a separate client scoped to one least-privilege
+//      machine group and never exposed to a browser — extending the SHARED
+//      browser client's token lifetime the same way would widen every human
+//      session's exposure window instead. If a future change needs the
+//      webhook to run longer than this, prefer bumping the constant below
+//      over building a mid-run refresh.
+//   2. Auth flow: USER_PASSWORD_AUTH only — the invoke-claude Lambda
+//      authenticates directly with the machine user's username/password
+//      (InitiateAuth needs no IAM grant, just this client's id), no
+//      SRP/hosted-UI/OAuth flows needed.
+//
+// Memory scoping (locked, see docs/agentic-architecture.md): webhook runs
+// KEEP writing memory under SHARED_ACTOR_ID (web/lib/caller-identity.ts)
+// rather than switching to this machine user's own `sub` — its cross-surface
+// visibility (a GitHub-dispatched run showing up in the browser chat
+// transcript, #256) is still wanted, and every webhook run is already the
+// same principal, so a per-`sub` partition would add dual-read plumbing for
+// no benefit.
+//
+// Tool grants: seeding least-privilege GroupToolGrant rows for
+// `service-webhook` is a data-plane action (the permissions-panel UI at
+// /agents, now that the group exists in COGNITO_GROUPS/auth groups), not a
+// CDK concern.
+// ============================================================================
+
+const SERVICE_WEBHOOK_ACCESS_TOKEN_VALIDITY_HOURS = 4;
+const serviceWebhookResourceId = toGatewayResourceName(backendNamespace ?? '', backendName ?? '') || 'default';
+const SERVICE_WEBHOOK_EMAIL_SSM_PATH = `/agentcore/service-webhook-${serviceWebhookResourceId}/email`;
+const SERVICE_WEBHOOK_PASSWORD_SSM_PATH = `/agentcore/service-webhook-${serviceWebhookResourceId}/password`;
+
+new E2eTestUser(agentStack, 'ServiceWebhookUser', {
+  userPoolId: backend.auth.resources.userPool.userPoolId,
+  userPoolArn: backend.auth.resources.userPool.userPoolArn,
+  email: `service-webhook-${serviceWebhookResourceId}@agentcore.dev`,
+  emailSsmPath: SERVICE_WEBHOOK_EMAIL_SSM_PATH,
+  passwordSsmPath: SERVICE_WEBHOOK_PASSWORD_SSM_PATH,
+  group: 'service-webhook',
+});
+
+const serviceWebhookUserPoolClient = new cognito.CfnUserPoolClient(agentStack, 'ServiceWebhookUserPoolClient', {
+  userPoolId: backend.auth.resources.userPool.userPoolId,
+  clientName: `service-webhook-${serviceWebhookResourceId}`,
+  explicitAuthFlows: ['ALLOW_USER_PASSWORD_AUTH', 'ALLOW_REFRESH_TOKEN_AUTH'],
+  generateSecret: false,
+  accessTokenValidity: SERVICE_WEBHOOK_ACCESS_TOKEN_VALIDITY_HOURS,
+  idTokenValidity: SERVICE_WEBHOOK_ACCESS_TOKEN_VALIDITY_HOURS,
+  tokenValidityUnits: {
+    accessToken: 'hours',
+    idToken: 'hours',
+    refreshToken: 'days',
+  },
+});
+
 // MyHarness authorizes with AWS_IAM (SigV4), not CUSTOM_JWT: omitting
 // `authorizerConfiguration` makes a CfnHarness default to IAM auth. Every
 // caller (the browser transport, the invoke-agent + webhook Lambdas, and
@@ -255,7 +335,10 @@ const agentCoreGatewaysWithUniqueNames = projectSpec.agentCoreGateways?.length
       authorizerConfiguration: {
         customJwtAuthorizer: {
           discoveryUrl: cognitoDiscoveryUrl,
-          allowedClients: [backend.auth.resources.userPoolClient.userPoolClientId],
+          // Includes the service-webhook client (#340) so the gateway accepts
+          // the machine-identity tokens the @agentcore-claude webhook relays,
+          // alongside the browser's shared client.
+          allowedClients: [backend.auth.resources.userPoolClient.userPoolClientId, serviceWebhookUserPoolClient.ref],
         },
       },
     }))
@@ -541,7 +624,9 @@ if (AGENTCORE_GATEWAY_ID) {
     gatewayIdentifier: AGENTCORE_GATEWAY_ID,
     gatewayArn: AGENTCORE_GATEWAY_ARN,
     discoveryUrl: cognitoDiscoveryUrl,
-    allowedClients: [backend.auth.resources.userPoolClient.userPoolClientId],
+    // Includes the service-webhook client (#340) — see the allowedClients
+    // comment above.
+    allowedClients: [backend.auth.resources.userPoolClient.userPoolClientId, serviceWebhookUserPoolClient.ref],
     // Changes every synth so the custom resource re-runs each deploy.
     nonce: Date.now().toString(),
   });
@@ -1003,6 +1088,30 @@ if (AGENTCORE_CLAUDE_CODE_RUNTIME_ARN) {
 webhookInvokeClaudeLambda.addToRolePolicy(new PolicyStatement({
   actions: ['logs:PutLogEvents'],
   resources: [`arn:aws:logs:${AGENTCORE_REGION}:${backend.stack.account}:log-group:/agent-webhook/*:log-stream:*`],
+}));
+
+// service-webhook machine identity (#340): lets this Lambda read the machine
+// user's credentials and mint its own access token via InitiateAuth (a public
+// Cognito API authorized by the app client id, not IAM — no cognito-idp:*
+// grant needed for that call itself, only the SSM reads below).
+backend.agentWebhookInvokeClaude.addEnvironment('SERVICE_WEBHOOK_USER_POOL_CLIENT_ID', serviceWebhookUserPoolClient.ref);
+backend.agentWebhookInvokeClaude.addEnvironment('SERVICE_WEBHOOK_EMAIL_SSM_PATH', SERVICE_WEBHOOK_EMAIL_SSM_PATH);
+backend.agentWebhookInvokeClaude.addEnvironment('SERVICE_WEBHOOK_PASSWORD_SSM_PATH', SERVICE_WEBHOOK_PASSWORD_SSM_PATH);
+webhookInvokeClaudeLambda.addToRolePolicy(new PolicyStatement({
+  actions: ['ssm:GetParameter'],
+  resources: [
+    `arn:aws:ssm:${AGENTCORE_REGION}:${backend.stack.account}:parameter${SERVICE_WEBHOOK_EMAIL_SSM_PATH}`,
+    `arn:aws:ssm:${AGENTCORE_REGION}:${backend.stack.account}:parameter${SERVICE_WEBHOOK_PASSWORD_SSM_PATH}`,
+  ],
+}));
+// The password parameter is a SecureString under the default AWS-managed
+// `alias/aws/ssm` key — that key's ID isn't known at synth time, so this
+// scopes the decrypt grant by service (kms:ViaService) rather than by key
+// ARN, the standard least-privilege pattern for the default SSM key.
+webhookInvokeClaudeLambda.addToRolePolicy(new PolicyStatement({
+  actions: ['kms:Decrypt'],
+  resources: ['*'],
+  conditions: { StringEquals: { 'kms:ViaService': `ssm.${AGENTCORE_REGION}.amazonaws.com` } },
 }));
 
 // Monitor-loop check step (issue #262): runs the monitor spec's checkCommand in

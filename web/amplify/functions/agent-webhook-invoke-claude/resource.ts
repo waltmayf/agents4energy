@@ -17,5 +17,13 @@ export const agentWebhookInvokeClaude = defineFunction({
   environment: {
     // ARN of the ClaudeCode AgentCore Runtime — populated in backend.ts.
     CLAUDE_CODE_RUNTIME_ARN: '',
+    // Service-webhook machine identity (#340) — populated in backend.ts.
+    // Lets this Lambda mint a fresh Cognito access token for the dedicated
+    // `service-webhook` group user and relay it to the runtime as
+    // `cognitoAccessToken`, so the run's gateway-routed MCP tools are
+    // authorized by Cedar against that group instead of bypassing it.
+    SERVICE_WEBHOOK_USER_POOL_CLIENT_ID: '',
+    SERVICE_WEBHOOK_EMAIL_SSM_PATH: '',
+    SERVICE_WEBHOOK_PASSWORD_SSM_PATH: '',
   },
 });
