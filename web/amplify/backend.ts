@@ -30,6 +30,7 @@ import { E2eTestUser } from './constructs/e2eTestUser/resource';
 import { AgentWebhookStack } from './constructs/agentWebhookStack';
 import { SyncCedarPolicies } from './constructs/syncCedarPolicies';
 import { RegisterMcpTargetOnMcpServer } from './constructs/registerMcpTargetOnMcpServer';
+import { ReconcileGatewayAuthorizer } from './constructs/reconcileGatewayAuthorizer/resource';
 import { S3ToolsGatewayTarget } from './constructs/s3ToolsGatewayTarget/resource';
 import { S3ToolsMcpServerSeed } from './constructs/s3ToolsMcpServerSeed/resource';
 import { GraphTraverseGatewayTarget } from './constructs/graphTraverseGatewayTarget/resource';
@@ -521,6 +522,30 @@ cfnUserPoolClient.allowedOAuthFlows = ['code'];
 cfnUserPoolClient.allowedOAuthScopes = ['openid', 'email', 'profile'];
 cfnUserPoolClient.allowedOAuthFlowsUserPoolClient = true;
 cfnUserPoolClient.supportedIdentityProviders = ['COGNITO'];
+
+// Durable fix for #328: force an EXISTING gateway's CUSTOM_JWT authorizer to be
+// reconciled to THIS stack's live pool + client on every deploy. The gateway
+// authorizer block above (agentCoreGatewaysWithUniqueNames, ~line 253) only
+// takes effect when CloudFormation CREATES the gateway; an already-existing
+// gateway keeps stale discoveryUrl/allowedClients (the #128 create-time-only
+// read), which on main froze the gateway on a since-deleted pool and broke MCP
+// OAuth discovery. This custom resource calls UpdateGateway out-of-band so the
+// live gateway self-heals without a destroy/recreate. Own stack: it references
+// the auth stack (pool/client) and the agent stack (gateway id/arn); nesting it
+// in either would risk a cross-stack cycle (see the S3ToolsGatewayTarget note).
+// Idempotent — the handler no-ops when the authorizer already matches, so a
+// steady-state redeploy makes no control-plane change.
+if (AGENTCORE_GATEWAY_ID) {
+  const reconcileStack = backend.createStack('reconcile-gateway-authorizer');
+  new ReconcileGatewayAuthorizer(reconcileStack, 'ReconcileGatewayAuthorizer', {
+    gatewayIdentifier: AGENTCORE_GATEWAY_ID,
+    gatewayArn: AGENTCORE_GATEWAY_ARN,
+    discoveryUrl: cognitoDiscoveryUrl,
+    allowedClients: [backend.auth.resources.userPoolClient.userPoolClientId],
+    // Changes every synth so the custom resource re-runs each deploy.
+    nonce: Date.now().toString(),
+  });
+}
 
 // ============================================================================
 // AGENTCORE MEMORY — list-session-messages + update-session-summary Lambdas

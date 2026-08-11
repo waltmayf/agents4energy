@@ -144,3 +144,58 @@ If no valid credential exists for an OAuth-protected server, no Authorization he
 4. Follow the **User authentication flow** above.
 5. Click **List tools** to confirm the server is reachable with your stored token.
 6. Assign the server to one or more agents on the **Agents** tab.
+
+---
+
+## Troubleshooting: gateway `authorize` request returns `BadRequest`
+
+**Symptom.** Authenticating against the AgentCore gateway sends the browser to
+`https://cognito-idp.<region>.amazonaws.com/authorize` and Cognito returns:
+
+```json
+{"code":"BadRequest","message":"The server did not understand the operation that was requested.","type":"client"}
+```
+
+That host is the Cognito **control-plane API**, which has no `/authorize`
+operation. The real authorize endpoint lives only on the Cognito **Hosted-UI
+domain** (`https://<prefix>.auth.<region>.amazoncognito.com/oauth2/authorize`).
+A client lands on the wrong host when its OAuth discovery chain can't reach a
+usable `authorization_endpoint` and it falls back to `<issuer-origin>/authorize`.
+
+**Root cause (issue #328).** The gateway's CUSTOM_JWT authorizer
+(`discoveryUrl` / `allowedClients`) is read by CloudFormation **only when the
+gateway is first created**. An already-existing gateway is never re-read, so the
+`web/amplify/backend.ts` override that re-derives those values from the current
+stack's live Cognito pool (added for #128) does **not** land on a gateway that
+already exists. On a long-lived deployment that froze the gateway on a Cognito
+user pool that had since been deleted — its `oauth-protected-resource` metadata
+kept advertising the dead pool, whose OIDC document 404s, so the fallback host
+was hit.
+
+**How it's prevented now.** The `ReconcileGatewayAuthorizer` construct
+(`web/amplify/constructs/reconcileGatewayAuthorizer/`) runs a CloudFormation
+custom resource on **every deploy** that calls `UpdateGateway` to reconcile the
+existing gateway's authorizer to the current stack's live pool + app client.
+`UpdateGateway` is the only way to change an existing gateway's authorizer
+(CloudFormation won't). The handler is idempotent — it calls `GetGateway`, and
+only writes when the authorizer differs — so a steady-state redeploy makes no
+control-plane change.
+
+**Diagnosing manually.** Walk the discovery chain the client uses:
+
+```bash
+GW=https://<gateway-id>.gateway.bedrock-agentcore.<region>.amazonaws.com
+# 1. Which authorization server does the gateway advertise?
+curl -s "$GW/.well-known/oauth-protected-resource" | jq .authorization_servers
+# 2. Does that server's OIDC doc resolve, and where is authorize?
+AS=$(curl -s "$GW/.well-known/oauth-protected-resource" | jq -r '.authorization_servers[0]')
+curl -s "$AS/.well-known/openid-configuration" | jq '{authorization_endpoint, token_endpoint}'
+```
+
+If step 2 returns `"User pool ... does not exist"` (HTTP 404) or an
+`authorization_endpoint` on the `cognito-idp.*` host, the gateway is drifted —
+redeploy (which now runs the reconcile), or repair out-of-band with
+`aws bedrock-agentcore-control update-gateway` pointing `discoveryUrl` /
+`allowedClients` at the live pool. The e2e test
+`web/e2e/mcp-gateway-oauth-discovery.spec.ts` asserts both invariants on every
+deployment.
