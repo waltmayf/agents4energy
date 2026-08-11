@@ -10,12 +10,20 @@
 // Mapping contract (see docs/mcp-tool-permissions.md "Cedar policy engine"
 // section, established in #271 and confirmed here in #272):
 // - Principal: `principal is AgentCore::OAuthUser` guarded by
-//   `principal.getTag("cognito:groups").contains("<group>")`. Cognito's
-//   `cognito:groups` claim is a JSON array of group-name strings (confirmed
-//   against AWS's documented ID-token payload shape), not a delimited string
-//   as the #271 placeholder speculated — AgentCore surfaces every JWT claim as
-//   an OAuthUser tag verbatim, so the tag value is a Cedar Set<String> and
-//   `.contains(...)` is the correct membership check (not `like`).
+//   `principal.getTag("cognito:groups") like "*\"<group>\"*"`. AgentCore
+//   surfaces every JWT claim as an OAuthUser tag, but — confirmed against a
+//   live ENFORCE engine (#325) — it surfaces `cognito:groups` as the *JSON
+//   string* of the claim array (e.g. `["reservoir-eng"]`), NOT as a Cedar
+//   `Set<String>`. So the tag is String-typed: `.contains(...)` is rejected at
+//   policy validation with "expected Set<...Any> but saw String" (UPDATE_FAILED,
+//   the policy never goes ACTIVE, and ENFORCE then denies every call by
+//   default). String matching is required instead, and `like` with the group
+//   name wrapped in its surrounding JSON quotes (`"*\"<group>\"*"`) is the
+//   delimiter-safe membership test — it matches the group as a distinct quoted
+//   array element, so `reservoir-eng` cannot spuriously match
+//   `reservoir-engineering`. (Cognito group names are limited to alphanumerics
+//   plus `+=,.@_-`, none of which are Cedar `like` metacharacters, so the group
+//   name needs no further escaping.)
 // - Action: `AgentCore::Action::"<targetName>___<toolName>"` for an exact tool
 //   grant (matching the CLI's own generated-policy action-naming convention —
 //   see `agentcore add policy -g`); a bare `action` (unconstrained) for the
@@ -100,7 +108,7 @@ function cedarStatement(grant: ToolGrantInput, gatewayArn: string): string {
     `)`,
     `when {`,
     `  principal.hasTag("cognito:groups") &&`,
-    `  principal.getTag("cognito:groups").contains("${grant.group}")`,
+    `  principal.getTag("cognito:groups") like "*\\"${grant.group}\\"*"`,
     `};`,
   ].join('\n');
 }
