@@ -86,6 +86,10 @@ export default function Home() {
             <Link href="/agents" className={styles.footerLink}>
               Builder
             </Link>
+            <span className={styles.footerSep}>/</span>
+            <Link href="/graph" className={styles.footerLink}>
+              Graph
+            </Link>
           </span>
         </footer>
       </div>
