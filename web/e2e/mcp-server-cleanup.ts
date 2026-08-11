@@ -26,6 +26,11 @@ import { HttpRequest } from '@aws-sdk/protocol-http';
 import { SignatureV4 } from '@aws-sdk/signature-v4';
 import { Sha256 } from '@aws-crypto/sha256-js';
 import { fromNodeProviderChain } from '@aws-sdk/credential-providers';
+import {
+  CognitoIdentityProviderClient,
+  InitiateAuthCommand,
+} from '@aws-sdk/client-cognito-identity-provider';
+import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
 
 /** Sentinel every e2e-created MCP server name must start with. */
 export const E2E_MCP_PREFIX = 'E2E-';
@@ -42,30 +47,104 @@ function isE2eServerName(name: string | null | undefined): boolean {
 interface GraphqlConfig {
   url: string;
   region: string;
+  // Cognito user-pool JWT for the e2e test user. When present, requests go
+  // through AppSync's Cognito authorizer (which `McpServer`'s
+  // `allow.authenticated()` rule accepts). When absent — a local admin run —
+  // we fall back to SigV4/IAM. See the resolver below and issue #356.
+  idToken?: string;
+  // Config needed to mint the JWT (only present from e2e-config.json in CI).
+  userPoolClientId?: string;
+  testUserEmailSsmPath?: string;
+  testUserPasswordSsmPath?: string;
 }
 
 /**
- * Resolve the AppSync endpoint + region for signed requests. Prefers the
- * `graphqlUrl` published into web/e2e-config.json by scripts/build.sh; falls
- * back to web/amplify_outputs.json for a local run against a sandbox deploy.
- * Returns null when neither is available (purge then no-ops with a warning).
+ * Resolve the AppSync endpoint + region for cleanup requests. Prefers the
+ * `graphqlUrl` published into web/e2e-config.json by scripts/build.sh (and,
+ * from that same file, the Cognito client id + test-user SSM paths needed to
+ * mint a user-pool JWT); falls back to web/amplify_outputs.json for a local run
+ * against a sandbox deploy. Returns null when neither is available (purge then
+ * no-ops with a warning).
  */
 export function resolveGraphqlConfig(): GraphqlConfig | null {
   const e2eConfigPath = resolve(__dirname, '../e2e-config.json');
   if (existsSync(e2eConfigPath)) {
     const cfg = JSON.parse(readFileSync(e2eConfigPath, 'utf8'));
     if (cfg.graphqlUrl) {
-      return { url: cfg.graphqlUrl, region: cfg.region ?? 'us-east-1' };
+      return {
+        url: cfg.graphqlUrl,
+        region: cfg.region ?? 'us-east-1',
+        userPoolClientId: cfg.userPoolClientId,
+        testUserEmailSsmPath: cfg.testUserEmailSsmPath,
+        testUserPasswordSsmPath: cfg.testUserPasswordSsmPath,
+      };
     }
   }
   const outputsPath = resolve(__dirname, '../amplify_outputs.json');
   if (existsSync(outputsPath)) {
     const o = JSON.parse(readFileSync(outputsPath, 'utf8'));
     if (o?.data?.url) {
-      return { url: o.data.url, region: o.data.aws_region ?? 'us-east-1' };
+      return {
+        url: o.data.url,
+        region: o.data.aws_region ?? 'us-east-1',
+        userPoolClientId: o?.auth?.user_pool_client_id,
+        testUserEmailSsmPath: o?.custom?.e2e_test_user_email_ssm_path,
+        testUserPasswordSsmPath: o?.custom?.e2e_test_user_password_ssm_path,
+      };
     }
   }
   return null;
+}
+
+/**
+ * Mint a Cognito user-pool id token for the e2e test user, using the same
+ * SSM-credentials + USER_PASSWORD_AUTH flow as auth.setup.ts. This is what lets
+ * cleanup delete `McpServer` rows in CI: the CI runner's IAM role is NOT granted
+ * `appsync:GraphQL`, but the model's `allow.authenticated()` rule accepts a
+ * user-pool JWT (issue #356). Returns null if the config or SSM values are
+ * missing, so callers transparently fall back to SigV4 for a local admin run.
+ */
+async function fetchTestUserIdToken(cfg: GraphqlConfig): Promise<string | null> {
+  if (!cfg.userPoolClientId || !cfg.testUserEmailSsmPath || !cfg.testUserPasswordSsmPath) {
+    return null;
+  }
+  try {
+    const ssm = new SSMClient({ region: cfg.region });
+    const [emailParam, passwordParam] = await Promise.all([
+      ssm.send(new GetParameterCommand({ Name: cfg.testUserEmailSsmPath })),
+      ssm.send(new GetParameterCommand({ Name: cfg.testUserPasswordSsmPath, WithDecryption: true })),
+    ]);
+    const email = emailParam.Parameter?.Value;
+    const password = passwordParam.Parameter?.Value;
+    if (!email || !password) return null;
+
+    const cognito = new CognitoIdentityProviderClient({ region: cfg.region });
+    const auth = await cognito.send(
+      new InitiateAuthCommand({
+        AuthFlow: 'USER_PASSWORD_AUTH',
+        ClientId: cfg.userPoolClientId,
+        AuthParameters: { USERNAME: email, PASSWORD: password },
+      }),
+    );
+    return auth.AuthenticationResult?.IdToken ?? null;
+  } catch (err) {
+    console.warn('[mcp-cleanup] Could not mint test-user JWT; will fall back to SigV4:', err);
+    return null;
+  }
+}
+
+/**
+ * Resolve the endpoint config AND attach a user-pool JWT when the CI config is
+ * present. This is the entry point every mutating caller should use: in CI the
+ * returned config carries `idToken` (so requests use the Cognito authorizer the
+ * McpServer model accepts); locally, minting is skipped and callers fall back to
+ * SigV4. Returns null when no endpoint is resolvable at all.
+ */
+async function resolveAuthedGraphqlConfig(): Promise<GraphqlConfig | null> {
+  const cfg = resolveGraphqlConfig();
+  if (!cfg) return null;
+  const idToken = await fetchTestUserIdToken(cfg);
+  return idToken ? { ...cfg, idToken } : cfg;
 }
 
 const credentialProvider = fromNodeProviderChain();
@@ -77,25 +156,40 @@ async function signedGraphql<T = unknown>(
 ): Promise<T> {
   const endpoint = new URL(cfg.url);
   const body = JSON.stringify({ query, variables });
-  const request = new HttpRequest({
-    method: 'POST',
-    protocol: endpoint.protocol,
-    hostname: endpoint.hostname,
-    path: endpoint.pathname,
-    headers: {
+
+  let headers: Record<string, string>;
+  if (cfg.idToken) {
+    // Cognito user-pool authorizer — matches McpServer's allow.authenticated()
+    // rule and needs no IAM grant (issue #356).
+    headers = {
       'Content-Type': 'application/json',
       host: endpoint.hostname,
-    },
-    body,
-  });
-  const signer = new SignatureV4({
-    credentials: credentialProvider,
-    region: cfg.region,
-    service: 'appsync',
-    sha256: Sha256,
-  });
-  const signed = await signer.sign(request);
-  const res = await fetch(cfg.url, { method: signed.method, headers: signed.headers as Record<string, string>, body });
+      Authorization: cfg.idToken,
+    };
+  } else {
+    // Local admin fallback: SigV4/IAM (dev creds usually have appsync:GraphQL).
+    const request = new HttpRequest({
+      method: 'POST',
+      protocol: endpoint.protocol,
+      hostname: endpoint.hostname,
+      path: endpoint.pathname,
+      headers: {
+        'Content-Type': 'application/json',
+        host: endpoint.hostname,
+      },
+      body,
+    });
+    const signer = new SignatureV4({
+      credentials: credentialProvider,
+      region: cfg.region,
+      service: 'appsync',
+      sha256: Sha256,
+    });
+    const signed = await signer.sign(request);
+    headers = signed.headers as Record<string, string>;
+  }
+
+  const res = await fetch(cfg.url, { method: 'POST', headers, body });
   const json = (await res.json()) as { data?: T; errors?: unknown };
   if (json.errors) {
     throw new Error(`AppSync GraphQL error: ${JSON.stringify(json.errors)}`);
@@ -188,7 +282,7 @@ async function deleteMcpServerById(cfg: GraphqlConfig, id: string): Promise<void
 export async function deleteMcpServersByIds(ids: string[]): Promise<void> {
   const unique = [...new Set(ids.filter(Boolean))];
   if (unique.length === 0) return;
-  const cfg = resolveGraphqlConfig();
+  const cfg = await resolveAuthedGraphqlConfig();
   if (!cfg) {
     console.warn('[mcp-cleanup] No GraphQL endpoint resolved; skipping id-based teardown.');
     return;
@@ -207,7 +301,7 @@ export async function deleteMcpServersByIds(ids: string[]): Promise<void> {
  * real servers. Returns the number deleted. Never throws.
  */
 export async function purgeE2eMcpServers(): Promise<number> {
-  const cfg = resolveGraphqlConfig();
+  const cfg = await resolveAuthedGraphqlConfig();
   if (!cfg) {
     console.warn('[mcp-cleanup] No GraphQL endpoint resolved (no e2e-config.json graphqlUrl or amplify_outputs.json); skipping purge.');
     return 0;
