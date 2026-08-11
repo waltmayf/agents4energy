@@ -3,6 +3,7 @@ import { mintInstallationToken } from '../_shared/githubAppToken';
 import { logGroupName, logStreamName, ensureLogStream, buildLiveTailUrl } from '../_shared/liveTail';
 import { sanitizeHarmony } from '../../../lib/harmony-sanitize';
 import { friendlyHarnessError } from '../../../lib/harness-error-message';
+import { buildRunDurationLine } from '../../../lib/run-duration';
 
 const REGION = process.env.AWS_REGION ?? 'us-east-1';
 const GITHUB_APP_ID = process.env.GITHUB_APP_ID ?? '';
@@ -51,6 +52,12 @@ interface PostCommentInput {
   // Set on the final stage reached via the Step Function's failure Catch, so
   // this stage adds `agent-error` in addition to removing `agent-working`.
   isError?: boolean;
+  // ISO-8601 execution start time from the Step Functions context object
+  // ($$.Execution.StartTime), passed by the final/failure states. Used to
+  // prepend an "Agent finished after N" line to the final comment (issue #321).
+  // Optional so a run that somehow omits it (or the awaiting/monitor stages)
+  // just skips the line rather than failing.
+  executionStartTime?: string;
 }
 
 interface PostCommentOutput {
@@ -345,6 +352,20 @@ export const handler = async (input: PostCommentInput): Promise<PostCommentOutpu
     failureText
       ?? (lastBlockText?.trim() || '_The agent finished but produced no text response (it may have ended on a tool action). See the CloudWatch logs linked above._'),
   );
+
+  // Prepend the total run duration (issue #321): "Agent finished after N ____".
+  // A failed run reads "Agent failed after N". Computed from the execution's
+  // start time (Step Functions context object) vs now. Skipped silently if the
+  // start time is missing/unparseable. Prepended here so BOTH the github and
+  // jira post paths include it; the github "no PR opened" heuristic below
+  // rebuilds responseText, so this must run after that — see prependDuration().
+  const durationLine = buildRunDurationLine(
+    input.executionStartTime,
+    Date.now(),
+    input.isError ? 'Agent failed after' : 'Agent finished after',
+  );
+  const prependDuration = (text: string): string =>
+    durationLine ? `${durationLine}\n\n____\n\n${text}` : text;
   if (input.source === 'github') {
     if (!input.repo || input.issueNumber === undefined) throw new Error('repo/issueNumber required for github source');
     if (!GITHUB_APP_PRIVATE_KEY_SECRET_ARN) throw new Error('GITHUB_APP_PRIVATE_KEY_SECRET_ARN not configured');
@@ -375,7 +396,7 @@ export const handler = async (input: PostCommentInput): Promise<PostCommentOutpu
       }
     }
 
-    await postGithubCommentWithToken(input.repo, input.issueNumber, responseText, token);
+    await postGithubCommentWithToken(input.repo, input.issueNumber, prependDuration(responseText), token);
 
     // Clear agent-working now that the run is done, and flag agent-error if this
     // final stage was reached via the failure Catch. Applied to both label- and
@@ -394,7 +415,7 @@ export const handler = async (input: PostCommentInput): Promise<PostCommentOutpu
     }
   } else {
     if (!input.issueKey) throw new Error('issueKey required for jira source');
-    await postJiraComment(input.issueKey, responseText);
+    await postJiraComment(input.issueKey, prependDuration(responseText));
   }
 
   return {};
