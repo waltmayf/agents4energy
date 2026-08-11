@@ -595,29 +595,13 @@ if (AGENTCORE_POLICY_ENGINE_ID) {
     groupToolGrantTable: backend.data.resources.tables['GroupToolGrant'],
     mcpServerTable: backend.data.resources.tables['McpServer'],
   });
-
-  // Cedar validates every action-constrained policy (each generated grant pins
-  // `action == AgentCore::Action::"<target>___<tool>"`) by resolving the action
-  // name against the gateway's registered targets — and it does this under the
-  // GATEWAY's execution role, not the sync Lambda's. The @aws/agentcore-cdk
-  // Gateway component auto-grants that role GetPolicyEngine/CheckAuthorize/
-  // Authorize/PartiallyAuthorize (its `PolicyEngineAccess` inline policy) but
-  // NOT ListGatewayTargets, so validation fails with "Insufficient permissions
-  // to list targets on gateway …" → the policy lands UPDATE_FAILED, never goes
-  // ACTIVE, and ENFORCE denies every call by default (#325). Grant it here.
-  // Owned by this sink stack (already depends on the agent stack for the role);
-  // adds no new cross-stack edge — same pattern as S3ToolsGatewayInvokeGrant.
-  if (gatewayName && AGENTCORE_GATEWAY_ARN) {
-    new Policy(syncCedarPoliciesStack, 'CedarListGatewayTargetsGrant', {
-      roles: [agentCoreApp.gatewayRole(gatewayName)],
-      statements: [
-        new PolicyStatement({
-          actions: ['bedrock-agentcore:ListGatewayTargets'],
-          resources: [AGENTCORE_GATEWAY_ARN],
-        }),
-      ],
-    });
-  }
+  // NOTE: Cedar's synchronous validation of each generated (target-scoped)
+  // policy runs under the sync Lambda's own principal and needs
+  // ListGatewayTargets + InvokeGateway on the gateway (#325). That grant lives
+  // inside the SyncCedarPolicies construct (on the handler's role), not here —
+  // an earlier attempt to grant it to the GATEWAY execution role from backend.ts
+  // was wrong (CloudTrail showed the AccessDenied on the Lambda role) and has
+  // been removed.
 }
 
 // ============================================================================
