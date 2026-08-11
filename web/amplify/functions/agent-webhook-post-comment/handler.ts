@@ -381,17 +381,24 @@ export const handler = async (input: PostCommentInput): Promise<PostCommentOutpu
     if (!input.isError) {
       const prUrlInText = extractPrUrl(responseText, input.repo);
       if (!prUrlInText) {
-        try {
-          const prExists = await hasOpenPrReferencingIssue(input.repo, input.issueNumber, token);
-          if (!prExists) {
-            responseText = sanitizeHarmony(
-              'The run ended before pushing a branch (likely hit the per-turn ceiling after editing part of the task); '
-              + 'no PR was created — re-dispatch with a smaller scope.',
-            );
+        // Determine if we have a substantive answer from the agent. For non-coding runs,
+        // the responseContent will contain one or more text blocks. If any block has
+        // non‑empty text, we consider the run to have produced a real answer and skip
+        // the "no PR" replacement heuristic.
+        const hasAnswer = (input.responseContent ?? []).some((b) => b?.Text?.trim());
+        if (!hasAnswer) {
+          try {
+            const prExists = await hasOpenPrReferencingIssue(input.repo, input.issueNumber, token);
+            if (!prExists) {
+              responseText = sanitizeHarmony(
+                'The run ended before pushing a branch (likely hit the per-turn ceiling after editing part of the task); '
+                + 'no PR was created — re-dispatch with a smaller scope.',
+              );
+            }
+          } catch (err) {
+            // Best-effort — a listing hiccup must not block the original comment.
+            console.warn(`Could not check for an existing PR referencing #${input.issueNumber}: ${err instanceof Error ? err.message : String(err)}`);
           }
-        } catch (err) {
-          // Best-effort — a listing hiccup must not block the original comment.
-          console.warn(`Could not check for an existing PR referencing #${input.issueNumber}: ${err instanceof Error ? err.message : String(err)}`);
         }
       }
     }
