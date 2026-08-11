@@ -176,13 +176,15 @@ When the user selects an agent in the chat UI, the frontend reads the agent's `M
 
 The harness calls the MCP server on demand using these exact credentials. This is the primary path for per-agent tool configuration.
 
-### Gateway registration (optional)
+### Gateway registration is mandatory (browser HarnessAgent path)
 
-MCP servers can also be registered as targets on the AgentCore Gateway. Registered targets benefit from gateway-level auth handling (workload identity, token exchange) rather than relying on raw header forwarding.
+Every `McpServer` must be registered as a target on the AgentCore Gateway before it can be assigned to an agent — there is no direct-URL connection option from the browser chat path anymore (#338). Registered targets get gateway-level auth handling (the `CUSTOM_JWT` authorizer + Cedar) instead of raw header forwarding.
 
-Registration happens via the `registerMcpTarget` GraphQL mutation → Amplify Lambda → `CreateGatewayTarget` API. The returned `gatewayTargetId` is saved on the `McpServer` record.
+Registration happens automatically: `register-mcp-target-stream` (a DynamoDB-stream Lambda on the `McpServer` table) calls `CreateGatewayTarget` within seconds of a server being created and saves the returned `gatewayTargetId` back onto the record. (The `registerMcpTarget` GraphQL mutation → Amplify Lambda does the same `CreateGatewayTarget` call for a caller that wants to register synchronously and handle the result itself — no UI currently calls it directly.) `web/app/(with-auth)/agents/page.tsx` blocks assigning an `McpServer` to an `Agent` until `gatewayTargetId` is set (disabled picker row + a save-time check), rather than trying to register again at assignment time and racing the stream Lambda.
 
-**Tool calls to a registered server route through the gateway, under Cedar.** Once a server has a `gatewayTargetId`, both invoke paths (`web/lib/harness-agent.ts` and `web/amplify/functions/invoke-agent/handler.ts`) send its `tools/call` to the gateway `/mcp` endpoint — not the direct URL — attaching the caller's Cognito **access token** as `Authorization: Bearer` (the ID token 403s at the `CUSTOM_JWT` authorizer with `insufficient_scope`, #327). The gateway's Cedar policy engine then authoritatively **permits or denies each call by the signed-in user's `cognito:groups`**, running in `ENFORCE` mode. This supersedes the older "harness bypasses the gateway" behavior. See [`docs/tool-governance.md`](./tool-governance.md) for the identity/permission model and a two-user demo.
+**`HarnessAgent.buildTools` (`web/lib/harness-agent.ts`) requires a `gatewayTargetId` for every tool it builds.** A server without one is dropped (with a `console.warn`), never direct-connected. Every remaining tool's `remoteMcp.url` is the gateway endpoint — not the server's own URL — with the caller's Cognito **access token** attached as `Authorization: Bearer` (the ID token 403s at the `CUSTOM_JWT` authorizer with `insufficient_scope`, #327). The gateway's Cedar policy engine then authoritatively **permits or denies each call by the signed-in user's `cognito:groups`**, running in `ENFORCE` mode. See [`docs/tool-governance.md`](./tool-governance.md) for the identity/permission model and a two-user demo.
+
+`web/amplify/functions/invoke-agent/handler.ts` (the webhook-invoked `invokeAgent` mutation path) still has a direct-URL fallback for a server without a `gatewayTargetId` — bringing that path under mandatory gateway routing too is tracked separately as part of the webhook machine-identity work (#337/#340), since it needs its own relayed-JWT design first.
 
 ### Validating connectivity
 

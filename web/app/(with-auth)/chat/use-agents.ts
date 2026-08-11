@@ -34,6 +34,9 @@ export type McpServerInfo = {
   headers: Array<{ key: string | null; value: string | null }> | null | undefined;
   enabled: boolean;
   oauthClientId?: string | null;
+  // Gateway routing is mandatory (#338) — a server without this is dropped by
+  // HarnessAgent's buildTools rather than direct-connected.
+  gatewayTargetId?: string | null;
 };
 
 export type AgentOption = {
@@ -117,6 +120,7 @@ export function useAgents(): AgentsState {
             headers,
             enabled: s.enabled ?? true,
             oauthClientId: s.oauthClientId ?? null,
+            gatewayTargetId: s.gatewayTargetId ?? null,
           });
         }
 
