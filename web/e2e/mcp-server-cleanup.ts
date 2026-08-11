@@ -109,6 +109,46 @@ interface McpServerRow {
   serverType: string | null;
 }
 
+/** URL fragment identifying an AgentCore gateway MCP server. */
+export const GATEWAY_URL_FRAGMENT = 'gateway.bedrock-agentcore';
+
+/**
+ * Return the distinct URLs of every deployed AgentCore gateway MCP server,
+ * queried straight from AppSync (SigV4-signed) rather than scraped from the UI.
+ * Used by mcp-gateway-oauth-discovery.spec.ts (#328) so the discovery-chain
+ * assertion runs against the real deployed gateway instead of vacuously
+ * skipping when the UI row isn't rendered. Returns [] when no endpoint resolves
+ * or no gateway server exists.
+ */
+export async function listGatewayMcpServerUrls(): Promise<string[]> {
+  const cfg = resolveGraphqlConfig();
+  if (!cfg) {
+    console.warn('[mcp-gateway] No GraphQL endpoint resolved; cannot list gateway servers.');
+    return [];
+  }
+  type Row = { id: string; url: string | null };
+  const urls = new Set<string>();
+  let nextToken: string | null = null;
+  do {
+    type ListResult = { listMcpServers: { items: Row[]; nextToken: string | null } };
+    const data: ListResult = await signedGraphql<ListResult>(
+      cfg,
+      `query ListUrls($nextToken: String) {
+         listMcpServers(limit: 1000, nextToken: $nextToken) {
+           items { id url }
+           nextToken
+         }
+       }`,
+      { nextToken },
+    );
+    for (const row of data.listMcpServers.items) {
+      if (row.url?.includes(GATEWAY_URL_FRAGMENT)) urls.add(row.url);
+    }
+    nextToken = data.listMcpServers.nextToken;
+  } while (nextToken);
+  return [...urls];
+}
+
 /** List every McpServer (following pagination). */
 async function listAllMcpServers(cfg: GraphqlConfig): Promise<McpServerRow[]> {
   const items: McpServerRow[] = [];
