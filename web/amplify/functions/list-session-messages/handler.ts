@@ -1,8 +1,10 @@
+import type { AppSyncIdentityCognito } from 'aws-lambda';
 import {
   BedrockAgentCoreClient,
   ListEventsCommand,
   ListMemoryRecordsCommand,
 } from '@aws-sdk/client-bedrock-agentcore';
+import { isActorAuthorized } from '../../../lib/caller-identity';
 
 const MEMORY_ID = process.env.AGENTCORE_MEMORY_ID!;
 const REGION = process.env.AWS_REGION ?? 'us-east-1';
@@ -13,6 +15,31 @@ interface ListSessionMessagesArgs {
   sessionId: string;
   actorId: string;
   nextToken?: string | null;
+}
+
+interface ListSessionMessagesEvent {
+  arguments: ListSessionMessagesArgs;
+  // AppSync populates this from the verified Cognito JWT (the query is
+  // allow.authenticated()). `sub` here is a trusted claim, not caller input.
+  identity?: AppSyncIdentityCognito | { sub?: never } | null;
+}
+
+/**
+ * Authorize the requested `actorId` against the verified caller (issue #256).
+ * A signed-in user may read only their OWN memory namespace (their Cognito
+ * `sub`) or the shared SHARED_ACTOR_ID namespace (where cross-surface
+ * webhook/ClaudeCode runs live). Any other actorId — e.g. another user's sub —
+ * is rejected, closing the prior hole where a caller-supplied actorId let any
+ * authenticated user read any actor's memory. Callers with no verified sub
+ * (should not happen under allow.authenticated()) may still read the shared
+ * namespace only.
+ */
+function assertActorAuthorized(event: ListSessionMessagesEvent, actorId: string): void {
+  const sub = event.identity && 'sub' in event.identity ? event.identity.sub ?? null : null;
+  if (isActorAuthorized(sub, actorId)) return;
+  throw new Error(
+    `Not authorized to read memory for actorId "${actorId}" (only your own identity or the shared namespace).`,
+  );
 }
 
 interface ConversationalEvent {
@@ -96,9 +123,10 @@ async function fetchSessionSummary(
 }
 
 export const handler = async (
-  event: { arguments: ListSessionMessagesArgs },
+  event: ListSessionMessagesEvent,
 ): Promise<ListSessionMessagesResult> => {
   const { sessionId, actorId, nextToken } = event.arguments;
+  assertActorAuthorized(event, actorId);
 
   // Fetch summary and raw events in parallel.
   const [summaryResult, eventsOutput] = await Promise.all([
