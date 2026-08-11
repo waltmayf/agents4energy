@@ -39,12 +39,13 @@ Payload shape (sent by `agent-webhook-invoke-claude`):
 
 ```jsonc
 {
-  "prompt":       "<user request, @agentcore-claude stripped>",
-  "repo":         "owner/name",   // optional; enables clone + PR
-  "issueNumber":  123,            // optional; used in the reply
-  "githubToken":  "ghs_...",      // optional; short-lived GitHub App token
-  "branch":       "main",         // optional; base branch to clone (default: repo default)
-  "systemAppend": "<AGENTS.md-derived extra system prompt>" // optional
+  "prompt":             "<user request, @agentcore-claude stripped>",
+  "repo":               "owner/name",   // optional; enables clone + PR
+  "issueNumber":        123,            // optional; used in the reply
+  "githubToken":        "ghs_...",      // optional; short-lived GitHub App token
+  "branch":             "main",         // optional; base branch to clone (default: repo default)
+  "systemAppend":       "<AGENTS.md-derived extra system prompt>", // optional
+  "cognitoAccessToken": "eyJ..."        // optional; signed-in caller's Cognito ACCESS token — see #339 below
 }
 ```
 
@@ -57,10 +58,24 @@ Claude Code speaks MCP natively but has no built-in browser tool, so `runManaged
 1. **Start a session.** `new Browser({ region }).startSession({ timeout: 28800 })` (the `bedrock-agentcore` npm SDK) starts an AgentCore Browser session on the AWS-managed default browser (8h timeout — long enough for the multi-hour jobs described above).
 2. **Sign a CDP endpoint.** `browser.generateWebSocketUrl()` returns a `wss://` URL plus SigV4 auth headers for the browser's Chrome DevTools Protocol endpoint (same signing the harness's `agentcore_browser` tool call uses under the hood).
 3. **Wrap it in an MCP server.** Rather than teaching Claude Code raw CDP, `@playwright/mcp` (a pinned dependency, not `npx`'d at runtime) is pointed at that endpoint via `--cdp-endpoint`/`--cdp-header` — it becomes a thin MCP wrapper over the already-running remote browser instead of launching its own local Chromium.
-4. **Load it into the CLI.** The `{ mcpServers: { "agentcore-browser": { command, args } } }` config is written to a `.mcp-agentcore-browser.json` in the job's `workDir` and passed to `claude -p` via `--mcp-config`, so the model gets `browser_navigate`/`browser_click`/`browser_type`/`browser_screenshot`/etc. through the standard MCP tool-call surface.
+4. **Load it into the CLI.** The `{ mcpServers: { "agentcore-browser": { command, args }, ... } }` config — merged with the gateway entry below by [`mcp-config.js`](../agent/default/app/ClaudeCode/mcp-config.js) into one file — is written to a `.mcp-agentcore.json` in the job's `workDir` and passed to `claude -p` via `--mcp-config`, so the model gets `browser_navigate`/`browser_click`/`browser_type`/`browser_screenshot`/etc. through the standard MCP tool-call surface.
 5. **Tear down.** `runManagedJob`'s `finally` stops the session (`browser.stopSession()`) and deletes the temp MCP config after the job (success or failure) — one browser session per job, not shared across concurrent runs on the same microVM.
 
-If the session fails to start (e.g. a role that predates the browser connection), `runManagedJob` logs and continues **without** `--mcp-config` rather than failing the whole job — a missing browser tool is better than no Claude Code run at all.
+If the session fails to start (e.g. a role that predates the browser connection), `runManagedJob` logs and continues without a browser entry rather than failing the whole job — a missing browser tool is better than no Claude Code run at all.
+
+### Gateway-routed MCP tools (#339)
+
+Every other MCP tool this runtime can reach goes through the AgentCore gateway — never a direct/container-local connection — exactly like the browser `HarnessAgent` chat path (`buildTools` in `web/lib/harness-agent.ts`, #338). [`gateway-mcp.js`](../agent/default/app/ClaudeCode/gateway-mcp.js) builds the entry:
+
+```jsonc
+"agentcore-gateway": {
+  "type": "http",
+  "url": "<AGENTCORE_GATEWAY_ENDPOINT>",
+  "headers": { "Authorization": "Bearer <cognitoAccessToken>" }
+}
+```
+
+`AGENTCORE_GATEWAY_ENDPOINT` is a runtime env var (wired in `backend.ts`, same value the browser harness path uses); `cognitoAccessToken` is the `payload` field above, relayed verbatim by `web/lib/claude-code-agent.ts` from the signed-in chat user's session — **the ACCESS token, not the ID token** (#327: the gateway's `CUSTOM_JWT` authorizer 403s an ID token with `insufficient_scope`). If either is missing (e.g. the `@agentcore-claude` webhook path, which has no signed-in browser user — see #340), the entry is simply omitted and this run gets no gateway MCP tools, same as before this issue. The container never constructs a `{sub, groups}` claims blob itself — Cedar reads `cognito:groups` straight off the relayed JWT, identically to the harness path.
 
 This is wired at the infrastructure level in [`agentcore.json`](../agent/default/agentcore/agentcore.json)'s `ClaudeCode` runtime entry:
 
