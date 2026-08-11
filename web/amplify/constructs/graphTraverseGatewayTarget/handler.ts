@@ -78,7 +78,9 @@ const toolDefinitions = (): ToolDefinition[] => [
     description:
       'Create or update an entity node in the knowledge graph (a well, field, document, dataset, …). Idempotent: '
       + 'looks up an existing node by natural key (props.naturalKey, or "kind:label" if omitted) and updates it '
-      + 'instead of creating a duplicate. Returns { id, created }.',
+      + 'instead of creating a duplicate. To link a node to a file in the agent workspace, set '
+      + 'props.s3Path to the "files/"-relative path (e.g. "reports/q3.pdf") — the graph explorer UI turns that '
+      + 'into an "Open file" button that presigns and opens the S3 object. Returns { id, created }.',
     inputSchema: {
       type: SchemaType.OBJECT,
       properties: {

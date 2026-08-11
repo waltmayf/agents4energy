@@ -39,6 +39,7 @@
     "@streamdown/code": "^1.1.1",
     "@streamdown/math": "^1.0.2",
     "@streamdown/mermaid": "^1.0.2",
+    "@xyflow/react": "^12.11.2",
     "ai": "^6.0.199",
     "aws-amplify": "^6.18.0",
     "class-variance-authority": "^0.7.1",

@@ -104,6 +104,26 @@ Because a single call is capped at `depth` hops and `perLevelLimit` edges per no
 
 ---
 
+## Explorer UI & S3 object linking (issue #332)
+
+### Linking a node to an S3 object
+
+A node is linked to a file in the agent workspace by setting **`props.s3Path`** to a `files/`-relative path (the same path convention as [`web/lib/s3-fs-path.ts`](../web/lib/s3-fs-path.ts) — e.g. `"reports/q3.pdf"` resolves to the S3 key `files/reports/q3.pdf`). This is a **convention on the existing `UpsertNode` tool**, not a new tool: the agent sets `props.s3Path` when it creates a `document`/`dataset` node for a file it read via the `s3-tools` `ReadFile`/`ListFiles` tools. The `UpsertNode` tool description documents this so the model knows to populate it.
+
+### The graph explorer page — [`web/app/(with-auth)/graph/page.tsx`](../web/app/(with-auth)/graph/page.tsx)
+
+A `(with-auth)` page (linked from the landing page's footer) that renders the whole graph with [React Flow](https://reactflow.dev) (`@xyflow/react`):
+
+- [`use-knowledge-graph.ts`](../web/app/(with-auth)/graph/use-knowledge-graph.ts) loads every `Node` + `Edge` row over AppSync (`userPool` auth, paged) and reads `s3Path` out of each node's free-form `props` (tolerating `props` being a JSON string, object, or null).
+- [`web/lib/graph-layout.ts`](../web/lib/graph-layout.ts) is a pure, unit-tested concentric-ring layout: the graph is small enough today to load whole and lay out client-side. Nodes are placed on rings by BFS distance from a root; disconnected nodes go to an outer orphan ring (`ring: -1`) so they stay visible. If the graph outgrows a whole-load, switch the page to the bounded `TraverseGraph` tool.
+- Clicking a node opens a detail panel; when the node has `props.s3Path`, an **Open file** button resolves the path to an S3 key (`resolveS3Path`) and calls Amplify Storage **`getUrl`** to mint a short-lived presigned GET URL, opened in a new tab. `getUrl` presigns with the signed-in user's Cognito Identity Pool credentials — so the browser identity needs `s3:GetObject`.
+
+### Storage access (issue #348)
+
+The `agentWorkspace` bucket historically granted access **only** to the `s3-tools` Lambda role (no browser/Cognito access). To let `getUrl` resolve, [`web/amplify/storage/resource.ts`](../web/amplify/storage/resource.ts) adds an `access` builder granting **authenticated read** on `files/*`. This is read-only and additive — browser writes are still not permitted; only the `s3-tools` Lambda writes, via its direct role grant in `backend.ts`.
+
+---
+
 ## Design Rationale
 
 **Why Amplify/AppSync bounded-depth instead of Neptune or Iceberg.** A single GraphQL query against AppSync can't express a runtime-variable-depth traversal — resolvers are shaped by the schema, not by a request parameter that says "go N hops, N chosen at runtime." Rather than reach for a graph-native store (Neptune, with Gremlin/openCypher) to get that, the traversal tool moves the "how deep" decision to the *agent*: each call is a fixed, small, cheap bounded-depth BFS, and the agent decides whether to issue another call rooted at the `frontier`. This sidesteps the need for runtime-variable depth entirely — the agent's loop *is* the recursion, one bounded hop at a time.
