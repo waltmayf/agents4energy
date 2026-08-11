@@ -1,5 +1,4 @@
 import { fetchAuthSession } from 'aws-amplify/auth';
-import { fetchCredential, isExpiredOrExpiringSoon } from '@/lib/mcp-auth';
 import { generateClient } from 'aws-amplify/data';
 import type { Schema } from '@/amplify/data/resource';
 
@@ -43,8 +42,7 @@ const GATEWAY_ENDPOINT = custom?.agentcore_gateway_endpoint;
 // not the Cognito user sub. Matches list-session-messages/handler.ts.
 const ACTOR_ID = 'default';
 
-// AppSync data client: maps MCP server URLs -> IDs when injecting stored OAuth
-// credentials, and loads session history for connect().
+// AppSync data client: loads session history for connect().
 const dataClient = generateClient<Schema>({ authMode: 'userPool' });
 
 export function makeClient(): BedrockAgentCoreClient {
@@ -91,7 +89,11 @@ async function fetchCallerIdentity(): Promise<{ identity: CallerIdentity; access
 export interface McpServerConfig {
   name: string;
   url: string;
+  // Unused by buildTools (gateway routing is mandatory, #338) — kept so
+  // callers built for a direct MCP connection still type-check.
   headers?: Record<string, string>;
+  // Required for buildTools to route this server through the gateway; a
+  // server without one is skipped (see buildTools).
   gatewayTargetId?: string;
 }
 
@@ -108,13 +110,22 @@ export interface HarnessAgentConfig {
 }
 
 /**
- * Resolve MCP server configs into remote_mcp HarnessTools, injecting stored
- * OAuth tokens. `callerAccessToken` is the signed-in user's raw Cognito ACCESS
- * token (see fetchCallerIdentity) — attached as `Authorization: Bearer` for any
- * server routed through the gateway, since `default-gateway`'s CUSTOM_JWT
- * authorizer requires a real Cognito access token (the ID token 403s with
- * `insufficient_scope`, #327), and Cedar reads `cognito:groups` off that same
- * JWT as a principal tag.
+ * Resolve MCP server configs into remote_mcp HarnessTools. Gateway routing is
+ * mandatory (#338): every tool is sent to `GATEWAY_ENDPOINT` with the caller's
+ * Cognito ACCESS token as `Authorization: Bearer` — there is no direct-URL
+ * fallback, so a server that isn't registered as a gateway target is simply
+ * dropped (with a warning) rather than connected to directly. This makes the
+ * gateway's CUSTOM_JWT authorizer + Cedar the single chokepoint for every MCP
+ * tool call from this path.
+ *
+ * `callerAccessToken` is the signed-in user's raw Cognito ACCESS token (see
+ * fetchCallerIdentity) — required because `default-gateway`'s CUSTOM_JWT
+ * authorizer rejects an ID token with `insufficient_scope` (#327), and Cedar
+ * reads `cognito:groups` off that same JWT as a principal tag.
+ *
+ * `McpServerConfig.headers` (per-server static/OAuth headers, meaningful only
+ * for a direct connection) is intentionally not forwarded here — it would be
+ * attached to the *gateway* request rather than the downstream MCP server.
  */
 async function buildTools(
   mcpServers: McpServerConfig[],
@@ -122,52 +133,29 @@ async function buildTools(
 ): Promise<HarnessTool[] | undefined> {
   if (!mcpServers.length) return undefined;
 
-  // Map URL -> server ID so we can look up stored credentials.
-  const serverRes = await dataClient.models.McpServer.list({ limit: 1000 });
-  const urlToId = new Map<string, string>();
-  (serverRes.data ?? []).forEach((s) => {
-    if (s.url) urlToId.set(s.url, s.id);
-  });
-
-  const resolved = await Promise.all(
-    mcpServers.map(async (s) => {
-      const serverId = urlToId.get(s.url);
-      if (serverId) {
-        const cred = await fetchCredential(serverId);
-        if (cred && !isExpiredOrExpiringSoon(cred)) {
-          return {
-            ...s,
-            headers: { ...(s.headers || {}), Authorization: `Bearer ${cred.accessToken}` },
-          };
-        }
-      }
-      return s;
-    }),
-  );
-
-  return resolved.map((s) => {
-    const routeThroughGateway = Boolean(s.gatewayTargetId && GATEWAY_ENDPOINT);
-    return {
+  const tools: HarnessTool[] = [];
+  for (const s of mcpServers) {
+    if (!s.gatewayTargetId || !GATEWAY_ENDPOINT) {
+      console.warn(
+        `[harness-agent] Skipping MCP server "${s.name}" — ${
+          GATEWAY_ENDPOINT ? 'no registered gateway target (gatewayTargetId)' : 'GATEWAY_ENDPOINT is not configured'
+        }. Gateway routing is mandatory; this server will not be reachable until it is registered as a gateway target (#338).`,
+      );
+      continue;
+    }
+    tools.push({
       type: 'remote_mcp',
       name: s.name,
       config: {
         remoteMcp: {
-          // Route through the AgentCore gateway when this server is registered as
-          // a gateway target (Cedar 3c, #279); fall back to the direct URL if the
-          // gateway endpoint isn't configured.
-          url: routeThroughGateway ? GATEWAY_ENDPOINT : s.url,
-          // The gateway's CUSTOM_JWT authorizer requires the caller's own Cognito
-          // ACCESS token as `Authorization: Bearer` (the ID token 403s with
-          // `insufficient_scope`, #327; a per-server OAuth token is only
-          // meaningful on the direct-URL connection) — this is also how Cedar
-          // reads `cognito:groups` as a principal tag on the gateway side.
-          headers: routeThroughGateway
-            ? (callerAccessToken ? { Authorization: `Bearer ${callerAccessToken}` } : undefined)
-            : (s.headers && Object.keys(s.headers).length ? s.headers : undefined),
+          url: GATEWAY_ENDPOINT,
+          headers: callerAccessToken ? { Authorization: `Bearer ${callerAccessToken}` } : undefined,
         },
       },
-    };
-  });
+    });
+  }
+
+  return tools.length ? tools : undefined;
 }
 
 /** Extract the plain text of an AG-UI message (user turns are simple text). */

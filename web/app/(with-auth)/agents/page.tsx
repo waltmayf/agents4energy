@@ -72,6 +72,11 @@ type McpServer = {
   enabled: boolean;
   headers: McpServerHeader[];
   oauthClientId?: string | null;
+  // Set once the server is registered as a gateway target (auto-registered by
+  // the register-mcp-target-stream Lambda shortly after creation, #338).
+  // Gateway routing is mandatory, so a server without this can't be assigned
+  // to an agent — see assertMcpServersRegistered below.
+  gatewayTargetId?: string | null;
 };
 
 type AgentRecord = {
@@ -111,7 +116,31 @@ function toMcpServer(s: any): McpServer {
       (h) => ({ key: h.key ?? '', value: h.value ?? '' }),
     ),
     oauthClientId: s.oauthClientId ?? null,
+    gatewayTargetId: s.gatewayTargetId ?? null,
   };
+}
+
+/**
+ * Gateway routing is mandatory (#338): HarnessAgent's buildTools drops any
+ * MCP server without a gatewayTargetId rather than connecting to it directly.
+ * Registration happens automatically (register-mcp-target-stream reacts to
+ * the McpServer table's DynamoDB stream within seconds of creation), so this
+ * blocks the *assignment* rather than trying to register synchronously from
+ * the browser — auto-registering here too would race the stream Lambda and
+ * risk creating a duplicate gateway target for the same server.
+ */
+async function assertMcpServersRegistered(ids: string[]): Promise<void> {
+  if (ids.length === 0) return;
+  const fetched = await Promise.all(ids.map((id) => amplifyClient.models.McpServer.get({ id })));
+  const unregistered = fetched
+    .filter((r) => r.data != null && !r.data.gatewayTargetId)
+    .map((r) => r.data!.name);
+  if (unregistered.length > 0) {
+    throw new Error(
+      `Cannot assign MCP server(s) without a registered gateway target: ${unregistered.join(', ')}. ` +
+        'Registration runs automatically a few seconds after a server is created — wait and try again.',
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1116,16 +1145,27 @@ function EditPanel({
                 <ul className="space-y-1.5" data-testid="mcp-server-list">
                   {sortedPickerServers.map((s) => {
                     const checked = form.mcpServerIds.includes(s.id);
+                    // Gateway routing is mandatory (#338) — a server without a
+                    // gatewayTargetId can't be assigned yet. Registration runs
+                    // automatically a few seconds after creation, so block new
+                    // selections but still allow removing an existing (already
+                    // saved) assignment.
+                    const unregistered = !s.gatewayTargetId;
+                    const disabled = unregistered && !checked;
                     return (
                       <li key={s.id} className="flex items-center gap-1.5">
                         <button
                           type="button"
-                          onClick={() => toggleId('mcpServerIds', s.id)}
+                          onClick={() => { if (!disabled) toggleId('mcpServerIds', s.id); }}
+                          disabled={disabled}
+                          title={unregistered ? 'Pending gateway registration — try again in a few seconds.' : undefined}
                           className={cn(
                             'flex-1 flex items-center gap-3 rounded-lg border px-3 py-2 text-left text-sm transition-colors',
                             checked
                               ? 'border-primary/40 bg-primary/5 text-foreground'
-                              : 'border-border bg-muted/30 text-muted-foreground hover:bg-muted/60',
+                              : disabled
+                                ? 'border-border bg-muted/10 text-muted-foreground/50 cursor-not-allowed'
+                                : 'border-border bg-muted/30 text-muted-foreground hover:bg-muted/60',
                           )}
                           data-testid={`mcp-toggle-${s.id}`}
                         >
@@ -1140,6 +1180,9 @@ function EditPanel({
                           <span className="flex-1 min-w-0">
                             <span className="font-medium text-foreground">{s.name}</span>
                             <span className="ml-2 text-xs text-muted-foreground truncate">{s.url}</span>
+                            {unregistered && (
+                              <span className="ml-2 text-xs text-amber-600">Pending gateway registration</span>
+                            )}
                           </span>
                         </button>
                         <Button
@@ -1485,6 +1528,8 @@ export default function AgentsPage() {
           const toAdd = form.mcpServerIds.filter((sid) => !existing.some((j) => j.mcpServerId === sid));
           const toRemove = existing.filter((j) => !form.mcpServerIds.includes(j.mcpServerId));
 
+          await assertMcpServersRegistered(toAdd);
+
           await Promise.all([
             ...toAdd.map((sid) => amplifyClient.models.AgentMcpServer.create({ agentId: id, mcpServerId: sid })),
             ...toRemove.map((j) => amplifyClient.models.AgentMcpServer.delete({ id: j.id })),
@@ -1527,6 +1572,8 @@ export default function AgentsPage() {
         if (createRes.errors?.length) throw new Error(createRes.errors.map((e) => e.message).join('; '));
 
         const newId = createRes.data!.id;
+
+        await assertMcpServersRegistered(form.mcpServerIds);
 
         await Promise.all([
           ...form.mcpServerIds.map((sid) => amplifyClient.models.AgentMcpServer.create({ agentId: newId, mcpServerId: sid })),

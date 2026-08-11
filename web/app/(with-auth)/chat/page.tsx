@@ -213,6 +213,7 @@ function ChatView({
           .filter((h): h is { key: string; value: string } => !!h.key && !!h.value)
           .map((h) => [h.key, h.value]),
       ),
+      gatewayTargetId: s.gatewayTargetId ?? undefined,
     })),
   };
 
