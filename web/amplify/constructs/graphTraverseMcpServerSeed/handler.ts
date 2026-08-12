@@ -8,6 +8,7 @@ interface ResourceProperties {
   GraphqlUrl: string;
   GraphqlRegion: string;
   GatewayEndpoint: string;
+  GatewayTargetId: string;
 }
 
 const DEMO_AGENT_SLUG = 'knowledge-graph-demo';
@@ -89,6 +90,7 @@ async function findOrCreateMcpServer(
   url: string,
   region: string,
   gatewayEndpoint: string,
+  gatewayTargetId: string,
 ): Promise<string> {
   // Match by the stable demo name, not by url == gatewayEndpoint — the gateway
   // endpoint can change across redeploys, and matching on it would orphan the
@@ -97,20 +99,25 @@ async function findOrCreateMcpServer(
     url,
     region,
     `query ListMcpServers($filter: ModelMcpServerFilterInput) {
-      listMcpServers(filter: $filter) { items { id url } }
+      listMcpServers(filter: $filter) { items { id url gatewayTargetId } }
     }`,
     { filter: { name: { eq: DEMO_MCP_SERVER_NAME } } },
   );
-  const existingItem = (existing.listMcpServers as { items?: Array<{ id: string; url: string }> })?.items?.[0];
+  const existingItem = (existing.listMcpServers as {
+    items?: Array<{ id: string; url: string; gatewayTargetId: string | null }>;
+  })?.items?.[0];
   if (existingItem) {
-    if (existingItem.url !== gatewayEndpoint) {
+    // Backfill gatewayTargetId on redeploy (issue #359) even when the url is
+    // unchanged, so pre-existing rows created before this field existed pick
+    // it up.
+    if (existingItem.url !== gatewayEndpoint || existingItem.gatewayTargetId !== gatewayTargetId) {
       await signedGraphqlRequest(
         url,
         region,
         `mutation UpdateMcpServer($input: UpdateMcpServerInput!) {
           updateMcpServer(input: $input) { id }
         }`,
-        { input: { id: existingItem.id, url: gatewayEndpoint } },
+        { input: { id: existingItem.id, url: gatewayEndpoint, gatewayTargetId } },
       );
     }
     return existingItem.id;
@@ -126,6 +133,7 @@ async function findOrCreateMcpServer(
       input: {
         name: DEMO_MCP_SERVER_NAME,
         url: gatewayEndpoint,
+        gatewayTargetId,
         description: 'AgentCore Gateway exposing the knowledge-graph TraverseGraph traversal tool (issue #291).',
         serverType: 'agentcore',
         enabled: true,
@@ -180,7 +188,12 @@ export const handler = async (
   }
 
   const agentId = await findOrCreateAgent(props.GraphqlUrl, props.GraphqlRegion);
-  const mcpServerId = await findOrCreateMcpServer(props.GraphqlUrl, props.GraphqlRegion, props.GatewayEndpoint);
+  const mcpServerId = await findOrCreateMcpServer(
+    props.GraphqlUrl,
+    props.GraphqlRegion,
+    props.GatewayEndpoint,
+    props.GatewayTargetId,
+  );
   const linkId = await ensureAgentMcpServerLink(props.GraphqlUrl, props.GraphqlRegion, agentId, mcpServerId);
 
   return { PhysicalResourceId: linkId };

@@ -18,6 +18,8 @@ export interface GraphTraverseMcpServerSeedProps {
   gatewayEndpoint: string;
   /** AppSync GraphQL API id — scopes the handler's appsync:GraphQL grant to this API only. */
   graphqlApiId: string;
+  /** The graph-traverse gateway target's id — written onto the seeded McpServer's gatewayTargetId field. */
+  gatewayTargetId: string;
 }
 
 /**
@@ -59,6 +61,7 @@ export class GraphTraverseMcpServerSeed extends Construct {
         GraphqlUrl: props.graphqlUrl,
         GraphqlRegion: props.graphqlRegion,
         GatewayEndpoint: props.gatewayEndpoint,
+        GatewayTargetId: props.gatewayTargetId,
       },
     });
   }

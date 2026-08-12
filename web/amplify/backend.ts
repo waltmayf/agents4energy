@@ -909,6 +909,7 @@ if (AGENTCORE_GATEWAY_ID) {
       graphqlRegion: AGENTCORE_REGION,
       graphqlApiId,
       gatewayEndpoint: AGENTCORE_GATEWAY_ENDPOINT,
+      gatewayTargetId: graphTraverseGatewayTarget.targetId,
     });
   }
 }
