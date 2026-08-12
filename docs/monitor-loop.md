@@ -178,14 +178,19 @@ Key properties:
   it's specifically the `gh` CLI's own auth config that's missing. So a
   `checkCommand` that needs the GitHub API should use `curl` (unauthenticated
   for public repos; rate-limited without a token) or plain `git`, not `gh`.
-  For the standard orchestrator "are the workers done?" condition — no open
-  issue carries `agent-working` — use
+  For the standard orchestrator "are the workers done?" condition — no
+  **other** open issue carries `agent-working` — use
   [`scripts/agents-done-check.sh`](../scripts/agents-done-check.sh) (issue
   #378): a `curl`-only equivalent of `scripts/wait-for-agents.sh` that resolves
   repo/label via the same `scripts/lib/agents-wait-config.sh` loader, so it
-  agrees with the interactive scripts. Verbatim `checkCommand`:
-  `"checkCommand": "bash /mnt/workspace/agents4energy/scripts/agents-done-check.sh"`
-  (no `bash -c "..."` wrapper needed — the command has no pipes/`&&`/quoting).
+  agrees with the interactive scripts. The orchestrator must pass
+  `EXCLUDE_ISSUE=<its own epic issue number>` (issue #395): the execution
+  running the orchestrator holds `agent-working` on its epic issue for the
+  run's entire duration, including while parked in this very `Wait`, so
+  without the exclusion the check would always see its own epic issue and
+  could never return 0. Setting an env var this way is shell syntax, so —
+  unlike the no-args form — it needs the `bash -c "..."` wrapper:
+  `"checkCommand": "bash -c \"EXCLUDE_ISSUE=390 /mnt/workspace/agents4energy/scripts/agents-done-check.sh\""`.
 
 ## Execution timeout — the real ceiling on a long wait (#377)
 
