@@ -4,6 +4,7 @@ import { generateClient } from 'aws-amplify/data';
 import type { Schema } from '@/amplify/data/resource';
 import { useCurrentUser } from '@/lib/use-current-user';
 import { listAllToolGrants, isToolGrantedToAnyGroup, type ToolGrant } from '@/lib/tool-permissions';
+import { safeListMcpServers } from '@/lib/mcp-server-safe-list';
 
 const amplifyClient = generateClient<Schema>({ authMode: 'userPool' });
 
@@ -75,14 +76,13 @@ export function useAgents(): AgentsState {
         const [agentsRes, joinRes, serversRes, credsRes, grants] = await Promise.all([
           amplifyClient.models.Agent.list({ filter: { enabled: { eq: true } } }),
           amplifyClient.models.AgentMcpServer.list(),
-          amplifyClient.models.McpServer.list({ filter: { enabled: { eq: true } } }),
+          safeListMcpServers({ filter: { enabled: { eq: true } } }),
           amplifyClient.models.McpServerCredential.list(),
           listAllToolGrants(),
         ]);
 
         if (agentsRes.errors?.length) console.error('[useAgents] agents error', agentsRes.errors);
         if (joinRes.errors?.length) console.error('[useAgents] join error', joinRes.errors);
-        if (serversRes.errors?.length) console.error('[useAgents] servers error', serversRes.errors);
         if (credsRes.errors?.length) console.error('[useAgents] credentials error', credsRes.errors);
 
         // Build a map of mcpServerId -> Bearer token (only non-expired ones).

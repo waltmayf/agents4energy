@@ -25,6 +25,39 @@ export const handler: DynamoDBStreamHandler = async (event) => {
     if (!newImage) continue;
     const item = unmarshall(newImage as unknown as Record<string, AttributeValue>);
     const { id, name, url, description, gatewayTargetId } = item as any;
+
+    // Self-heal a poisoned `name` (#387). `name` is `a.string().required()`,
+    // but Amplify's generated `UpdateMcpServerInput` makes every field
+    // nullable regardless of the model's `.required()` (partial-update
+    // semantics), and the default DynamoDB resolver REMOVEs any attribute an
+    // update explicitly sets to null — so an `updateMcpServer` mutation with
+    // `name: null` silently drops the attribute with no validation error.
+    // That poisons every `listMcpServers` query for everyone via AppSync's
+    // non-null propagation (the generated connection type is
+    // `items: [McpServer!]!`). Only MODIFY can produce this — createMcpServer
+    // requires `name` at the GraphQL layer — so restore it from OldImage.
+    if (!name && record.eventName === 'MODIFY') {
+      const oldImage = record.dynamodb?.OldImage;
+      const oldName = oldImage
+        ? (unmarshall(oldImage as unknown as Record<string, AttributeValue>) as any).name
+        : undefined;
+      if (oldName) {
+        await ddb.send(
+          new UpdateItemCommand({
+            TableName: process.env.MCP_SERVER_TABLE_NAME!,
+            Key: { id: { S: id } },
+            UpdateExpression: 'SET #n = :n',
+            ExpressionAttributeNames: { '#n': 'name' },
+            ExpressionAttributeValues: { ':n': { S: oldName } },
+          }),
+        );
+        console.warn(`[register-mcp-target-stream] Restored null name on McpServer ${id} to "${oldName}" (#387).`);
+      } else {
+        console.warn(`[register-mcp-target-stream] McpServer ${id} has a null name with no prior value to restore.`);
+      }
+      continue; // our own UpdateItem re-triggers this handler; skip registration this pass
+    }
+
     if (gatewayTargetId) continue; // already registered
     // Register gateway target
     const result = await controlClient.send(
