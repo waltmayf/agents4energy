@@ -497,19 +497,32 @@ putAgentcoreParam('SsmAgentcoreRegion', 'region', AGENTCORE_REGION);
 putAgentcoreParam('SsmAgentcoreClaudeCodeRuntimeArn', 'claude_code_runtime_arn', AGENTCORE_CLAUDE_CODE_RUNTIME_ARN);
 putAgentcoreParam('SsmAgentcoreAguiRuntimeArn', 'agui_runtime_arn', AGENTCORE_AGUI_RUNTIME_ARN);
 
-// Grant the pool's authenticated role permission to invoke the harness.
+// Grant every authenticated-principal role permission to invoke the harness.
+//
+// The Identity Pool uses TOKEN role mapping (see auth/resource.ts's `groups`
+// list), so a user who belongs to a Cognito group assumes that GROUP's IAM
+// role instead of the pool's default authenticatedUserIamRole (#360 —
+// grouped users got AccessDeniedException on every chat turn because only
+// the default role carried this grant). Attach to the default role AND every
+// group role from backend.auth.resources.groups so any authenticated user,
+// grouped or not, can invoke.
 //
 // Attach via a standalone Policy rather than `role.addToPrincipalPolicy(...)`:
-// Amplify surfaces authenticatedUserIamRole as a role owned by the auth stack,
-// and adding a principal policy to it silently no-ops — the statement never
-// synthesizes onto the role (observed as an AccessDeniedException at invoke
-// time). An AWS::IAM::Policy only needs the role name to attach, so create it
-// in agentStack (which owns AGENTCORE_HARNESS_ARN and already depends on the
+// Amplify surfaces these as roles owned by the auth stack, and adding a
+// principal policy to them silently no-ops — the statement never synthesizes
+// onto the role (observed as an AccessDeniedException at invoke time). An
+// AWS::IAM::Policy only needs the role name to attach, so create it in
+// agentStack (which owns AGENTCORE_HARNESS_ARN and already depends on the
 // auth stack for the AgUiHandler's Cognito config — so referencing the auth
-// role here adds no new dependency and introduces no cycle).
+// roles here adds no new dependency and introduces no cycle).
+const authenticatedPrincipalRoles = [
+  backend.auth.resources.authenticatedUserIamRole,
+  ...Object.values(backend.auth.resources.groups).map((group) => group.role),
+];
+
 if (AGENTCORE_HARNESS_ARN) {
   new Policy(agentStack, 'HarnessInvokeAuthPolicy', {
-    roles: [backend.auth.resources.authenticatedUserIamRole],
+    roles: authenticatedPrincipalRoles,
     statements: [
       new PolicyStatement({
         // InvokeHarnessCommand checks BOTH IAM actions — InvokeAgentRuntime
@@ -525,14 +538,16 @@ if (AGENTCORE_HARNESS_ARN) {
   });
 }
 
-// Grant the same authenticated role permission to invoke the ClaudeCode
-// runtime directly (issue #204) — lets the chat UI drive it the same way the
-// GitHub @agentcore-claude webhook does (see agentWebhookInvokeClaude above).
-// Same resource shape as that Lambda's grant: InvokeAgentRuntime authorizes
-// against the runtime's ENDPOINT sub-resource, not just the bare runtime ARN.
+// Grant the same authenticated-principal roles permission to invoke the
+// ClaudeCode runtime directly (issue #204) — lets the chat UI drive it the
+// same way the GitHub @agentcore-claude webhook does (see
+// agentWebhookInvokeClaude above). Same resource shape as that Lambda's
+// grant: InvokeAgentRuntime authorizes against the runtime's ENDPOINT
+// sub-resource, not just the bare runtime ARN. Same group-role gap as the
+// harness grant above (#360) — grant to all authenticatedPrincipalRoles.
 if (AGENTCORE_CLAUDE_CODE_RUNTIME_ARN) {
   new Policy(agentStack, 'ClaudeCodeRuntimeInvokeAuthPolicy', {
-    roles: [backend.auth.resources.authenticatedUserIamRole],
+    roles: authenticatedPrincipalRoles,
     statements: [
       new PolicyStatement({
         actions: ['bedrock-agentcore:InvokeAgentRuntime'],
@@ -545,13 +560,14 @@ if (AGENTCORE_CLAUDE_CODE_RUNTIME_ARN) {
   });
 }
 
-// Grant the same authenticated role permission to invoke the AguiAgent
-// runtime directly (issue #176) — frontend wiring to actually use it is a
-// separate follow-up, but the grant is additive and harmless to land now.
-// Same resource shape as the ClaudeCode grant above.
+// Grant the same authenticated-principal roles permission to invoke the
+// AguiAgent runtime directly (issue #176) — frontend wiring to actually use
+// it is a separate follow-up, but the grant is additive and harmless to land
+// now. Same resource shape as the ClaudeCode grant above, and same
+// group-role gap as the harness grant above (#360).
 if (AGENTCORE_AGUI_RUNTIME_ARN) {
   new Policy(agentStack, 'AguiRuntimeInvokeAuthPolicy', {
-    roles: [backend.auth.resources.authenticatedUserIamRole],
+    roles: authenticatedPrincipalRoles,
     statements: [
       new PolicyStatement({
         actions: ['bedrock-agentcore:InvokeAgentRuntime'],
