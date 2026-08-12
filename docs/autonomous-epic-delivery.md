@@ -184,16 +184,21 @@ At the end of a wave the orchestrator emits a fenced ` ```monitor ` block:
 {
   "intervalSeconds": 900,
   "maxIterations": 40,
-  "checkCommand": "bash /mnt/workspace/agents4energy/scripts/agents-done-check.sh",
+  "checkCommand": "bash -c \"EXCLUDE_ISSUE=NNN /mnt/workspace/agents4energy/scripts/agents-done-check.sh\"",
   "followUpPrompt": "All dispatched worker runs have finished. Review and merge the green PRs, re-dispatch any issue that finished with no PR, then continue the epic-delivery loop."
 }
 ```
 ````
 
 `scripts/agents-done-check.sh` (issue #378) is the standard `checkCommand` for
-this condition — see below. It has no pipes/`&&`/quoting, so unlike a raw
-`curl | grep` one-liner it can be handed to `checkCommand` directly, with no
-`bash -c "..."` wrapper needed.
+this condition — see below. **`EXCLUDE_ISSUE` must be set to the orchestrator's
+own epic issue number** (`NNN` above, issue #395): the Step Functions execution
+running the orchestrator holds `agent-working` on that epic issue for the
+run's entire duration — including while parked in this very `Wait` — so
+without excluding it, the epic issue always matches the label query and the
+condition could never return 0. Setting an env var is shell syntax, so this
+needs the `bash -c "..."` wrapper (unlike the plain no-args form, which has no
+pipes/`&&`/quoting and could be handed to `checkCommand` directly).
 
 What happens then (all already implemented):
 
@@ -243,10 +248,12 @@ poll loop. Two orchestrator wait shapes (see issue #377):
 
 The "are workers done?" condition is the same one
 [`scripts/wait-for-agents.sh`](../scripts/wait-for-agents.sh) uses
-interactively: **no open issue carries the `agent-working` label** — the webhook
-adds that label when a dispatched run starts and removes it when the run ends
-(success *or* empty-handed at the ceiling), so its absence is the authoritative
-"my turn to act" signal.
+interactively: **no *other* open issue carries the `agent-working` label** —
+the webhook adds that label when a dispatched run starts and removes it when
+the run ends (success *or* empty-handed at the ceiling), so its absence is the
+authoritative "my turn to act" signal. The orchestrator's own run is itself one
+of these labeled executions (on its epic issue), which is exactly why it must
+exclude that one issue from its own check — see `EXCLUDE_ISSUE` above.
 
 ---
 

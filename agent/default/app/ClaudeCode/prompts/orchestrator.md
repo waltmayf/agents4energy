@@ -133,14 +133,19 @@ polling in-session. Pick the shape that fits what you're waiting on:
   {
     "intervalSeconds": 900,
     "maxIterations": 40,
-    "checkCommand": "bash -c \"/mnt/workspace/agents4energy/scripts/agents-done-check.sh\"",
+    "checkCommand": "bash -c \"EXCLUDE_ISSUE=NNN /mnt/workspace/agents4energy/scripts/agents-done-check.sh\"",
     "followUpPrompt": "Resume the epic-delivery loop for epic #NNN. Read the delivery-ledger comment on #NNN, then continue."
   }
   ```
   `scripts/agents-done-check.sh` is `gh`-free (curl + git only — the exec
   environment for `checkCommand` has no `gh` auth) and exits 0 the moment no
-  open issue in this repo carries the `agent-working` label — the
-  authoritative "workers done" signal.
+  **other** open issue in this repo carries the `agent-working` label — the
+  authoritative "workers done" signal. **Always set `EXCLUDE_ISSUE` to your
+  own epic issue number** (`NNN` above): the Step Functions execution running
+  you holds `agent-working` on the epic issue for your run's entire
+  duration — including while parked in this very `Wait` — so without the
+  exclusion the epic issue always matches and this condition could never
+  return 0 (see #395).
 - **Nothing to dispatch right now but not done either** (e.g. everything
   ready is already dispatched, or you're intentionally spacing out waves) →
   a timed wait:
