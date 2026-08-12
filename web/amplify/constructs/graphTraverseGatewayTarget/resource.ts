@@ -30,6 +30,9 @@ export interface GraphTraverseGatewayTargetProps {
  * targets by name before creating.
  */
 export class GraphTraverseGatewayTarget extends Construct {
+  /** The AgentCore gateway target id (custom resource's PhysicalResourceId) — feed into GraphTraverseMcpServerSeed. */
+  public readonly targetId: string;
+
   constructor(scope: Construct, id: string, props: GraphTraverseGatewayTargetProps) {
     super(scope, id);
 
@@ -70,7 +73,7 @@ export class GraphTraverseGatewayTarget extends Construct {
       onEventHandler: fn,
     });
 
-    new CustomResource(this, 'Resource', {
+    const resource = new CustomResource(this, 'Resource', {
       serviceToken: provider.serviceToken,
       properties: {
         GatewayIdentifier: props.gatewayIdentifier,
@@ -78,5 +81,7 @@ export class GraphTraverseGatewayTarget extends Construct {
         LambdaArn: props.lambdaArn,
       },
     });
+
+    this.targetId = resource.ref;
   }
 }
