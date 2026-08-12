@@ -116,13 +116,22 @@ async function scanAll<T>(tableName: string): Promise<T[]> {
   return all;
 }
 
+interface ResolvedTarget {
+  targetName: string;
+  /** Concrete tool names on this target, for enumerating "*" wildcard grants (see cedar-policy-generation.ts). Undefined if the target's tool schema isn't inline (e.g. an S3-hosted schema). */
+  toolNames?: string[];
+}
+
 /** GetGatewayTarget's `name` is the Cedar action-naming "<targetName>" segment (see cedar-policy-generation.ts). */
-async function resolveTargetName(gatewayTargetId: string): Promise<string | null> {
+async function resolveTarget(gatewayTargetId: string): Promise<ResolvedTarget | null> {
   try {
     const res = await controlClient.send(
       new GetGatewayTargetCommand({ gatewayIdentifier: GATEWAY_ID, targetId: gatewayTargetId }),
     );
-    return res.name ?? null;
+    if (!res.name) return null;
+    const inlinePayload = res.targetConfiguration?.mcp?.lambda?.toolSchema?.inlinePayload;
+    const toolNames = inlinePayload?.map((tool) => tool.name).filter((name): name is string => !!name);
+    return { targetName: res.name, toolNames };
   } catch {
     // The target may have been deleted out-of-band, or belong to a stale
     // gatewayTargetId left over from a prior gateway. Skip grants for it
@@ -139,29 +148,37 @@ export const handler: DynamoDBStreamHandler = async () => {
     scanAll<McpServerRow>(MCP_SERVER_TABLE_NAME),
   ]);
 
-  const targetNameByServerId = new Map<string, string>();
+  const targetByServerId = new Map<string, ResolvedTarget>();
   const registeredServers = servers.filter((s): s is McpServerRow & { gatewayTargetId: string } => !!s.gatewayTargetId);
   const resolved = await Promise.all(
-    registeredServers.map(async (s) => ({ id: s.id, targetName: await resolveTargetName(s.gatewayTargetId) })),
+    registeredServers.map(async (s) => ({ id: s.id, target: await resolveTarget(s.gatewayTargetId) })),
   );
-  for (const { id, targetName } of resolved) {
-    if (targetName) targetNameByServerId.set(id, targetName);
+  for (const { id, target } of resolved) {
+    if (target) targetByServerId.set(id, target);
   }
 
   // Grants on a server with no resolvable gateway target (never registered,
   // or registration is stale) can't be translated into a Cedar action name —
   // skip them; they simply produce no policy until the server is (re)registered.
   const translatable: ToolGrantInput[] = grants.flatMap((grant) => {
-    const targetName = targetNameByServerId.get(grant.mcpServerId);
-    if (!targetName) return [];
-    return [{ group: grant.group, targetName, toolName: grant.toolName, effect: grant.effect }];
+    const target = targetByServerId.get(grant.mcpServerId);
+    if (!target) return [];
+    return [{
+      group: grant.group,
+      targetName: target.targetName,
+      toolName: grant.toolName,
+      effect: grant.effect,
+      targetToolNames: target.toolNames,
+    }];
   });
 
   const desired = generateCedarPolicies(translatable, GATEWAY_ARN);
   const result = await syncCedarPolicies(policyEngineClient, POLICY_ENGINE_ID, desired);
+  const droppedWildcards = translatable.length - desired.length;
 
   console.log(
     `Cedar policy sync: ${result.created.length} created, ${result.updated.length} updated, ${result.deleted.length} deleted ` +
-      `(${grants.length} grants, ${grants.length - translatable.length} skipped for unresolved gateway targets).`,
+      `(${grants.length} grants, ${grants.length - translatable.length} skipped for unresolved gateway targets, ` +
+      `${droppedWildcards} "*" grants dropped for unresolved tool names).`,
   );
 };
