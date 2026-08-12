@@ -12,16 +12,22 @@ import { writeFileSync } from 'fs';
 import { execSync } from 'child_process';
 import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { createHash } from 'crypto';
 import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const outputPath = resolve(root, 'web/e2e-config.json');
 
-// Must match the BRANCH_SLUG convention in scripts/build.sh exactly (slashes to
-// dashes, lowercase, truncate to 14 chars — the ampx --identifier limit is 15),
-// since that's the slug `pnpm deploy` published the SSM parameter under.
+// Must match the BRANCH_SLUG convention in scripts/build.sh exactly: slashes to
+// dashes, lowercase, then first 8 chars + '-' + first 5 hex chars of the full
+// name's sha1 (14 chars total — the ampx --identifier limit is 15). A blind
+// truncate-to-14 collided whenever two branches shared a 14-char prefix
+// (#400); the hash suffix makes that vanishingly unlikely. That's the slug
+// `pnpm deploy` published the SSM parameter under.
 function slugBranch(value: string): string {
-  return value.replace(/\//g, '-').toLowerCase().slice(0, 14);
+  const lowerDashed = value.replace(/\//g, '-').toLowerCase();
+  const hash = createHash('sha1').update(lowerDashed).digest('hex').slice(0, 5);
+  return `${lowerDashed.slice(0, 8)}-${hash}`;
 }
 function slugRepo(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9-/]+/g, '-');

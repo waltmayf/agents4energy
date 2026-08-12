@@ -60,8 +60,13 @@ jobs:
         run: |
           RAW_BRANCH="${{ github.event.ref || inputs.branch }}"
           # Mirror scripts/build.sh's normalisation exactly, so this resolves to the
-          # same --identifier the sandbox was deployed with (ampx limit is 15 chars).
-          BRANCH_SLUG=$(echo "$RAW_BRANCH" | tr '/' '-' | tr '[:upper:]' '[:lower:]' | cut -c1-14)
+          # same --identifier the sandbox was deployed with: lowercase + dashes,
+          # then first 8 chars + '-' + first 5 hex chars of the full name's sha1
+          # (14 chars total, under the ampx 15-char limit). See #400 — a blind
+          # truncate-to-14 collided whenever two branches shared a 14-char prefix.
+          BRANCH_LOWER_DASHED=$(echo "$RAW_BRANCH" | tr '/' '-' | tr '[:upper:]' '[:lower:]')
+          BRANCH_HASH=$(printf '%s' "$BRANCH_LOWER_DASHED" | sha1sum | cut -c1-5)
+          BRANCH_SLUG="$(echo "$BRANCH_LOWER_DASHED" | cut -c1-8)-$BRANCH_HASH"
           # ampx strips hyphens from the identifier when naming the sandbox stack.
           BRANCH_SLUG_CLEAN=$(echo "$BRANCH_SLUG" | tr -d '-')
           PROJECT=$(node -p "require('./web/package.json').name")
