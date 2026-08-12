@@ -35,6 +35,17 @@ If you discover a bug:
 1. Check the current github issues cover the bug, and if so make sure the issue has sufficient context
 2. If not, create a github issue. Use the github native relationships feature to describe blocking relationships with other issues.
 
+#### Scope epics and issues for token efficiency
+
+The autonomous loop is driven by an **orchestrator** agent that dispatches **worker** runs and sleeps between waves via the Step Functions monitor loop. Each wave (worker *and* orchestrator re-invoke) starts a **cold** Claude Code process — there is no `--resume`, so no conversation context carries across a wait. That's a feature: cost per wave is bounded by that wave's own work, never the sum of all prior waves. Plan issues so this stays cheap:
+
+- **One issue = one independently-deliverable slice.** Size each child issue so a single worker can finish it in one turn (well under the ~3h ceiling) and push a PR — small enough that the worker never needs a huge context to complete it. Prefer more small slices over few large ones.
+- **Make every slice re-hydratable from GitHub, not from chat.** The issue body must carry all context a cold agent needs: acceptance criteria, affected paths, links to relevant docs/code, and the design decision. Never assume the agent remembers a prior wave or this conversation — it won't.
+- **Keep cross-wave state compact and external.** The orchestrator reconstructs "where am I?" from a compact durable source (the epic's checklist, sub-issue rollup, `blocked-by` graph, and a short delivery-ledger comment) — not from a growing transcript. Decisions, blockers, and progress live on the issue/PR trail so the next cold wave re-reads a few hundred tokens, not a full history.
+- **Delegate heavy reading down, not up.** Design the flow so the orchestrator reads *conclusions* (a worker's one-line "merge-ready / blocked because X"), while diffs, CI logs, and file dumps stay in the worker's context and never accumulate in the orchestrator's window.
+
+See [docs/autonomous-epic-delivery.md](docs/autonomous-epic-delivery.md) for the full operating model this scoping supports.
+
 ### GitHub Pull Requests
 
 Every PR that resolves an issue **must** include a GitHub auto-closing keyword in its body so the issue closes automatically on merge. Use one of `Closes #<issue>`, `Fixes #<issue>`, or `Resolves #<issue>` (each on its own line). Use `Relates to #<issue>` only for a non-closing reference.
@@ -74,8 +85,10 @@ The default mode for open work is an autonomous loop that drives issues to done 
 2. **Implement** the change on a feature branch (never commit straight to `main`).
 3. **Deploy** to the sandbox (`pnpm deploy`) and, for `web/amplify/` changes, first run the credential-free synth gate (`cd web && pnpm test:synth`). Always type-check (`npx tsc --noEmit`) before pushing.
 4. **Test** — run the relevant E2E/lint suite and confirm the change actually works against the deployed backend, not just that it compiles.
-5. **Merge** once green: open a PR with the auto-closing keyword, wait for checks, and merge. Then move to the next item.
+5. **Merge** once green: open a PR with the auto-closing keyword and wait for checks. **In `development` phase, merge autonomously** once the PR is green and on-scope. **In `production` phase, do NOT merge to `main` yourself** — prepare the PR (green checks, valid closing keyword, on-scope diff), post your merge-readiness verdict, request review, label the issue `needs-review`, and let a human review and merge. Then move to the next item.
 6. **Repeat** until all open work is done.
+
+**Which phase are we in?** Read the `PROJECT_PHASE` signal (see [docs/autonomous-epic-delivery.md](docs/autonomous-epic-delivery.md) — "Development mode vs. production mode"). Default is `development`: breaking changes, deleting shared resources, and autonomous merge to `main` are all fine. In `production`: destructive actions require a `needs-review` gate, and **merging to `main` is a human step** — the loop does everything up to merge, then hands off.
 
 **When you need input from me, don't block the whole loop:**
 - Add the `needs-review` label to that issue (`gh issue edit <n> --add-label needs-review --repo waltmayf/agents4energy`).
@@ -83,7 +96,7 @@ The default mode for open work is an autonomous loop that drives issues to done 
 - Leave any in-progress PR for that issue as a **draft**, and move on to the next open item.
 - Revisit `needs-review` issues once I've answered (the label is my signal back to you — I'll remove it or reply).
 
-Keep me informed by using the issue/PR trail as the source of truth: every decision, blocker, and question lives on the relevant issue, not only in this chat.
+Keep me informed by using the issue/PR trail as the source of truth: every decision, blocker, and question lives on the relevant issue, not only in this chat. This is also what keeps the loop token-efficient — each wave restarts cold (no conversation carries across a monitor-loop wait), so the issue/PR trail *is* the memory the next wave re-reads. Treat every wave as stateless and re-derivable from GitHub; keep any running state you need in a compact ledger comment, not in context. See the token-efficiency scoping rules under "GitHub Issues" above.
 
 ### Docuemntation
 Be sure to keep the documentation in the `./docs` folder fresh. After you make a change, make sure the relevant docs are still correct, and create a new doc if it's something either a developer or user would want to know about.
