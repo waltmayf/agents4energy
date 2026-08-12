@@ -128,6 +128,37 @@ Each worker is a single `@agentcore-claude` dispatch against one issue. It:
    runtime already detects an ask-for-input final message and surfaces it — see
    `docs/claude-code-agentcore-runtime.md`.)
 
+### Starting an orchestrator run
+
+The orchestrator has a versioned persona:
+[`agent/default/app/ClaudeCode/prompts/orchestrator.md`](../agent/default/app/ClaudeCode/prompts/orchestrator.md).
+Orchestrator and worker are the **same** `@agentcore-claude` runtime — they
+differ only in which prompt they're told to follow. No code change is needed
+to dispatch an orchestrator: the webhook already appends this repo's
+`AGENTS.md` to every run's system prompt via `--append-system-prompt`
+(`agent/default/app/ClaudeCode/server.js`, `runClaudeCode()`, ~line 465,
+fed from `agentsSystemPrompt` in `agent-webhook-invoke-claude/handler.ts`) —
+the orchestrator prompt just rides on top of that as a file the agent reads
+from its own repo checkout, rather than requiring a second injection path.
+
+To start an orchestrator wave, comment on the **epic issue** you want it to
+drive:
+
+```
+@agentcore-claude Act as the orchestrator described in
+agent/default/app/ClaudeCode/prompts/orchestrator.md — read that file now
+and follow it exactly as your operating loop for this epic. Start the first
+wave: rebuild the backlog view, dispatch every ready sub-issue, then sleep
+per the monitor-loop instructions in that file.
+```
+
+That one comment is the entire entrypoint. From there the orchestrator
+dispatches workers, sleeps via the monitor loop, wakes, reviews/merges, and
+re-dispatches itself with a tiny `followUpPrompt` pointing back at the same
+epic and its delivery-ledger comment — see
+["Token efficiency"](#token-efficiency-every-wave-starts-cold) below for why
+that pointer stays tiny across an unbounded number of waves.
+
 ### The human (you)
 
 Between kickoff and completion you do nothing unless an issue is labeled
@@ -425,10 +456,15 @@ These are tracked under **epic #376** and its child issues:
    [Merge policy](#merge-policy) above. What's left is wiring the policy into
    the orchestrator's actual prompt — that's #381.
 
-5. **Orchestrator agent persona (#381).** No saved prompt/entrypoint *is* the
-   orchestrator today — a human drives the loop locally. **To close:** a
-   versioned orchestrator system prompt dispatched as one long-lived
-   `@agentcore-claude` run.
+5. ✅ **Orchestrator agent persona (#381, closed).** A versioned orchestrator
+   system prompt now exists —
+   [`agent/default/app/ClaudeCode/prompts/orchestrator.md`](../agent/default/app/ClaudeCode/prompts/orchestrator.md)
+   — encoding the pick-slice → dispatch → sleep → review/merge → repeat loop,
+   the stateless-per-wave design (delivery-ledger comment, tiny
+   `followUpPrompt`), and the `PROJECT_PHASE`-gated merge bar. Dispatched the
+   same way as a worker (`@agentcore-claude` comment) — see
+   [Starting an orchestrator run](#starting-an-orchestrator-run) above. The
+   end-to-end dry run proving it live on a throwaway epic is #382.
 
 6. **End-to-end dry run (#382).** Prove the whole loop on a throwaway epic and
    document what was observed.
