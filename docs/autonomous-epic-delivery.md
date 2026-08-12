@@ -289,6 +289,82 @@ reason to pause and surface, not to keep dispatching new work indefinitely.
 > bypassed — belt and suspenders for the one action you most want gated. See
 > issues #379 (the flag) and #380 (merge authority scoped by phase).
 
+## Merge policy
+
+The orchestrator's authority to `gh pr merge` (see the "Merge authority" note in
+[`docs/webhook-stepfunction-integration.md`](./webhook-stepfunction-integration.md#git-access-harness-exec-same-session-as-the-agent))
+is necessary but not sufficient — it must also apply a consistent **merge bar**
+before ever calling it. This section is that bar, written so a cold orchestrator
+wave can re-derive it without re-reading this whole document.
+
+### The bar (all four must hold)
+
+1. **All CI checks are green.** Check `gh pr checks <n>` or
+   `gh pr view <n> --json statusCheckRollup,mergeStateStatus`. Pending checks are
+   not green — wait or re-poll via the monitor loop, don't merge on "probably
+   fine." A run with zero configured checks passes vacuously; that's expected
+   for docs-only repos and not a reason to block.
+2. **The PR body contains a valid, parsing auto-closing keyword** —
+   `Closes #<issue>`, `Fixes #<issue>`, or `Resolves #<issue>`, each on its own
+   line, referencing an issue in this same repo. **Verify by parsing the actual
+   body text, not by assuming the dispatch instructions were followed** — a
+   worker can construct its `gh pr create --body "...\n\nCloses #87"` inside a
+   double-quoted shell string, where `\n` is never expanded and lands in the PR
+   body as the two literal characters `\` `n` instead of a newline (this has
+   happened — see the `dispatched-agent-multi-pr-overreach`-adjacent case in
+   past runs). Fetch the raw body (`gh pr view <n> --json body --jq .body`) and
+   check with a regex that does **not** depend on real line breaks, e.g.
+   `grep -iE '(closes?|closed|fixes?|fixed|resolves?|resolved)[[:space:]]*#[0-9]+'`
+   — that matches whether the separator is a real newline or a literal `\n`. If
+   the keyword is present but malformed (comma-joined `Closes #12, #34`, which
+   GitHub only auto-closes the first of; or missing a `#`), treat it as failing
+   this check and fix the PR body (`gh pr edit <n> --body ...`) before merging —
+   don't merge and hope.
+3. **The diff is on-scope for its single issue.** Read the changed-files list
+   (`gh pr view <n> --json files,additions,deletions`), not the full patch, to
+   keep this cheap. Reject as out-of-scope: a diff touching files unrelated to
+   the issue's stated area; a "shallow" PR that only adds a stub/comment/TODO
+   without the substantive change the issue asked for; a PR that duplicates
+   another already-open PR against the same issue (dedupe by issue number —
+   only one PR should close a given issue; close/mark the redundant one).
+   When in doubt, read the issue's acceptance criteria and check the diff
+   actually satisfies them, not just that it compiles.
+4. **Phase gate.** In `development`, 1–3 are sufficient — merge autonomously.
+   In `production`, 1–3 must hold *and* a human has approved the PR (branch
+   protection enforces this, but also check for it explicitly so the
+   orchestrator's own judgment agrees with GitHub's) — see
+   [The production stage](#the-production-stage-human-in-the-loop-merge) above
+   for what the orchestrator does instead of merging when this isn't satisfied.
+
+### Merge command
+
+Once all four hold: `gh pr merge <n> --squash --delete-branch` (squash keeps
+`main` history one-commit-per-issue; delete-branch cleans up the now-merged
+worker branch). Merging via the PR that carries the closing keyword is what
+auto-closes the issue — don't close the issue manually as a separate step.
+
+### Post-merge: confirm the unblock
+
+After merging, the dependency graph should update on its own (GitHub closes
+the issue, which drops it out of any `blocked-by`/`no:blocked-by` filtered
+view), but a cold orchestrator wave should not just assume this happened
+silently — on the **next** wave, re-query the backlog (the epic checklist /
+project board's `no:blocked-by` view) and confirm the issue that was
+`blocked-by` the just-merged one is now actionable and gets dispatched. If it
+still shows as blocked, the dependency edge or the closing keyword didn't do
+what was expected — investigate before dispatching around it.
+
+### Never merge a PR that:
+
+- Has a red, pending, or absent-but-expected CI check.
+- Is missing a parsing closing keyword for its issue (see check 2 above).
+- Is a shallow duplicate or out-of-scope fragment relative to its issue.
+- Is in `production` phase and lacks the required human approval.
+
+Any of these → leave the PR as-is (draft or open, whichever it already is),
+comment the specific reason on the PR, and move to the next open item rather
+than blocking the whole wave on one PR.
+
 ---
 
 ## Is this repo set up for it?
@@ -331,10 +407,12 @@ These are tracked under **epic #376** and its child issues:
    during development" rule lives only as prose. **To close:** one explicit
    signal every run reads that gates destructive actions in `production`.
 
-4. **Orchestrator merge authority + policy (#380).** Workers open PRs; merging
-   is a human step. **To close:** grant the orchestrator merge capability and
-   encode the merge bar (green checks + valid auto-close keyword + on-scope
-   diff) in its prompt.
+4. **Orchestrator merge authority + policy (#380).** ✅ Authority already
+   exists — the installation token's `pull_requests: write` permission covers
+   `gh pr merge` (see the note in `docs/webhook-stepfunction-integration.md`);
+   no code change was needed. Policy is now encoded in
+   [Merge policy](#merge-policy) above. What's left is wiring the policy into
+   the orchestrator's actual prompt — that's #381.
 
 5. **Orchestrator agent persona (#381).** No saved prompt/entrypoint *is* the
    orchestrator today — a human drives the loop locally. **To close:** a
