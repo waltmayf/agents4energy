@@ -31,6 +31,7 @@ export function useSessionList(reloadKey = 0): {
   state: SessionListState;
   reload: () => void;
   patch: (id: string, name: string) => void;
+  remove: (id: string) => void;
 } {
   const [state, setState] = useState<SessionListState>({ status: 'loading' });
   const [localKey, setLocalKey] = useState(0);
@@ -43,6 +44,16 @@ export function useSessionList(reloadKey = 0): {
     setState((prev) =>
       prev.status === 'ready'
         ? { status: 'ready', sessions: prev.sessions.map((s) => (s.id === id ? { ...s, name } : s)) }
+        : prev,
+    );
+  }, []);
+
+  // Optimistically drop a deleted session from the list so it disappears
+  // immediately (the delete mutation is issued by the caller).
+  const remove = useCallback((id: string) => {
+    setState((prev) =>
+      prev.status === 'ready'
+        ? { status: 'ready', sessions: prev.sessions.filter((s) => s.id !== id) }
         : prev,
     );
   }, []);
@@ -77,5 +88,5 @@ export function useSessionList(reloadKey = 0): {
     };
   }, [reloadKey, localKey]);
 
-  return { state, reload, patch };
+  return { state, reload, patch, remove };
 }

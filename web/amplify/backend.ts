@@ -3,6 +3,7 @@ import { auth } from './auth/resource';
 import { data } from './data/resource';
 import { listSessionMessages } from './functions/list-session-messages/resource';
 import { updateSessionSummary } from './functions/update-session-summary/resource';
+import { nameChatSession } from './functions/name-chat-session/resource';
 import { registerMcpTarget } from './functions/register-mcp-target/resource';
 import { listMcpTools } from './functions/list-mcp-tools/resource';
 import { invokeAgent } from './functions/invoke-agent/resource';
@@ -148,6 +149,7 @@ const backend = defineBackend({
   data,
   listSessionMessages,
   updateSessionSummary,
+  nameChatSession,
   registerMcpTarget,
   listMcpTools,
   invokeAgent,
@@ -665,6 +667,20 @@ const updateSessionSummaryLambda = backend.updateSessionSummary.resources.lambda
 updateSessionSummaryLambda.addToRolePolicy(new PolicyStatement({
   actions: ['bedrock-agentcore:BatchUpdateMemoryRecords'],
   resources: [AGENTCORE_MEMORY_ARN],
+}));
+
+// name-chat-session titles a session from its first message via Bedrock Converse
+// (issue #372). NAMING_MODEL_ID defaults to a cross-region inference profile
+// (`us.anthropic.claude-3-5-haiku-*`), which fans out to the underlying
+// foundation model in several regions — so InvokeModel must be granted on both
+// the inference-profile ARNs and the foundation-model ARNs across regions.
+const nameChatSessionLambda = backend.nameChatSession.resources.lambda as LambdaFunction;
+nameChatSessionLambda.addToRolePolicy(new PolicyStatement({
+  actions: ['bedrock:InvokeModel'],
+  resources: [
+    'arn:aws:bedrock:*::foundation-model/*',
+    `arn:aws:bedrock:*:${backend.stack.account}:inference-profile/*`,
+  ],
 }));
 
 // ============================================================================

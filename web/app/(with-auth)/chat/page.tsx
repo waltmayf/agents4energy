@@ -22,7 +22,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { WrenchIcon, Loader2Icon } from 'lucide-react';
+import { WrenchIcon, Loader2Icon, PanelLeftOpenIcon } from 'lucide-react';
 import { listMcpToolsForServer } from '@/lib/list-mcp-tools';
 import { useCurrentUser } from '@/lib/use-current-user';
 import { listAllToolGrants, isToolGrantedToAnyGroup, type ToolGrant } from '@/lib/tool-permissions';
@@ -314,15 +314,32 @@ function ChatView({
 const Chat = function Page() {
   const { ready, sessionId, agentId, setAgentId } = useChatSession();
   const agentsState = useAgents();
+  // Session history sidebar is hidden by default; the toggle reveals it.
+  const [sidebarOpen, setSidebarOpen] = useState(false);
 
   const agents = agentsState.status === 'ready' ? agentsState.agents : [];
   const selectedAgent = agents.find((a) => a.id === agentId);
 
   return (
     <div className="flex h-dvh min-h-0">
-      {/* Chat history sidebar (issue #351) — lists/reopens/renames past sessions. */}
-      <SessionSidebar activeSessionId={sessionId} />
-      <div className="min-w-0 flex-1">
+      {/* Chat history sidebar (issue #351) — lists/reopens/renames/deletes past
+          sessions. Hidden by default; toggled via the button in the chat pane. */}
+      {sidebarOpen && (
+        <SessionSidebar activeSessionId={sessionId} onClose={() => setSidebarOpen(false)} />
+      )}
+      <div className="relative min-w-0 flex-1">
+        {!sidebarOpen && (
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            title="Show chat history"
+            className="absolute left-2 top-2 z-10 bg-background/80 backdrop-blur"
+            onClick={() => setSidebarOpen(true)}
+          >
+            <PanelLeftOpenIcon className="size-4" />
+            <span className="sr-only">Show chat history</span>
+          </Button>
+        )}
         {ready && sessionId && (
           <ChatView
             key={sessionId}
