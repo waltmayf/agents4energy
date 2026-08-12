@@ -174,7 +174,11 @@ async function resolveTools(): Promise<any[] | undefined> {
     }
     tools.push({
       type: 'remote_mcp',
-      name: row.name,
+      // InvokeHarness rejects a tool name that isn't [a-zA-Z0-9_-]+ (#366), and
+      // display names have spaces ("Knowledge Graph Tools"). The name is just a
+      // label — routing is by URL + JWT — so slugify it. Mirrors
+      // web/lib/harness-agent.ts slugifyToolName.
+      name: row.name.replace(/[^a-zA-Z0-9_-]+/g, '-').replace(/^-+|-+$/g, '') || 'mcp-server',
       config: { remoteMcp: { url: gatewayEndpoint, headers: { Authorization: `Bearer ${accessToken}` } } },
     });
     console.error(`✓ Attached "${name}" (gatewayTargetId=${row.gatewayTargetId}) via gateway`);

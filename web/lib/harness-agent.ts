@@ -28,6 +28,7 @@ import {
   type HarnessStreamEvent,
 } from './harness-stream-to-agui';
 import { buildRunErrorMessageEvents } from './harness-run-error';
+import { slugifyToolName } from './tool-name-slug';
 import { friendlyChatHarnessError } from './harness-error-message';
 import { encodeRuntimeUserId, SHARED_ACTOR_ID, type CallerIdentity } from './caller-identity';
 
@@ -147,7 +148,7 @@ async function buildTools(
     }
     tools.push({
       type: 'remote_mcp',
-      name: s.name,
+      name: slugifyToolName(s.name),
       config: {
         remoteMcp: {
           url: GATEWAY_ENDPOINT,
