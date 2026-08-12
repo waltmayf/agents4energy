@@ -32,6 +32,24 @@ test('DENY grant becomes a forbid policy, not permit', () => {
   assert.doesNotMatch(policy.statement, /^permit\(/);
 });
 
+test('DENY (forbid) policy ignores findings so an intentionally-restrictive deny is not rejected as "Overly Restrictive" (#368)', () => {
+  const [policy] = generateCedarPolicies([grant({ effect: 'DENY' })], TEST_GATEWAY_ARN);
+  // The Cedar analyzer flags a scope-wide forbid as an "Overly Restrictive"
+  // finding; under FAIL_ON_ANY_FINDINGS the policy is rejected (CREATE_FAILED)
+  // and the DENY silently never enforces. See #368.
+  assert.equal(policy.validationMode, 'IGNORE_ALL_FINDINGS');
+});
+
+test('ALLOW (permit) policy keeps strict validation — a finding on a permit is a genuine mistake (#368)', () => {
+  const [exactPolicy] = generateCedarPolicies([grant({ effect: 'ALLOW' })], TEST_GATEWAY_ARN);
+  assert.equal(exactPolicy.validationMode, 'FAIL_ON_ANY_FINDINGS');
+  const [wildcardPolicy] = generateCedarPolicies(
+    [grant({ effect: 'ALLOW', toolName: '*', targetToolNames: ['get_well_data'] })],
+    TEST_GATEWAY_ARN,
+  );
+  assert.equal(wildcardPolicy.validationMode, 'FAIL_ON_ANY_FINDINGS');
+});
+
 test('"*" toolName enumerates the target\'s concrete tool actions (a literal "___*" action does not exist and fails Cedar validation — #358)', () => {
   const [policy] = generateCedarPolicies(
     [grant({ toolName: '*', targetToolNames: ['get_well_data', 'list_wells'] })],
