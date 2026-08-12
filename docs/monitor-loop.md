@@ -14,6 +14,7 @@ Epic #260, delivered in these slices:
 | 2/3 | #262 | State machine enters a **Wait → RunMonitorCheck → Choice** loop that re-invokes Claude when the check passes. |
 | 3/3 | #263 | Docs (this file) + end-to-end deploy/test. |
 | — | #377 | **Timed wait**: a second `monitorSpec` shape with no `checkCommand` — a single long `Wait` (up to the SFN max) followed directly by a re-invoke, for "pause for N seconds, then continue" rather than "poll until a condition is true". Also raised the condition-poll `intervalSeconds` clamp to match. |
+| — | #378 | **`gh`-free workers-done check**: `scripts/agents-done-check.sh`, a `curl`-only equivalent of `wait-for-agents.sh`'s "no open issue carries `agent-working`" condition, for use as a `checkCommand` in this exec environment (no `gh` auth). |
 
 ## How a run hands off to a monitor
 
@@ -35,6 +36,12 @@ is JSON, in one of two shapes:
 
 Wakes as soon as `checkCommand` exits 0, polling every `intervalSeconds` up to
 `maxIterations` times.
+
+> The `gh pr checks` example above only works when `gh` is authenticated,
+> which — as the next section explains — `checkCommand`'s exec environment is
+> **not**. For the orchestrator's "are the workers done?" condition, use
+> `scripts/agents-done-check.sh` (issue #378) instead — it's `curl`-only:
+> `"checkCommand": "bash /mnt/workspace/agents4energy/scripts/agents-done-check.sh"`.
 
 ### Shape 2 — timed wait, no condition (#377)
 
@@ -171,6 +178,14 @@ Key properties:
   it's specifically the `gh` CLI's own auth config that's missing. So a
   `checkCommand` that needs the GitHub API should use `curl` (unauthenticated
   for public repos; rate-limited without a token) or plain `git`, not `gh`.
+  For the standard orchestrator "are the workers done?" condition — no open
+  issue carries `agent-working` — use
+  [`scripts/agents-done-check.sh`](../scripts/agents-done-check.sh) (issue
+  #378): a `curl`-only equivalent of `scripts/wait-for-agents.sh` that resolves
+  repo/label via the same `scripts/lib/agents-wait-config.sh` loader, so it
+  agrees with the interactive scripts. Verbatim `checkCommand`:
+  `"checkCommand": "bash /mnt/workspace/agents4energy/scripts/agents-done-check.sh"`
+  (no `bash -c "..."` wrapper needed — the command has no pipes/`&&`/quoting).
 
 ## Execution timeout — the real ceiling on a long wait (#377)
 

@@ -153,11 +153,16 @@ At the end of a wave the orchestrator emits a fenced ` ```monitor ` block:
 {
   "intervalSeconds": 900,
   "maxIterations": 40,
-  "checkCommand": "bash -c \"! curl -sf -H 'Accept: application/vnd.github+json' 'https://api.github.com/repos/<owner>/<repo>/issues?labels=agent-working&state=open&per_page=1' | grep -q '\\\"number\\\"'\"",
+  "checkCommand": "bash /mnt/workspace/agents4energy/scripts/agents-done-check.sh",
   "followUpPrompt": "All dispatched worker runs have finished. Review and merge the green PRs, re-dispatch any issue that finished with no PR, then continue the epic-delivery loop."
 }
 ```
 ````
+
+`scripts/agents-done-check.sh` (issue #378) is the standard `checkCommand` for
+this condition — see below. It has no pipes/`&&`/quoting, so unlike a raw
+`curl | grep` one-liner it can be handed to `checkCommand` directly, with no
+`bash -c "..."` wrapper needed.
 
 What happens then (all already implemented):
 
@@ -200,8 +205,10 @@ poll loop. Two orchestrator wait shapes (see issue #377):
 2. **`checkCommand` has `git`'s credential store but NOT `gh`'s auth**, and runs
    with no shell. So the orchestrator's "are the workers done?" check must use
    `curl`/`git` (as above), **not** `gh` and **not**
-   `scripts/wait-for-agents.sh` (which shells out to `gh`) — this is issue #378.
-   Wrap any pipe/`&&`/quoting in `bash -c "..."`.
+   `scripts/wait-for-agents.sh` (which shells out to `gh`) —
+   `scripts/agents-done-check.sh` (issue #378) is the `curl`-only equivalent,
+   written for exactly this exec environment. Wrap any pipe/`&&`/quoting in
+   `bash -c "..."`.
 
 The "are workers done?" condition is the same one
 [`scripts/wait-for-agents.sh`](../scripts/wait-for-agents.sh) uses
@@ -307,7 +314,7 @@ lift that role into an autonomous cloud agent is already built.
 | Worker agent that branches, implements, fixes CI, opens PRs | `@agentcore-claude` runtime — `docs/claude-code-agentcore-runtime.md` |
 | Dispatch by commenting `@agentcore-claude` / applying `agentcore` label | webhook → Step Functions — `docs/webhook-stepfunction-integration.md` |
 | **Pause with no compute + timed re-invoke** (the "wait feature") | monitor loop — `docs/monitor-loop.md` (Wait → RunMonitorCheck → re-invoke, microVM reclaimed while waiting) |
-| Authoritative "workers done" signal | `agent-working` label add/remove; `scripts/wait-for-agents.sh`, `scripts/review-queue.sh` |
+| Authoritative "workers done" signal | `agent-working` label add/remove; `scripts/wait-for-agents.sh`, `scripts/review-queue.sh` (interactive, `gh`-based), `scripts/agents-done-check.sh` (`curl`-only, for the monitor loop — #378) |
 | Human-input escalation | `needs-review` label convention (`CLAUDE.md`) + runtime `awaiting_input` detection (#185) |
 | Last-write-wins cancellation of superseded runs | `docs/webhook-stepfunction-integration.md` (issue #182) |
 | Small-slice dispatch discipline (3h ceiling, push draft early) | `CLAUDE.md`; memory: `webhook-job-3h-task-timeout` |
@@ -316,20 +323,24 @@ lift that role into an autonomous cloud agent is already built.
 
 These are tracked under **epic #376** and its child issues:
 
-1. **Long-wait support in the monitor loop (#377).** The SFN `Wait` state allows
-   a single wait up to 99,999,999 s, but `detect-monitor.js` clamps
-   `intervalSeconds` to `[30, 900]` and requires a `checkCommand`. **To close:**
-   lift the clamp and add a timed-wait shape (`waitSeconds`, no `checkCommand`)
-   so the orchestrator can sleep for hours in one `Wait`.
+1. ✅ **Long-wait support in the monitor loop (#377, closed).** The SFN `Wait`
+   state allows a single wait up to 99,999,999 s; `detect-monitor.js` now
+   accepts a timed-wait shape (`waitSeconds`, no `checkCommand`) alongside the
+   condition-poll shape, so the orchestrator can sleep for hours in one `Wait`.
+   See `docs/monitor-loop.md`.
 
-2. **`gh`-free "workers done" check (#378).** The natural done-check
+2. ✅ **`gh`-free "workers done" check (#378, closed).** The natural done-check
    (`wait-for-agents.sh`) shells out to `gh`, which isn't authenticated in the
-   `RunMonitorCheck` exec environment. **To close:** a `curl`/`git`-only
-   `scripts/agents-done-check.sh` usable verbatim as a `checkCommand`.
+   `RunMonitorCheck` exec environment. Closed by `scripts/agents-done-check.sh`
+   — a `curl`/`git`-only equivalent usable verbatim as a `checkCommand` (see
+   above).
 
-3. **`PROJECT_PHASE` dev/prod flag (#379).** The "breaking changes are fine
-   during development" rule lives only as prose. **To close:** one explicit
-   signal every run reads that gates destructive actions in `production`.
+3. ✅ **`PROJECT_PHASE` dev/prod flag (#379, closed).** The "breaking changes
+   are fine during development" rule now has one explicit `PROJECT_PHASE`
+   signal (in `CLAUDE.md`/`AGENTS.md`) every run reads before a destructive
+   action, gating it in `production`. See
+   [Development mode vs. production mode](#development-mode-vs-production-mode)
+   below.
 
 4. **Orchestrator merge authority + policy (#380).** Workers open PRs; merging
    is a human step. **To close:** grant the orchestrator merge capability and
