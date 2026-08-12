@@ -43,6 +43,16 @@ const TRIGGER_LABEL = 'agentcore';
 // label in the first place, so reaching the labeled event already proves trust.
 const AUTHORIZED_ASSOCIATIONS = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
 
+// Our own GitHub App's bot login (webhook `sender.login` for a comment it
+// posts is always `<name>[bot]`). This is the ONE bot sender ever let through
+// the loop-prevention check in the comment-mention branch below, and only for
+// a comment that already carries a valid `@agentcore-claude`/`@agentcore`
+// trigger mention — see issue #395. Every other bot (and our own non-mention
+// replies, e.g. "Working on it") is still skipped. Must match
+// `scripts/lib/agents-wait-config.sh`'s `_DEFAULT_BOT` — keep them in sync if
+// the App is ever renamed.
+const OWN_APP_BOT_LOGIN = 'waltmayf-claude-code-app[bot]';
+
 const secretsManager = new SecretsManagerClient({ region: REGION });
 const sfn = new SFNClient({ region: REGION });
 // Only used to fire the cancel control payload at the Claude Code runtime
@@ -312,24 +322,43 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
     const payload: GithubIssueCommentPayload = JSON.parse(rawBody);
     if (payload.action !== 'created') return json(200, { skipped: `action=${payload.action}` });
 
-    // Loop prevention — never respond to bot-authored comments (including our own replies).
-    const senderLogin = payload.sender?.login ?? '';
-    const senderType = payload.sender?.type ?? '';
-    if (senderType === 'Bot' || senderLogin.endsWith('[bot]')) {
-      return json(200, { skipped: 'bot sender' });
-    }
-
+    // Parse the mention BEFORE the bot-skip (issue #395): whether a bot sender
+    // gets to trigger a run depends on whether it's carrying a mention at
+    // all, so the mention parse can't happen after a blanket bot-skip has
+    // already returned. Ordinary (non-mention) comments from anyone —
+    // including our own automation's "Working on it" replies — still fall
+    // through here untouched.
     const mention = parseMention(payload.comment.body);
     if (mention === null) return json(200, { skipped: 'no trigger mention' });
 
-    // Authorization gate (checked only once a trigger mention is present, so
-    // ordinary comments from anyone still pass through untouched). The agent
-    // holds repo-write credentials and runs arbitrary shell, so only users with
-    // write/admin on the repo may invoke it — see AUTHORIZED_ASSOCIATIONS.
-    const association = payload.comment.author_association ?? '';
-    if (!AUTHORIZED_ASSOCIATIONS.has(association)) {
-      console.log(`[receiver] rejected mention from unauthorized sender=${senderLogin} association=${association || '(none)'}`);
-      return json(200, { skipped: `unauthorized sender (association=${association || 'NONE'})` });
+    // Loop prevention — drop every bot-authored mention EXCEPT our own App's
+    // (the orchestrator dispatches workers by posting `@agentcore-claude` as
+    // that same App — see #381/#395). This can't create an infinite loop:
+    // workers dispatched this way never themselves post an `@agentcore-claude`
+    // mention (they push a PR / comment plainly), so there is no cycle for
+    // this allowlist to close. Any duplicate dispatch (e.g. a retried
+    // delivery) is bounded by cancelPriorRuns' last-write-wins StopExecution
+    // below, not by this check.
+    const senderLogin = payload.sender?.login ?? '';
+    const senderType = payload.sender?.type ?? '';
+    const isBotSender = senderType === 'Bot' || senderLogin.endsWith('[bot]');
+    const isOwnApp = senderLogin.toLowerCase() === OWN_APP_BOT_LOGIN.toLowerCase();
+    if (isBotSender && !isOwnApp) {
+      return json(200, { skipped: 'bot sender' });
+    }
+
+    // Authorization gate — skipped for our own App (it's the trusted
+    // automation dispatching workers, not an external commenter, and a Bot
+    // sender's author_association wouldn't reliably reflect write access
+    // anyway). Humans still need write/admin on the repo — see
+    // AUTHORIZED_ASSOCIATIONS; the agent holds repo-write credentials and runs
+    // arbitrary shell, so this must stay strict for anyone else.
+    if (!isOwnApp) {
+      const association = payload.comment.author_association ?? '';
+      if (!AUTHORIZED_ASSOCIATIONS.has(association)) {
+        console.log(`[receiver] rejected mention from unauthorized sender=${senderLogin} association=${association || '(none)'}`);
+        return json(200, { skipped: `unauthorized sender (association=${association || 'NONE'})` });
+      }
     }
 
     const runId = randomUUID();
