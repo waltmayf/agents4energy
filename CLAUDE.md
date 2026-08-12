@@ -6,6 +6,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 @CLAUDE.private.md
 ## Guidance
 
+### PROJECT_PHASE
+
+`PROJECT_PHASE: development`
+
+This is the single machine-readable signal every agent run reads at the top of its turn before taking any destructive or irreversible action. Default: `development`. It gates breaking schema/API changes and deletion of shared resources (DynamoDB tables, Amplify sandboxes, `McpServer` rows, IAM roles, etc.) — anything another workstream could be relying on and that can't be trivially undone. Non-destructive work (additive schema changes, new files, most feature work) is never gated by this flag.
+
+- **`development`** (current default) — destructive/irreversible actions are allowed without asking. Document what you changed or deleted, and why, directly on the issue/PR — that record is the review trail, not a blocker.
+- **`production`** — before taking the action, add the `needs-review` label to the issue and ask the specific question as a comment (state what you want to do and why), then leave any in-progress PR as a **draft** and move to other open work. Do not proceed until the label is cleared. The merge bar also adds mandatory human diff review for any PR containing a destructive action — an orchestrator agent must not merge one on its own while in `production`.
+
+To flip phases, update the `PROJECT_PHASE` line above in both `CLAUDE.md` and `AGENTS.md` (they must agree) and note the change on the tracking issue. See [docs/autonomous-epic-delivery.md](docs/autonomous-epic-delivery.md#development-mode-vs-production-mode) for the full policy and how it fits into the autonomous epic-delivery loop.
+
 ### AWS CLI
 If you would like to run an aws cli command you don't have access to, put the command in your response and ask the user to run it.
 
@@ -74,7 +85,7 @@ The default mode for open work is an autonomous loop that drives issues to done 
 2. **Implement** the change on a feature branch (never commit straight to `main`).
 3. **Deploy** to the sandbox (`pnpm deploy`) and, for `web/amplify/` changes, first run the credential-free synth gate (`cd web && pnpm test:synth`). Always type-check (`npx tsc --noEmit`) before pushing.
 4. **Test** — run the relevant E2E/lint suite and confirm the change actually works against the deployed backend, not just that it compiles.
-5. **Merge** once green: open a PR with the auto-closing keyword, wait for checks, and merge. Then move to the next item.
+5. **Merge** once green: open a PR with the auto-closing keyword, wait for checks, and merge. If the PR contains a destructive action gated by [`PROJECT_PHASE`](#project_phase), the merge bar in `production` requires the `needs-review` label to be cleared by a human first — an orchestrator must not self-merge that PR. Then move to the next item.
 6. **Repeat** until all open work is done.
 
 **When you need input from me, don't block the whole loop:**
