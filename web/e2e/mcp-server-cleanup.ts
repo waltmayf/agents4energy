@@ -19,6 +19,14 @@
 // <ts>`) that predate the sentinel, so historical orphans get swept too. The
 // two real gateway servers ("S3 Filesystem Tools", "Knowledge Graph Tools")
 // never match and are always preserved.
+//
+// The sweep list selects id ONLY, then classifies each row via a per-id
+// `getMcpServer` probe (issue #387): `name` is a required field, and a single
+// row with a null `name` would otherwise null AppSync's entire list result
+// (Amplify's generated connection type is `items: [McpServer!]!`), silently
+// defeating the purge for every row, not just the bad one. A row whose probe
+// errors is treated as a deletable orphan — a real gateway server always has
+// a valid name, so an error there can only mean a poisoned/invalid row.
 
 import { existsSync, readFileSync } from 'fs';
 import { resolve } from 'path';
@@ -248,26 +256,64 @@ function resolveGatewayEndpoint(): string | null {
   return null;
 }
 
-/** List every McpServer (following pagination). */
-async function listAllMcpServers(cfg: GraphqlConfig): Promise<McpServerRow[]> {
-  const items: McpServerRow[] = [];
+/**
+ * List every McpServer id (following pagination). Selects id ONLY (#387):
+ * `name` is a required field, and Amplify's generated connection type is
+ * `items: [McpServer!]!` (both the array and its elements non-null), so a
+ * single row with a null `name` would null AppSync's *entire* query result
+ * via non-null propagation — poisoning the sweep and defeating the purge
+ * for every row, not just the bad one.
+ */
+async function listAllMcpServerIds(cfg: GraphqlConfig): Promise<string[]> {
+  const ids: string[] = [];
   let nextToken: string | null = null;
   do {
-    type ListResult = { listMcpServers: { items: McpServerRow[]; nextToken: string | null } };
+    type ListResult = { listMcpServers: { items: { id: string }[]; nextToken: string | null } };
     const data: ListResult = await signedGraphql<ListResult>(
       cfg,
       `query List($nextToken: String) {
          listMcpServers(limit: 1000, nextToken: $nextToken) {
-           items { id name serverType }
+           items { id }
            nextToken
          }
        }`,
       { nextToken },
     );
-    items.push(...data.listMcpServers.items);
+    ids.push(...data.listMcpServers.items.map((item) => item.id));
     nextToken = data.listMcpServers.nextToken;
   } while (nextToken);
-  return items;
+  return ids;
+}
+
+type ProbeResult =
+  | { kind: 'ok'; row: McpServerRow }
+  // getMcpServer itself errored for this id — e.g. a null `name`. A single-
+  // object query error can't null a sibling row's result the way the list
+  // query does, so this safely isolates the bad row.
+  | { kind: 'poisoned'; id: string }
+  // Row vanished between the id sweep and the probe (e.g. deleted by a
+  // concurrent run) — nothing to classify or delete.
+  | { kind: 'gone'; id: string };
+
+/**
+ * Probe a single McpServer id to classify it for the purge. A row whose
+ * `name` query errors is treated as a deletable orphan: a real gateway
+ * server ("S3 Filesystem Tools", "Knowledge Graph Tools") always has a valid
+ * name, so an error here can only mean a poisoned/invalid row (#387).
+ */
+async function probeMcpServer(cfg: GraphqlConfig, id: string): Promise<ProbeResult> {
+  try {
+    type GetResult = { getMcpServer: McpServerRow | null };
+    const data = await signedGraphql<GetResult>(
+      cfg,
+      `query Get($id: ID!) { getMcpServer(id: $id) { id name serverType } }`,
+      { id },
+    );
+    if (!data.getMcpServer) return { kind: 'gone', id };
+    return { kind: 'ok', row: data.getMcpServer };
+  } catch {
+    return { kind: 'poisoned', id };
+  }
 }
 
 async function deleteMcpServerById(cfg: GraphqlConfig, id: string): Promise<void> {
@@ -307,18 +353,27 @@ export async function purgeE2eMcpServers(): Promise<number> {
     return 0;
   }
   let deleted = 0;
+  let preserved = 0;
   try {
-    const all = await listAllMcpServers(cfg);
-    const orphans = all.filter((s) => isE2eServerName(s.name));
-    for (const s of orphans) {
+    const ids = await listAllMcpServerIds(cfg);
+    const probes = await Promise.all(ids.map((id) => probeMcpServer(cfg, id)));
+    for (const probe of probes) {
+      if (probe.kind === 'gone') continue;
+      const isOrphan = probe.kind === 'poisoned' || isE2eServerName(probe.row.name);
+      if (!isOrphan) {
+        preserved++;
+        continue;
+      }
+      const id = probe.kind === 'poisoned' ? probe.id : probe.row.id;
+      const label = probe.kind === 'poisoned' ? `<poisoned row ${id}>` : probe.row.name;
       try {
-        await deleteMcpServerById(cfg, s.id);
+        await deleteMcpServerById(cfg, id);
         deleted++;
       } catch (err) {
-        console.warn(`[mcp-cleanup] Failed to delete "${s.name}" (${s.id}):`, err);
+        console.warn(`[mcp-cleanup] Failed to delete "${label}" (${id}):`, err);
       }
     }
-    console.log(`[mcp-cleanup] Purged ${deleted} e2e McpServer record(s); ${all.length - orphans.length} real server(s) preserved.`);
+    console.log(`[mcp-cleanup] Purged ${deleted} e2e McpServer record(s); ${preserved} real server(s) preserved.`);
   } catch (err) {
     console.warn('[mcp-cleanup] Purge failed (continuing — tests will still run):', err);
   }
