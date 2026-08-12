@@ -9,15 +9,20 @@ import { deriveSessionTitle, isPlaceholderName } from '@/lib/session-title';
 const amplifyClient = generateClient<Schema>({ authMode: 'userPool' });
 
 /**
- * Auto-names a chat session from its first user message (issue #352). A fresh
- * session is created with the `'New Chat'` placeholder (see useChatSession); the
- * first time the user sends a turn, we derive a compact title and write it to
- * `ChatSession.name` — but only if the session still carries the placeholder, so
- * a manual rename (see the session-list UI) is never clobbered.
+ * Auto-names a chat session from its first user message (issues #352, #372). A
+ * fresh session is created with the `'New Chat'` placeholder (see
+ * useChatSession); the first time the user sends a turn we name it in two
+ * stages:
+ *   1. Immediately write a cheap client-derived title (first few words) so the
+ *      sidebar stops showing the placeholder without waiting on the network.
+ *   2. Kick off a small Bedrock LLM call (the `nameChatSession` mutation) and,
+ *      if it returns a better title, upgrade the name to it.
+ * Both writes only apply while the session still carries an auto-name (the
+ * placeholder or the stage-1 derived title), so a manual rename always wins.
  *
- * The write is fire-and-forget: it must not delay or block the agent's response.
- * We subscribe to the agent's `onNewMessage` (fires for both user and assistant
- * turns) and act on the first `user` message we observe for this session.
+ * The whole thing is fire-and-forget: it must never delay or block the agent's
+ * response. We subscribe to the agent's `onNewMessage` (fires for both user and
+ * assistant turns) and act on the first `user` message we observe.
  */
 export function useAutoNameSession(agent: AbstractAgent | null, sessionId: string | null): void {
   useEffect(() => {
@@ -31,10 +36,11 @@ export function useAutoNameSession(agent: AbstractAgent | null, sessionId: strin
     const { unsubscribe } = agent.subscribe({
       onNewMessage: ({ message }) => {
         if (done || message.role !== 'user') return;
-        const title = deriveSessionTitle(messageText(message));
-        if (!title) return;
+        const text = messageText(message);
+        const derived = deriveSessionTitle(text);
+        if (!derived) return;
         done = true;
-        void renameIfPlaceholder(sessionId, title);
+        void autoNameSession(sessionId, text, derived);
       },
     });
 
@@ -43,14 +49,41 @@ export function useAutoNameSession(agent: AbstractAgent | null, sessionId: strin
 }
 
 /**
- * Set the session name only when it's still the placeholder — a read-then-write
- * that deliberately loses to a concurrent manual rename (the user's intent wins).
- * All failures are swallowed: a naming hiccup must never surface in the chat.
+ * Two-stage auto-name for a session's first turn. Stage 1 applies the cheap
+ * derived title immediately; stage 2 upgrades it to an LLM-generated title. Each
+ * write is guarded by `renameIfAuto`, so a concurrent manual rename (or a
+ * user-set name) is never clobbered. All failures are swallowed: a naming
+ * hiccup must never surface in the chat.
  */
-async function renameIfPlaceholder(sessionId: string, title: string): Promise<void> {
+async function autoNameSession(sessionId: string, firstMessage: string, derived: string): Promise<void> {
+  // Stage 1 — instant, offline-derivable title.
+  await renameIfAuto(sessionId, derived);
+
+  // Stage 2 — LLM-generated title. Only overwrite the derived title (still an
+  // auto-name); if the model call fails or returns nothing, stage 1 stands.
+  try {
+    const { data: llmTitle } = await amplifyClient.mutations.nameChatSession({ firstMessage });
+    const title = llmTitle?.trim();
+    if (title && title !== derived) {
+      await renameIfAuto(sessionId, title, derived);
+    }
+  } catch (err) {
+    console.warn('[useAutoNameSession] LLM naming failed; keeping derived title', err);
+  }
+}
+
+/**
+ * Set the session name only when it's still an auto-name — i.e. the placeholder
+ * or (optionally) a known prior auto-title. A read-then-write that deliberately
+ * loses to a concurrent manual rename (the user's intent wins).
+ */
+async function renameIfAuto(sessionId: string, title: string, priorAutoTitle?: string): Promise<void> {
   try {
     const { data: session } = await amplifyClient.models.ChatSession.get({ id: sessionId });
-    if (!session || !isPlaceholderName(session.name)) return;
+    if (!session) return;
+    const current = session.name?.trim() ?? '';
+    const claimable = isPlaceholderName(current) || (!!priorAutoTitle && current === priorAutoTitle.trim());
+    if (!claimable) return;
     await amplifyClient.models.ChatSession.update({ id: sessionId, name: title });
   } catch (err) {
     console.warn('[useAutoNameSession] could not auto-name session', err);

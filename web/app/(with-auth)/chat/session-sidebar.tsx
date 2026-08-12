@@ -7,6 +7,14 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Spinner } from '@/components/ui/spinner';
 import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+} from '@/components/ui/dialog';
+import {
   PlusIcon,
   MessageSquareIcon,
   PencilIcon,
@@ -14,6 +22,8 @@ import {
   XIcon,
   RefreshCwIcon,
   AlertCircleIcon,
+  Trash2Icon,
+  PanelLeftCloseIcon,
 } from 'lucide-react';
 import { useSessionList, type SessionListItem } from './use-session-list';
 import { DEFAULT_SESSION_NAME } from '@/lib/session-title';
@@ -32,11 +42,13 @@ function SessionRow({
   active,
   onOpen,
   onRenamed,
+  onDelete,
 }: {
   session: SessionListItem;
   active: boolean;
   onOpen: (id: string) => void;
   onRenamed: (id: string, name: string) => void;
+  onDelete: (session: SessionListItem) => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(session.name ?? '');
@@ -113,19 +125,73 @@ function SessionRow({
       >
         <PencilIcon className="size-3.5" />
       </Button>
+      <Button
+        variant="ghost"
+        size="icon-sm"
+        title="Delete"
+        className="text-muted-foreground opacity-0 hover:text-destructive group-hover:opacity-100"
+        onClick={() => onDelete(session)}
+      >
+        <Trash2Icon className="size-3.5" />
+      </Button>
     </div>
+  );
+}
+
+/** Confirmation splash shown before a session is permanently deleted. */
+function DeleteSessionDialog({
+  session,
+  deleting,
+  onConfirm,
+  onCancel,
+}: {
+  session: SessionListItem | null;
+  deleting: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  const name = session?.name?.trim() || DEFAULT_SESSION_NAME;
+  return (
+    <Dialog open={session !== null} onOpenChange={(open) => !open && !deleting && onCancel()}>
+      <DialogContent showCloseButton={false}>
+        <DialogHeader>
+          <DialogTitle>Delete chat?</DialogTitle>
+          <DialogDescription>
+            &ldquo;{name}&rdquo; will be permanently deleted. This can&apos;t be undone.
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button variant="outline" onClick={onCancel} disabled={deleting}>
+            Cancel
+          </Button>
+          <Button variant="destructive" onClick={onConfirm} disabled={deleting}>
+            {deleting ? <Spinner /> : <Trash2Icon className="size-4" />}
+            Delete
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
 /**
  * Chat history sidebar (issue #351): lists the signed-in user's past sessions,
- * links each to `/chat?sessionId=<id>`, supports inline rename (issue #352), and
- * offers an explicit "New chat" that navigates to a bare `/chat` (the no-param
- * bootstrap in useChatSession then creates a fresh session).
+ * links each to `/chat?sessionId=<id>`, supports inline rename (issue #352),
+ * delete-with-confirmation, and offers an explicit "New chat" that navigates to
+ * a bare `/chat` (the no-param bootstrap in useChatSession then creates a fresh
+ * session). Hidden by default; `onClose` collapses it back to the toggle button.
  */
-export function SessionSidebar({ activeSessionId }: { activeSessionId: string | null }) {
+export function SessionSidebar({
+  activeSessionId,
+  onClose,
+}: {
+  activeSessionId: string | null;
+  onClose: () => void;
+}) {
   const router = useRouter();
-  const { state, reload, patch } = useSessionList();
+  const { state, reload, patch, remove } = useSessionList();
+  const [pendingDelete, setPendingDelete] = useState<SessionListItem | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   const openSession = useCallback(
     (id: string) => {
@@ -136,6 +202,24 @@ export function SessionSidebar({ activeSessionId }: { activeSessionId: string | 
   );
 
   const newChat = useCallback(() => router.push('/chat'), [router]);
+
+  const confirmDelete = useCallback(async () => {
+    if (!pendingDelete) return;
+    const { id } = pendingDelete;
+    setDeleting(true);
+    try {
+      await amplifyClient.models.ChatSession.delete({ id });
+      remove(id);
+      setPendingDelete(null);
+      // If the user just deleted the session they're viewing, start a fresh one
+      // so the chat pane isn't left pointing at a now-missing session.
+      if (id === activeSessionId) router.push('/chat');
+    } catch {
+      // Leave the dialog open on failure so the user can retry.
+    } finally {
+      setDeleting(false);
+    }
+  }, [pendingDelete, remove, activeSessionId, router]);
 
   return (
     <aside className="flex w-64 shrink-0 flex-col border-r bg-background">
@@ -152,6 +236,9 @@ export function SessionSidebar({ activeSessionId }: { activeSessionId: string | 
           disabled={state.status === 'loading'}
         >
           <RefreshCwIcon className="size-4" />
+        </Button>
+        <Button variant="ghost" size="icon-sm" title="Hide sidebar" onClick={onClose}>
+          <PanelLeftCloseIcon className="size-4" />
         </Button>
       </div>
 
@@ -186,9 +273,17 @@ export function SessionSidebar({ activeSessionId }: { activeSessionId: string | 
               active={s.id === activeSessionId}
               onOpen={openSession}
               onRenamed={patch}
+              onDelete={setPendingDelete}
             />
           ))}
       </div>
+
+      <DeleteSessionDialog
+        session={pendingDelete}
+        deleting={deleting}
+        onConfirm={confirmDelete}
+        onCancel={() => setPendingDelete(null)}
+      />
     </aside>
   );
 }

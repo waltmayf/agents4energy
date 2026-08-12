@@ -1,4 +1,5 @@
 import { a } from '@aws-amplify/backend';
+import { nameChatSession } from '../../functions/name-chat-session/resource';
 
 /**
  * Chat Schema
@@ -6,7 +7,17 @@ import { a } from '@aws-amplify/backend';
  * AgentCore memory (see functions/list-session-messages), not DynamoDB.
  */
 export const chatSchema = a.schema({
-  
+
+  // Generate a concise session title from its first user message via a small
+  // Bedrock model (issue #372). The client applies a cheap derived title
+  // immediately, then upgrades to this LLM-generated one when it resolves.
+  nameChatSession: a
+    .mutation()
+    .arguments({ firstMessage: a.string().required() })
+    .returns(a.string())
+    .handler(a.handler.function(nameChatSession))
+    .authorization((allow) => [allow.authenticated()]),
+
   ChatSession: a.model({
     name: a.string(),
     // Slug of the Agent this session is scoped to. Drives model + system prompt + gateway tools.
