@@ -46,6 +46,17 @@ If you discover a bug:
 1. Check the current github issues cover the bug, and if so make sure the issue has sufficient context
 2. If not, create a github issue. Use the github native relationships feature to describe blocking relationships with other issues.
 
+#### Scope epics and issues for token efficiency
+
+The autonomous loop is driven by an **orchestrator** agent that dispatches **worker** runs and sleeps between waves via the Step Functions monitor loop. Each wave (worker *and* orchestrator re-invoke) starts a **cold** Claude Code process — there is no `--resume`, so no conversation context carries across a wait. That's a feature: cost per wave is bounded by that wave's own work, never the sum of all prior waves. Plan issues so this stays cheap:
+
+- **One issue = one independently-deliverable slice.** Size each child issue so a single worker can finish it in one turn (well under the ~3h ceiling) and push a PR — small enough that the worker never needs a huge context to complete it. Prefer more small slices over few large ones.
+- **Make every slice re-hydratable from GitHub, not from chat.** The issue body must carry all context a cold agent needs: acceptance criteria, affected paths, links to relevant docs/code, and the design decision. Never assume the agent remembers a prior wave or this conversation — it won't.
+- **Keep cross-wave state compact and external.** The orchestrator reconstructs "where am I?" from a compact durable source (the epic's checklist, sub-issue rollup, `blocked-by` graph, and a short delivery-ledger comment) — not from a growing transcript. Decisions, blockers, and progress live on the issue/PR trail so the next cold wave re-reads a few hundred tokens, not a full history.
+- **Delegate heavy reading down, not up.** Design the flow so the orchestrator reads *conclusions* (a worker's one-line "merge-ready / blocked because X"), while diffs, CI logs, and file dumps stay in the worker's context and never accumulate in the orchestrator's window.
+
+See [docs/autonomous-epic-delivery.md](docs/autonomous-epic-delivery.md) for the full operating model this scoping supports.
+
 ### GitHub Pull Requests
 
 Every PR that resolves an issue **must** include a GitHub auto-closing keyword in its body so the issue closes automatically on merge. Use one of `Closes #<issue>`, `Fixes #<issue>`, or `Resolves #<issue>` (each on its own line). Use `Relates to #<issue>` only for a non-closing reference.
@@ -94,7 +105,7 @@ The default mode for open work is an autonomous loop that drives issues to done 
 - Leave any in-progress PR for that issue as a **draft**, and move on to the next open item.
 - Revisit `needs-review` issues once I've answered (the label is my signal back to you — I'll remove it or reply).
 
-Keep me informed by using the issue/PR trail as the source of truth: every decision, blocker, and question lives on the relevant issue, not only in this chat.
+Keep me informed by using the issue/PR trail as the source of truth: every decision, blocker, and question lives on the relevant issue, not only in this chat. This is also what keeps the loop token-efficient — each wave restarts cold (no conversation carries across a monitor-loop wait), so the issue/PR trail *is* the memory the next wave re-reads. Treat every wave as stateless and re-derivable from GitHub; keep any running state you need in a compact ledger comment, not in context. See the token-efficiency scoping rules under "GitHub Issues" above.
 
 ### Docuemntation
 Be sure to keep the documentation in the `./docs` folder fresh. After you make a change, make sure the relevant docs are still correct, and create a new doc if it's something either a developer or user would want to know about.
