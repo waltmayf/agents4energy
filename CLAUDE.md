@@ -85,8 +85,10 @@ The default mode for open work is an autonomous loop that drives issues to done 
 2. **Implement** the change on a feature branch (never commit straight to `main`).
 3. **Deploy** to the sandbox (`pnpm deploy`) and, for `web/amplify/` changes, first run the credential-free synth gate (`cd web && pnpm test:synth`). Always type-check (`npx tsc --noEmit`) before pushing.
 4. **Test** — run the relevant E2E/lint suite and confirm the change actually works against the deployed backend, not just that it compiles.
-5. **Merge** once green: open a PR with the auto-closing keyword, wait for checks, and merge. Then move to the next item.
+5. **Merge** once green: open a PR with the auto-closing keyword and wait for checks. **In `development` phase, merge autonomously** once the PR is green and on-scope. **In `production` phase, do NOT merge to `main` yourself** — prepare the PR (green checks, valid closing keyword, on-scope diff), post your merge-readiness verdict, request review, label the issue `needs-review`, and let a human review and merge. Then move to the next item.
 6. **Repeat** until all open work is done.
+
+**Which phase are we in?** Read the `PROJECT_PHASE` signal (see [docs/autonomous-epic-delivery.md](docs/autonomous-epic-delivery.md) — "Development mode vs. production mode"). Default is `development`: breaking changes, deleting shared resources, and autonomous merge to `main` are all fine. In `production`: destructive actions require a `needs-review` gate, and **merging to `main` is a human step** — the loop does everything up to merge, then hands off.
 
 **When you need input from me, don't block the whole loop:**
 - Add the `needs-review` label to that issue (`gh issue edit <n> --add-label needs-review --repo waltmayf/agents4energy`).

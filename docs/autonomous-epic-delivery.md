@@ -243,22 +243,51 @@ cold wave can't rebuild from the issue/PR trail.
 ## Development mode vs. production mode
 
 There must be a **clear, explicit break** between the initial-build period and
-production.
+production. The break is a single documented signal every run reads at the top
+of its turn — a `PROJECT_PHASE: development | production` value (issue #379).
+Its default is `development`; flipping it to `production` changes how much the
+loop may do without a human.
 
-| | **Development mode** (default until you flip it) | **Production mode** |
+| | **Development mode** (default) | **Production mode** |
 |---|---|---|
-| Breaking schema/API changes | Fine — prioritize speed | Require a migration + review |
+| Breaking schema/API changes | Fine — prioritize speed | Require a migration + human review |
 | Deleting shared resources (tables, sandboxes, McpServer rows) | Fine | Forbidden without explicit human sign-off |
-| Merge bar | Green CI + type-check + synth gate | Same + human review of the diff |
+| **Merge to `main`** | **Orchestrator merges green, on-scope PRs autonomously** | **A human must review and approve every PR before merge — the orchestrator never merges to `main` itself** |
 | Autonomy | Full — decide and document | Human approves anything destructive/outward-facing |
 | Cedar policy posture | Permissive; iterate freely | Locked down (`docs/tool-governance.md`) |
 
-The break should be a single documented signal the agents read at the top of
-every run — e.g. a `PROJECT_PHASE: development|production` line in `CLAUDE.md`
-(or a repo variable the orchestrator's system prompt injects). While it reads
-`development`, agents may make breaking changes and delete shared resources
-without asking; once it reads `production`, those actions require a
-`needs-review` gate. **This flag does not exist yet** — see the audit below.
+### The production stage: human-in-the-loop merge
+
+In `development` the loop is fully autonomous end-to-end: workers open PRs and
+the orchestrator merges the green, on-scope ones (issue #380) so the epic drains
+without human action. In `production` the merge step becomes a **human gate**:
+
+1. Workers still implement and push PRs exactly as before.
+2. The orchestrator still reviews, runs the merge bar (green CI, valid
+   auto-close keyword, on-scope diff), and does everything *up to* merge.
+3. Instead of merging, it marks the PR **ready for human review** — posts its
+   merge-readiness verdict as a PR comment, requests review, and labels the
+   source issue `needs-review`.
+4. **A human reviews the diff and merges to `main`** (or requests changes). The
+   orchestrator does **not** hold merge authority for `main` in this phase.
+5. On its next wave the orchestrator picks up the now-merged work, sees the
+   dependents unblock, and continues — the human merge is just another gate it
+   waits on, like a `needs-review` question.
+
+This keeps the throughput of the autonomous loop (planning, implementation,
+CI-fixing, review prep all still happen without you) while making the
+irreversible, outward-facing action — landing code on `main` — a deliberate
+human decision once the project is real. The orchestrator's monitor-loop
+done-check in production therefore also treats "PRs awaiting my review" as a
+reason to pause and surface, not to keep dispatching new work indefinitely.
+
+> **How the gate is enforced, not just documented.** The cleanest enforcement is
+> at two layers: (a) the orchestrator prompt branches on `PROJECT_PHASE` and
+> simply never calls `gh pr merge` when `production`; and (b) GitHub **branch
+> protection on `main`** (require a PR + at least one human approving review)
+> makes an autonomous merge *impossible* even if the prompt-level rule is
+> bypassed — belt and suspenders for the one action you most want gated. See
+> issues #379 (the flag) and #380 (merge authority scoped by phase).
 
 ---
 
