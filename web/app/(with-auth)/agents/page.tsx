@@ -41,6 +41,7 @@ import {
 } from '@/lib/mcp-auth';
 import { listMcpToolsForServer } from '@/lib/list-mcp-tools';
 import { useCurrentUser } from '@/lib/use-current-user';
+import { safeListMcpServers } from '@/lib/mcp-server-safe-list';
 import { PermissionsPanel } from './permissions-panel';
 
 const amplifyClient = generateClient<Schema>({ authMode: 'userPool' });
@@ -896,10 +897,10 @@ function EditPanel({
 
     let cancelled = false;
     setMcpPickerSearching(true);
-    (amplifyClient.models.McpServer.list({
+    safeListMcpServers({
       filter: { name: { contains: mcpPickerQueryActive } },
       limit: 20,
-    } as any) as Promise<{ data: any[]; nextToken?: string | null }>).then((res) => {
+    }).then((res) => {
       if (cancelled) return;
       const searched = (res.data ?? []).map(toMcpServer);
       // Always include selected servers even if not in search results
@@ -1387,7 +1388,7 @@ export default function AgentsPage() {
       // Restore first-page list
       let cancelled = false;
       (async () => {
-        const res = await (amplifyClient.models.McpServer.list({ limit: 20 } as any) as Promise<{ data: any[]; nextToken?: string | null }>);
+        const res = await safeListMcpServers({ limit: 20 });
         if (cancelled) return;
         const servers = (res.data ?? []).map(toMcpServer);
         const nextToken: string | null = res.nextToken ?? null;
@@ -1398,10 +1399,10 @@ export default function AgentsPage() {
 
     let cancelled = false;
     (async () => {
-      const res = await (amplifyClient.models.McpServer.list({
+      const res = await safeListMcpServers({
         filter: { name: { contains: mcpQueryActive } },
         limit: 20,
-      } as any) as Promise<{ data: any[]; nextToken?: string | null }>);
+      });
       if (cancelled) return;
       const servers = (res.data ?? []).map(toMcpServer);
       dispatch({ type: 'setMcpServers', servers, nextToken: null });
@@ -1417,7 +1418,7 @@ export default function AgentsPage() {
       try {
         const [agentsRes, serversRes] = await Promise.all([
           amplifyClient.models.Agent.list({ limit: 20 } as any) as Promise<{ data: any[]; nextToken?: string | null }>,
-          amplifyClient.models.McpServer.list({ limit: 20 } as any) as Promise<{ data: any[]; nextToken?: string | null }>,
+          safeListMcpServers({ limit: 20 }),
         ]);
 
         if (cancelled) return;
@@ -1490,10 +1491,10 @@ export default function AgentsPage() {
     if (pageState.status !== 'ready' || !pageState.mcpServersNextToken) return;
     setLoadingMoreMcp(true);
     try {
-      const res = await (amplifyClient.models.McpServer.list({
+      const res = await safeListMcpServers({
         limit: 20,
         nextToken: pageState.mcpServersNextToken,
-      } as any) as Promise<{ data: any[]; nextToken?: string | null }>);
+      });
       const servers = (res.data ?? []).map(toMcpServer);
       const nextToken: string | null = res.nextToken ?? null;
       dispatch({ type: 'appendMcpServers', servers, nextToken });
