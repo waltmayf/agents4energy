@@ -336,17 +336,27 @@ export class AgentWebhookStack extends Construct {
     invokeHarness.next(postFinal);
 
     // ------------------------------------------------------------------
-    // Monitor loop (issue #262). When a Claude Code run ends in
-    // `agentStatus: 'monitoring'` (sub-issue 1, #261) it carries a
-    // `monitorSpec` = { intervalSeconds, maxIterations, checkCommand,
-    // followUpPrompt }. The state machine then polls: Wait (no runtime compute
-    // held — the microVM is reclaimed on idle /ping) → RunMonitorCheck (runs
-    // checkCommand in the SAME runtime session) → RouteCheck. A passing check
-    // re-invokes Claude with the follow-up prompt; a failing check waits and
-    // re-checks; hitting maxIterations posts a final "monitor stopped" comment.
-    // The loop is bounded by BOTH maxIterations and the state machine's 4h
-    // timeout, and reuses the same runId/session so /mnt/workspace + memory
-    // continuity hold across re-invokes.
+    // Monitor loop (issue #262, extended by #377). When a Claude Code run
+    // ends in `agentStatus: 'monitoring'` (sub-issue 1, #261) it carries a
+    // `monitorSpec` tagged with `kind`:
+    //   - 'condition': { intervalSeconds, maxIterations, checkCommand,
+    //     followUpPrompt }. Wait (no runtime compute held — the microVM is
+    //     reclaimed on idle /ping) → RunMonitorCheck (runs checkCommand in the
+    //     SAME runtime session) → RouteCheck. A passing check re-invokes
+    //     Claude with the follow-up prompt; a failing check waits and
+    //     re-checks; hitting maxIterations posts a final "monitor stopped"
+    //     comment.
+    //   - 'timed' (#377): { waitSeconds, followUpPrompt }. No condition to
+    //     poll — a single Wait(waitSeconds) followed directly by a re-invoke,
+    //     skipping RunMonitorCheck/RouteCheck entirely. This is the direct
+    //     "pause for N seconds, then continue" shape for an orchestrator that
+    //     wants to hold no runtime compute for a self-specified duration
+    //     (e.g. "give workers ~3h to deliver") without needing a check
+    //     command at all.
+    // Both branches reuse the same runId/session so /mnt/workspace + memory
+    // continuity hold across re-invokes. The condition loop is additionally
+    // bounded by maxIterations; both are bounded by the state machine's
+    // execution timeout (see the `timeout:` prop on the StateMachine below).
     // ------------------------------------------------------------------
 
     // Seed $.monitor = { iteration: 0, spec: <the emitted monitorSpec> }.
@@ -402,6 +412,24 @@ export class AgentWebhookStack extends Construct {
       resultPath: '$.prepared',
     });
     prepareReinvoke.next(invokeClaude);
+
+    // Timed-wait branch (#377): no checkCommand, so no RunMonitorCheck/
+    // RouteCheck — a single Wait(waitSeconds) then straight to a re-invoke.
+    const timedMonitorWait = new sfn.Wait(this, 'TimedMonitorWait', {
+      time: sfn.WaitTime.secondsPath('$.monitor.spec.waitSeconds'),
+    });
+
+    const prepareTimedReinvoke = new sfn.Pass(this, 'PrepareTimedMonitorReinvoke', {
+      parameters: {
+        // Same newline-free-template caveat as PrepareMonitorReinvoke above —
+        // States.Format only accepts \\ \' \{ \} escapes.
+        'effectivePrompt.$':
+          "States.Format('<monitor_context>Your requested wait has elapsed. Continue with the follow-up task in the same workspace/session.</monitor_context> {}', $.monitor.spec.followUpPrompt)",
+      },
+      resultPath: '$.prepared',
+    });
+    prepareTimedReinvoke.next(invokeClaude);
+    timedMonitorWait.next(prepareTimedReinvoke);
 
     // Bump the iteration counter, then loop back to Wait.
     const incrementIteration = new sfn.Pass(this, 'IncrementIteration', {
@@ -461,7 +489,22 @@ export class AgentWebhookStack extends Construct {
       .otherwise(incrementIteration);
 
     runMonitorCheck.addCatch(incrementIteration, { resultPath: '$.monitorCheckError' });
-    initMonitor.next(monitorWait);
+
+    // RouteMonitorKind (#377): a 'timed' spec skips straight to its own
+    // Wait/re-invoke chain; anything else (the pre-#377 shape omitted `kind`
+    // entirely, so isPresent guards it the same way RouteAgentResult below
+    // guards `agentStatus`) falls through to the existing condition-poll loop.
+    const routeMonitorKind = new sfn.Choice(this, 'RouteMonitorKind')
+      .when(
+        sfn.Condition.and(
+          sfn.Condition.isPresent('$.monitor.spec.kind'),
+          sfn.Condition.stringEquals('$.monitor.spec.kind', 'timed'),
+        ),
+        timedMonitorWait,
+      )
+      .otherwise(monitorWait);
+
+    initMonitor.next(routeMonitorKind);
     monitorWait.next(runMonitorCheck);
     runMonitorCheck.next(routeCheck);
 
@@ -513,7 +556,18 @@ export class AgentWebhookStack extends Construct {
       // its task token for up to ~3h. Set above that task's 3h taskTimeout so the
       // task-level timeout is what surfaces to Catch, not the execution timeout.
       // The native harness branch still self-bounds at 840s via its TimeoutSeconds.
-      timeout: Duration.hours(4),
+      //
+      // The monitor loop (#377) can now request a single Wait/interval of up
+      // to 99,999,999s (~3.17 years, the SFN Wait state's own max) — but a
+      // Standard Workflow execution hard-fails at 1 year regardless (AWS
+      // quota, not adjustable: https://docs.aws.amazon.com/step-functions/latest/dg/limits-overview.html#service-limits-state-machine-executions).
+      // Set the execution timeout to 364 days — just under that hard ceiling,
+      // leaving a day of headroom for the other steps (PostInitialComment,
+      // PrepareGitAuth, etc.) around the Wait — so a legitimately long
+      // monitor wait is bounded by AWS's own limit, not by an artificially
+      // low value here. The `Wait` state itself holds no runtime compute
+      // while paused, so this only bounds calendar time, not cost.
+      timeout: Duration.days(364),
     });
 
     // The native invokeHarness task calls the harness with the state machine's
