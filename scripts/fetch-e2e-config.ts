@@ -19,13 +19,16 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const outputPath = resolve(root, 'web/e2e-config.json');
 
 // Must match the BRANCH_SLUG convention in scripts/build.sh exactly: slashes to
-// dashes, lowercase, then first 8 chars + '-' + first 5 hex chars of the full
-// name's sha1 (14 chars total — the ampx --identifier limit is 15). A blind
-// truncate-to-14 collided whenever two branches shared a 14-char prefix
-// (#400); the hash suffix makes that vanishingly unlikely. That's the slug
-// `pnpm deploy` published the SSM parameter under.
+// dashes, lowercase; names <= 14 chars are used verbatim (identical to the
+// historical slice(0,14), so already-deployed sandboxes like `main` keep their
+// identifier), and only names LONGER than 14 chars get the collision-resistant
+// form (first 8 chars + '-' + first 5 hex chars of the full name's sha1, 14
+// total — the ampx --identifier limit is 15). A blind truncate-to-14 could
+// only collide when truncation happened, i.e. for names > 14 chars (#400).
+// That's the slug `pnpm deploy` published the SSM parameter under.
 function slugBranch(value: string): string {
   const lowerDashed = value.replace(/\//g, '-').toLowerCase();
+  if (lowerDashed.length <= 14) return lowerDashed;
   const hash = createHash('sha1').update(lowerDashed).digest('hex').slice(0, 5);
   return `${lowerDashed.slice(0, 8)}-${hash}`;
 }
