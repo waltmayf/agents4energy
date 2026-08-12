@@ -32,11 +32,24 @@ test('DENY grant becomes a forbid policy, not permit', () => {
   assert.doesNotMatch(policy.statement, /^permit\(/);
 });
 
-test('"*" toolName maps to a target-scoped action (ensuring only its own tools are authorized)', () => {
-  const [policy] = generateCedarPolicies([grant({ toolName: '*' })], TEST_GATEWAY_ARN);
-  // The action clause should be scoped to the target name, not a generic bare action.
-  assert.match(policy.statement, /action == AgentCore::Action::"reservoir-target___\*"/);
-  assert.doesNotMatch(policy.statement, /,\n\s*action,\n/);
+test('"*" toolName enumerates the target\'s concrete tool actions (a literal "___*" action does not exist and fails Cedar validation — #358)', () => {
+  const [policy] = generateCedarPolicies(
+    [grant({ toolName: '*', targetToolNames: ['get_well_data', 'list_wells'] })],
+    TEST_GATEWAY_ARN,
+  );
+  assert.match(policy.statement, /action in \[ AgentCore::Action::"reservoir-target___get_well_data", AgentCore::Action::"reservoir-target___list_wells" \]/);
+  assert.doesNotMatch(policy.statement, /___\*/);
+  assert.doesNotMatch(policy.statement, /action ==/);
+});
+
+test('"*" grant with no resolvable tool names produces no policy at all, rather than an invalid `___*` action', () => {
+  const policies = generateCedarPolicies([grant({ toolName: '*', targetToolNames: [] })], TEST_GATEWAY_ARN);
+  assert.equal(policies.length, 0);
+});
+
+test('"*" grant with targetToolNames omitted entirely also produces no policy', () => {
+  const policies = generateCedarPolicies([grant({ toolName: '*' })], TEST_GATEWAY_ARN);
+  assert.equal(policies.length, 0);
 });
 
 test('the principal check string-matches the cognito:groups tag with a quote-delimited `like` (the tag is a JSON-array string, not a Cedar Set — #325)', () => {
@@ -63,7 +76,7 @@ test('the `like` pattern is delimiter-safe — a group name is not a prefix-matc
 
 test('every generated policy is ACTIVE (matches the engine-level ENFORCE mode, #280)', () => {
   for (const policy of generateCedarPolicies(
-    [grant(), grant({ effect: 'DENY' }), grant({ toolName: '*' })],
+    [grant(), grant({ effect: 'DENY' }), grant({ toolName: '*', targetToolNames: ['get_well_data'] })],
     TEST_GATEWAY_ARN,
   )) {
     assert.equal(policy.enforcementMode, 'ACTIVE');
@@ -83,7 +96,7 @@ test('policy names are unique across different groups/targets/tools for the same
         grant({ group: 'drilling' }),
         grant({ targetName: 'other-target' }),
         grant({ toolName: 'other_tool' }),
-        grant({ toolName: '*' }),
+        grant({ toolName: '*', targetToolNames: ['get_well_data'] }),
       ],
       TEST_GATEWAY_ARN,
     ).map((p) => p.name),
@@ -91,12 +104,12 @@ test('policy names are unique across different groups/targets/tools for the same
   assert.equal(names.size, 5);
 });
 test('"*" grant for target A does not authorize tools on target B', () => {
-  const grantA = grant({ toolName: '*', targetName: 'target-A' });
+  const grantA = grant({ toolName: '*', targetName: 'target-A', targetToolNames: ['get_well_data'] });
   const policyA = generateCedarPolicies([grantA], TEST_GATEWAY_ARN)[0];
   // Action should be scoped to target-A
-  assert.match(policyA.statement, /action == AgentCore::Action::"target-A___\*"/);
+  assert.match(policyA.statement, /action in \[ AgentCore::Action::"target-A___get_well_data" \]/);
   // Ensure it does not contain target-B pattern
-  assert.doesNotMatch(policyA.statement, /target-B___\*/);
+  assert.doesNotMatch(policyA.statement, /target-B___/);
 });
 
 
