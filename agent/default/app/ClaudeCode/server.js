@@ -433,17 +433,23 @@ function runClaudeCode({ prompt, workDir, repo, issueNumber, systemAppend, githu
         : `When finished, summarize what you did and include the confirmed PR URL in your final message.`,
     );
   }
-  // Monitor handoff (issue #261): lets a run end its turn by asking the state
-  // machine to poll an external condition instead of busy-waiting in-session
-  // for a deploy/CI run/other long job to finish.
+  // Monitor handoff (issue #261, extended by #377): lets a run end its turn
+  // by asking the state machine to poll an external condition (or just wait a
+  // fixed duration) instead of busy-waiting in-session for a deploy/CI run/
+  // other long job to finish.
   appendParts.push(
-    'MONITOR HANDOFF: if you are waiting on an external async condition (a deploy, a CI run, a long job) rather than doing work yourself, end your final message with a fenced ```monitor``` block instead of busy-waiting in-session:',
+    'MONITOR HANDOFF: if you are waiting on an external async condition (a deploy, a CI run, a long job) rather than doing work yourself, end your final message with a fenced ```monitor``` block instead of busy-waiting in-session. Two shapes:',
+    '1. Condition poll — wake as soon as a check passes:',
     '```monitor',
     '{"intervalSeconds": 120, "maxIterations": 20, "checkCommand": "bash -c \\"gh run list --repo owner/name --branch main --limit 1 --json status --jq \'.[0].status\' | grep -q completed\\"", "followUpPrompt": "The deploy finished — verify it succeeded and comment the result."}',
     '```',
-    '`checkCommand` and `followUpPrompt` are required (a malformed block is ignored and the run just completes normally); `intervalSeconds` is clamped to [30, 900] and `maxIterations` to [1, 40].',
+    '2. Timed wait — no `checkCommand` at all, just pause for a fixed duration then continue (e.g. "give workers ~3h to deliver"):',
+    '```monitor',
+    '{"waitSeconds": 10800, "followUpPrompt": "3 hours should be enough for workers to deliver — check the review queue and act on whatever landed."}',
+    '```',
+    '`followUpPrompt` is always required (a malformed block is ignored and the run just completes normally). `checkCommand` is optional — include it for shape 1, omit it for shape 2. `intervalSeconds`/`waitSeconds` (either name works, up to 99,999,999 — the Step Functions Wait state max, ~3.17 years) default to 60s if omitted; `maxIterations` (shape 1 only) is clamped to [1, 40], default 10.',
     'IMPORTANT — `checkCommand` runs with NO shell: it is executed directly, not via `/bin/sh -c`, so pipes (`|`), `&&`, and quoting are NOT interpreted and get passed to your first command as literal extra arguments (e.g. a bare `gh api ... | grep -q x` fails with `gh`\'s own "accepts 1 arg(s), received N"). Wrap ANY checkCommand that uses a pipe, `&&`, or shell quoting in `bash -c "..."` as shown above.',
-    'IMPORTANT — the microVM running this session is RECLAIMED for the duration of the wait: `checkCommand` runs in a FRESH container on each tick, and only the /mnt/workspace mount persists across ticks — nothing else you installed or created outside it survives. So `checkCommand` must be fully self-contained: use `gh`/`curl`/`aws` directly, or re-bootstrap any tooling it needs, rather than relying on anything set up earlier in this session. Exit 0 means the condition is met (you will be re-invoked with `followUpPrompt`, same session/workspace); any non-zero exit means keep waiting. Keep checkCommand fast and its output tiny (see KEEP TOOL OUTPUT SMALL above).',
+    'IMPORTANT — the microVM running this session is RECLAIMED for the duration of the wait: `checkCommand` runs in a FRESH container on each tick, and only the /mnt/workspace mount persists across ticks — nothing else you installed or created outside it survives. So `checkCommand` must be fully self-contained: use `gh`/`curl`/`aws` directly, or re-bootstrap any tooling it needs, rather than relying on anything set up earlier in this session. Exit 0 means the condition is met (you will be re-invoked with `followUpPrompt`, same session/workspace); any non-zero exit means keep waiting. Keep checkCommand fast and its output tiny (see KEEP TOOL OUTPUT SMALL above). A timed wait (shape 2) always re-invokes with `followUpPrompt` once `waitSeconds` elapses — there is no check to fail.',
   );
   if (systemAppend) appendParts.push(systemAppend);
 
