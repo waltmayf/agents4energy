@@ -16,7 +16,7 @@ The AgentCore harness, gateway, and memory (`agent/default/agentcore/`) are **no
 
 `.github/workflows-drafts/delete-branch-stack.yml` is a draft workflow that runs on the `delete` event (branch deletion) and tears down the branch-scoped stack above:
 
-1. Resolves the branch slug the same way `scripts/build.sh` does (slashes → dashes, lowercase, truncate to 14 chars, then strip hyphens — matching how `ampx` names the sandbox stack)
+1. Resolves the branch slug the same way `scripts/build.sh` does (slashes → dashes, lowercase; names ≤ 14 chars used verbatim so long-lived sandboxes like `main` keep their identifier, else first 8 chars + `-` + first 5 hex chars of the full name's sha1 — 14 chars total; then strip hyphens — matching how `ampx` names the sandbox stack). The hash suffix (applied only to names > 14 chars, the only ones a blind truncate could collide) avoids collisions between branches that share a long common prefix (#400).
 2. Looks up the sandbox root stack name via `aws cloudformation list-stacks` (no CDK build/synth needed)
 3. Fires `aws cloudformation delete-stack` and returns immediately — it does not wait for the delete to finish
 
