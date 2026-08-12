@@ -9,7 +9,7 @@ import { deriveSessionTitle, isPlaceholderName } from '@/lib/session-title';
 const amplifyClient = generateClient<Schema>({ authMode: 'userPool' });
 
 /**
- * Auto-names a chat session from its first user message (issues #352, #372). A
+ * Auto-names a chat session from its first user message (issues #352, #374). A
  * fresh session is created with the `'New Chat'` placeholder (see
  * useChatSession); the first time the user sends a turn we name it in two
  * stages:
