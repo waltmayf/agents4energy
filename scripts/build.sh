@@ -15,8 +15,21 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Derive branch from git or DEPLOY_BRANCH env var
 BRANCH="${DEPLOY_BRANCH:-$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD)}"
-# Normalise: replace slashes with dashes, lowercase, truncate to 14 chars (ampx --identifier limit is 15)
-export BRANCH_SLUG="$(echo "$BRANCH" | tr '/' '-' | tr '[:upper:]' '[:lower:]' | cut -c1-14)"
+# Normalise: replace slashes with dashes, lowercase. Names <= 14 chars are used
+# verbatim (identical to the historical slice(0,14), so every already-deployed
+# sandbox — crucially `main` -> `main` — keeps its identifier and is NOT
+# recreated as a fresh backend). Only names LONGER than 14 chars get a
+# collision-resistant slug: first 8 chars + '-' + first 5 hex of the full
+# name's sha1 (14 chars total, under the ampx --identifier limit of 15). This
+# is safe because a blind truncate-to-14 could only ever collide when
+# truncation actually happened, i.e. for names > 14 chars (#400).
+BRANCH_LOWER_DASHED="$(echo "$BRANCH" | tr '/' '-' | tr '[:upper:]' '[:lower:]')"
+if [ "${#BRANCH_LOWER_DASHED}" -gt 14 ]; then
+  BRANCH_HASH="$(printf '%s' "$BRANCH_LOWER_DASHED" | sha1sum | cut -c1-5)"
+  export BRANCH_SLUG="$(printf '%s' "$BRANCH_LOWER_DASHED" | cut -c1-8)-$BRANCH_HASH"
+else
+  export BRANCH_SLUG="$BRANCH_LOWER_DASHED"
+fi
 
 echo "Branch:      $BRANCH"
 echo "Branch slug: $BRANCH_SLUG"
@@ -50,8 +63,9 @@ echo "Deploying Amplify sandbox (including hosting + agent stacks)…"
 #
 # Slug rules must match scripts/fetch-e2e-config.ts's slugRepo/slugBranch
 # exactly: repoSlug = lowercased "owner/repo" with non [a-z0-9-/] chars
-# replaced by '-'; branchSlug = $BRANCH_SLUG above (already lowercased +
-# truncated to 14 chars, the same value passed to `ampx sandbox --identifier`).
+# replaced by '-'; branchSlug = $BRANCH_SLUG above (lowercased + dashed, used
+# verbatim when <= 14 chars, else first-8 + '-' + 5-hex-sha1 — the same value
+# passed to `ampx sandbox --identifier`).
 if [ -n "${GITHUB_REPOSITORY:-}" ]; then
   # `-` MUST be last in the bracket class — sed reads `9-/` as a character
   # range (invalid: '/' < '9') and aborts with "Invalid range end". Use `#` as
