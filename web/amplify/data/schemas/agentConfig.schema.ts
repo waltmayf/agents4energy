@@ -18,6 +18,17 @@ export const agentConfigSchema = a.schema({
     value: a.string(),
   }),
 
+  // Outbound auth mode for a gateway target's downstream call to the MCP server.
+  // NONE: current default (NO_AUTH / static headers). OAUTH_3LO: AgentCore Identity
+  // 3-legged OAuth credential provider — each user consents in-browser and the
+  // gateway injects that user's vaulted token outbound (see epic #412).
+  McpServerOutboundAuthType: a.enum(['NONE', 'OAUTH_3LO']),
+
+  // Which OAuth2 credential-provider vendor backs OAUTH_3LO. GOOGLE uses AgentCore's
+  // GoogleOauth2 provider type (fixed authorization/token endpoints); CUSTOM uses
+  // CustomOauth2 and requires oauthDiscoveryUrl.
+  McpServerOauthVendor: a.enum(['GOOGLE', 'CUSTOM']),
+
   Agent: a.model({
     name: a.string().required(),
     // URL-safe routing slug, e.g. "ops-agent". Callers pass this as agentId.
@@ -78,10 +89,43 @@ export const agentConfigSchema = a.schema({
     // ID of the registered gateway target for this MCP server (set after CreateGatewayTarget).
     // Null until the user registers the server with the gateway.
     gatewayTargetId: a.string(),
-    // OAuth2 client ID for servers that require PKCE auth.
-    // When set, the UI shows an "Authenticate" button that runs the PKCE flow and
-    // saves the resulting token in McpServerCredential (owner-scoped, per-user).
+    // OAuth2 client ID. Dual purpose:
+    // - PKCE (legacy direct-MCP flow): the UI shows an "Authenticate" button that
+    //   runs the PKCE flow and saves the resulting token in McpServerCredential
+    //   (owner-scoped, per-user).
+    // - OAUTH_3LO (gateway-target flow, epic #412): the client ID registered with
+    //   the AgentCore Identity OAuth2 credential provider (paired with
+    //   oauthClientSecretArn).
     oauthClientId: a.string(),
+
+    // --- Outbound auth (3LO), epic #412. See McpServerOutboundAuthType/McpServerOauthVendor above. ---
+    // Amplify enum refs don't support .default(); absent/null is treated as NONE by all readers.
+    outboundAuthType: a.ref('McpServerOutboundAuthType'),
+    oauthVendor: a.ref('McpServerOauthVendor'),
+    // Discovery URL of the external OIDC provider. Required for oauthVendor CUSTOM;
+    // unused for GOOGLE (AgentCore's GoogleOauth2 provider has fixed endpoints).
+    oauthDiscoveryUrl: a.string(),
+    // Secrets Manager ARN holding the OAuth2 client secret for the credential
+    // provider. The secret value itself is never stored in this row — field-level
+    // auth below strips it from guest (unauthenticated identity-pool) reads, same
+    // posture as authSecretArn/headers above.
+    oauthClientSecretArn: a.string().authorization((allow) => [
+      allow.authenticated().to(['read', 'create', 'update', 'delete']),
+      allow.owner(),
+    ]),
+    // Scopes requested from the external IdP during the 3LO consent flow.
+    oauthScopes: a.string().array(),
+    // App return URL AgentCore redirects to after consent completes
+    // (`defaultReturnUrl` on the credential provider's oauthCredentialProvider config).
+    oauthReturnUrl: a.string(),
+    // ARN of the AgentCore Identity OAuth2 credential provider. Written back by
+    // slice 1 (#413) after CreateOauth2CredentialProvider.
+    oauthProviderArn: a.string(),
+    // Callback URL AgentCore assigns to the credential provider
+    // (`https://bedrock-agentcore.<region>.amazonaws.com/identities/oauth2/callback/<uuid>`).
+    // Written back by slice 1 (#413); must be added to the external IdP's redirect URIs.
+    oauthCallbackUrl: a.string(),
+
     enabled: a.boolean().required().default(true),
     agents: a.hasMany('AgentMcpServer', 'mcpServerId'),
     credentials: a.hasMany('McpServerCredential', 'mcpServerId'),
