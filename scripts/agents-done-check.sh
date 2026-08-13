@@ -10,8 +10,10 @@
 # Why this exists instead of wait-for-agents.sh: the monitor loop's
 # RunMonitorCheck exec environment has git's credential store but NOT gh's
 # auth, and execs checkCommand with no shell (see docs/monitor-loop.md). This
-# script uses curl only — no `gh` — so it works there. It still runs fine
-# standalone / interactively too.
+# script uses curl only — no `gh` — so it works there. It also avoids a hard
+# `jq` dependency (that env has `node` but no standalone `jq`; a bare `jq` call
+# exited 127 and made the check silently fail forever — #403), parsing JSON via
+# jq/node/python3 in that order. It still runs fine standalone / interactively.
 #
 # EXCLUDE_ISSUE (optional): an issue number to ignore in the label query. The
 # orchestrator (docs/autonomous-epic-delivery.md, agent/default/app/ClaudeCode/
@@ -61,27 +63,27 @@ response="$(curl -sf \
   "${auth_header[@]}" \
   "https://api.github.com/repos/${REPO}/issues?labels=${AGENTS_WORK_LABEL}&state=open&per_page=100")"
 
-if command -v jq >/dev/null 2>&1; then
-  numbers="$(jq -r '.[].number' <<<"$response")"
-else
-  # Fallback to node for JSON parsing if jq is not available
-  numbers="$(node - <<'EOF'
-    const stdin = process.stdin;
-    let data = '';
-    stdin.on('data', chunk => data += chunk);
-    stdin.on('end', () => {
-      try {
-        const arr = JSON.parse(data);
-        const out = arr.map(item => item.number).join('\n');
-        process.stdout.write(out);
-      } catch (e) {
-        // On parsing error, output nothing
-        process.exit(1);
-      }
-    });
-EOF
-    <<< "$response")"
-fi
+# Parse the issue-number list WITHOUT a hard `jq` dependency: the monitor
+# loop's RunMonitorCheck exec environment ships `node` (it's the ClaudeCode
+# AgentCore runtime — scripts/build.sh already relies on `node`) but NOT a
+# standalone `jq` binary, so a bare `jq` call exits 127 and the check silently
+# fails forever (#403). Prefer `jq` when present (fast, and keeps standalone
+# behavior identical), then fall back to `node`, then `python3`, else fail
+# loudly rather than misreport "not done".
+extract_issue_numbers() {
+  if command -v jq >/dev/null 2>&1; then
+    jq -r '.[].number'
+  elif command -v node >/dev/null 2>&1; then
+    node -e 'const d=JSON.parse(require("fs").readFileSync(0,"utf8"));for(const i of d)console.log(i.number)'
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import sys,json
+for i in json.load(sys.stdin): print(i["number"])'
+  else
+    echo "agents-done-check.sh: need one of jq, node, or python3 to parse JSON" >&2
+    return 2
+  fi
+}
+numbers="$(printf '%s' "$response" | extract_issue_numbers)"
 if [[ -n "${EXCLUDE_ISSUE:-}" ]]; then
   numbers="$(grep -v -x "$EXCLUDE_ISSUE" <<<"$numbers" || true)"
 fi
