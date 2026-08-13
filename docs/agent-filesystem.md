@@ -68,6 +68,14 @@ Args: `path` (string, required). Deletes the object; returns a clear error if it
 
 See [`docs/agentic-architecture.md`](./agentic-architecture.md#lambda-backed-gateway-target-s3-filesystem-tools) for how this fits into the rest of the MCP tool wiring.
 
+## Browser upload page (`/files`)
+
+Issue #372 adds `web/app/(with-auth)/files/page.tsx`, a signed-in-only page for managing this same bucket/prefix directly from the browser via the Amplify Storage SDK (`list`, `uploadData`, `getUrl`, `remove` from `aws-amplify/storage`) rather than through the agent's tools. Because it's the identical `agentWorkspace` bucket and `files/` root, anything uploaded there is immediately visible to `ReadFile`/`ListFiles`, and anything the agent writes shows up in the page on refresh.
+
+- **Flat space, matches the tool model.** The page lists, uploads, downloads, and deletes against the shared `files/` root using `resolveS3Prefix(null)` from `web/lib/s3-fs-path.ts` — no per-user namespacing, no folder browser. `list()` recurses, so nested keys (e.g. `files/docs/...`) show up as flat rows with their full relative path.
+- **Access control.** Browser writes are authorized by the `files/*` Storage grant in `web/amplify/storage/resource.ts` (`allow.authenticated.to(['read', 'write', 'delete'])`, extended from read-only by #373) — any signed-in user, no additional per-file ACL.
+- **No client-side size/type restrictions** — this is a dev-velocity default, not a permanent constraint; revisit if abuse or oversized uploads become a problem.
+
 ## Out of scope (follow-up work)
 
 - Seeding actual `files/docs/...` domain content (e.g. artificial-lift documentation) — this issue delivers the *capability*, not the content.
