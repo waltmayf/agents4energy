@@ -6,16 +6,19 @@ import { defineStorage } from '@aws-amplify/backend';
 // resolution. Seeded domain documentation lives under `files/docs/...` by
 // convention only (not a separate enforced prefix, not read-only).
 //
-// Write access is granted directly to the s3-tools Lambda's execution role in
-// backend.ts (scoped s3:GetObject/PutObject/DeleteObject/ListBucket) — the
-// browser never writes here. The authenticated-read grant below (issue #348)
-// lets signed-in users mint a client-side presigned GET URL via Amplify
-// Storage `getUrl` so the knowledge-graph explorer (#332) can open the S3
-// object linked to a graph node (node `props.s3Path`, a `files/`-relative
-// path). Read-only, scoped to the same `files/` root prefix.
+// The s3-tools Lambda's execution role also has direct write access, granted
+// in backend.ts (scoped s3:GetObject/PutObject/DeleteObject/ListBucket).
+// The authenticated grant below gives signed-in users full CRUD (read,
+// write, delete) on the same `files/*` prefix (issue #373, extending the
+// read-only grant from #348) — this backs both the knowledge-graph
+// explorer's presigned GET via `getUrl` (#332) and browser-side
+// upload/delete via `uploadData`/`remove` (#372). Anything a user writes
+// here is immediately visible to the agent's ReadFile/ListFiles tools, since
+// it's the same bucket and prefix. Unauthenticated/guest access remains
+// denied.
 export const agentWorkspace = defineStorage({
   name: 'agentWorkspace',
   access: (allow) => ({
-    'files/*': [allow.authenticated.to(['read'])],
+    'files/*': [allow.authenticated.to(['read', 'write', 'delete'])],
   }),
 });
