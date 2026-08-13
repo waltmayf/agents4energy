@@ -90,6 +90,10 @@ export default function Home() {
             <Link href="/graph" className={styles.footerLink}>
               Graph
             </Link>
+            <span className={styles.footerSep}>/</span>
+            <Link href="/files" className={styles.footerLink}>
+              Files
+            </Link>
           </span>
         </footer>
       </div>
