@@ -473,8 +473,9 @@ These are tracked under **epic #376** and its child issues:
    [Starting an orchestrator run](#starting-an-orchestrator-run) above. The
    end-to-end dry run proving it live on a throwaway epic is #382.
 
-6. **End-to-end dry run (#382).** Prove the whole loop on a throwaway epic and
-   document what was observed.
+6. ✅ **End-to-end dry run (#382, closed).** Ran a throwaway epic through the
+   real loop twice; found and fixed three real bugs (#395/#400/#403) along the
+   way. See [End-to-end dry run results](#end-to-end-dry-run-results) below.
 
 ### Bottom line
 
@@ -485,6 +486,74 @@ not new infrastructure: an orchestrator prompt, a `gh`-free done-check for the
 monitor loop, merge authority for the orchestrator, and an explicit dev/prod
 phase flag. Those are a few days of prompt/glue work on top of a platform that
 already does the load-bearing parts.
+
+---
+
+## End-to-end dry run results
+
+Issue #382 ran a throwaway epic (a fake epic with 3 trivial, independent
+child issues — one deliberately ambiguous) through the real orchestrator +
+worker + monitor-loop machinery, twice, with no code changes between the
+epic's issues and the loop under test. This section is the permanent record;
+the throwaway epic and its child issues/PRs were closed and the scratch files
+they added were deleted after the run.
+
+### ✅ What's proven
+
+| Mechanic | Evidence |
+|---|---|
+| Orchestrator (running as the GitHub App/Bot) dispatches workers | Posted `@agentcore-claude` dispatch comments on all 3 children; each fired a real worker run. |
+| Worker → draft PR → fix CI → merge → auto-close | All three children got PRs with `Closes #N`; all merged; all issues auto-closed. |
+| `needs-review` escalation | The deliberately-ambiguous child (a wording decision with no objectively-correct answer) got labeled `needs-review` with a specific question instead of a guess, and the orchestrator moved on. |
+| Resume after a human answers `needs-review` | Once answered, the re-dispatched worker produced exactly the requested content. |
+| Autonomous merge | The orchestrator (the GitHub App identity, not a human) merged a green PR itself. |
+| Monitor-loop compute-free pause | The orchestrator's Step Functions execution parked in the `Wait` state and re-invoked `RunMonitorCheck` on a fixed interval across a multi-hour span, with the AgentCore microVM fully reclaimed between checks. |
+
+### ❌ Bugs found and fixed during the run
+
+1. **Bot-authored dispatch comments were dropped (#395, fixed).** The webhook's
+   loop-prevention rule dropped *all* bot-authored comments, including the
+   orchestrator's own `@agentcore-claude` dispatch comments — so an
+   orchestrator running as the GitHub App could never actually dispatch a
+   worker. Fixed to distinguish the orchestrator's legitimate dispatches from
+   webhook-generated noise.
+2. **Per-branch CI sandbox slug collision (#400, fixed).** Sibling branches
+   for an epic's children can share the same truncated (14-char) Amplify
+   sandbox slug, so two children's deploys race and the loser fails with
+   `AlreadyExistsException`. Fixed by deriving a collision-resistant slug.
+3. **Monitor loop couldn't wake — hard `jq` dependency (#403, fixed in #404).**
+   The done-check (`scripts/agents-done-check.sh`) shelled out to `jq`, which
+   isn't installed in the `RunMonitorCheck` exec environment. It exited 127 on
+   every tick; `RunMonitorCheck` treats any non-zero exit as "condition not
+   met," so the loop silently re-waited until it exhausted `maxIterations` and
+   gave up instead of waking to do the final merge. Fixed with a
+   dependency-free JSON-parsing fallback (jq → node → python3).
+
+### ⚠️ Known limitations (not yet fixed)
+
+- **Silent check failures vs. genuine "not done yet."** `RunMonitorCheck` has
+  no way to distinguish a `checkCommand` that is *erroring* (missing binary,
+  auth failure, network blip) from one that is *correctly* reporting "not
+  done." Both currently look like "keep waiting" and the loop only surfaces
+  the problem once `maxIterations` is exhausted. A future fix should have
+  `checkCommand` exit codes carry that distinction (e.g. a reserved exit code
+  for "check itself failed") so a broken check fails loudly instead of
+  silently waiting out the budget.
+- **Concurrent orchestrator executions on the same epic race.** Starting a
+  second orchestrator execution for an epic that already has one `RUNNING`
+  supersedes it (`cancelPriorRuns` is last-write-wins) — losing that first
+  run's in-flight wave-1 work. Operational rule until this has a real fix:
+  confirm there is no `RUNNING` execution for an epic before re-dispatching
+  its orchestrator.
+
+### Bottom line
+
+The full loop — dispatch → draft PR → CI fix → merge → auto-close,
+`needs-review` escalation and resume, autonomous merge, and a compute-free
+multi-hour pause — is now proven end-to-end on real infrastructure, not just
+in design. The three bugs the dry run surfaced (#395, #400, #403) are fixed;
+the two known limitations above are the next things worth hardening before
+running this loop on a real, high-stakes epic.
 
 ---
 
