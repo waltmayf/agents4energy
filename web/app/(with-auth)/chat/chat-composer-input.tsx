@@ -276,14 +276,13 @@ function ChatComposerInputImpl(props: CopilotChatInputProps) {
           disabled={willStop ? !onStop : !hasText || !onSubmitMessage}
           aria-label={label}
           title={label}
-          children={
-            isRunning
-              ? hasText
-                ? <ListPlusIcon className="cpk:size-[18px]" aria-hidden="true" />
-                : <SquareIcon className="cpk:size-[18px] cpk:fill-current" aria-hidden="true" />
-              : undefined
-          }
-        />
+        >
+          {isRunning
+            ? hasText
+              ? <ListPlusIcon className="cpk:size-[18px]" aria-hidden="true" />
+              : <SquareIcon className="cpk:size-[18px] cpk:fill-current" aria-hidden="true" />
+            : undefined}
+        </CopilotChatInput.SendButton>
       </>
     ),
     [handleSendButtonClick, willStop, onStop, hasText, onSubmitMessage, label, isRunning],
