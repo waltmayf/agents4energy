@@ -1,7 +1,17 @@
-# Draft workflow — copy this file to .github/workflows/ to enable it.
-# (Claude's GitHub App cannot write directly to .github/workflows/.)
+# Tears down a branch's per-branch Amplify sandbox stack when the branch goes
+# away — so a merged/closed PR never leaks its sandbox (each sandbox holds a
+# full AppSync GraphQL API, and the account has a hard 50-API/region limit).
 #
-# Deletes the per-branch Amplify sandbox stack when its branch is deleted.
+# Triggers (belt-and-suspenders, because no single GitHub event covers every
+# way a branch's work ends):
+#   • pull_request: closed  — fires the moment a PR is merged OR closed, even if
+#     the head branch is left undeleted (GitHub's "auto-delete head branches"
+#     only deletes branches of *merged* PRs, never *closed* ones). This is the
+#     primary trigger and covers "when the PR is merged or closed".
+#   • delete (branch)       — fires on a manual/auto branch deletion that isn't
+#     tied to a PR close (e.g. deleting an abandoned branch directly).
+#   • workflow_dispatch     — manual re-run for a specific branch slug.
+#
 # The hosting resources (S3 + CloudFront) are a nested stack inside the sandbox
 # root stack (see web/amplify/backend.ts's `backend.createStack('hosting')`),
 # so deleting the root stack tears down hosting too — no separate CDK destroy
@@ -10,13 +20,15 @@
 #
 # Does NOT touch AgentCore (harness, gateway, memory). Those are deployed once to
 # a single shared "default" target (agent/default/agentcore/aws-targets.json) —
-# not per branch — so branch deletion must never tear them down.
+# not per branch — so branch/PR teardown must never tear them down.
 #
-# `delete` events only fire for workflow files present on the repo's default
-# branch, so this only takes effect once merged there.
+# NOTE: `pull_request` and `delete` events run the workflow definition from the
+# repo's DEFAULT branch, so this only takes effect once merged to main.
 name: Delete branch stack
 
 on:
+  pull_request:
+    types: [closed]
   delete:
   workflow_dispatch:
     inputs:
@@ -28,19 +40,26 @@ env:
   AWS_REGION: ${{ vars.AWS_REGION }}
 
 concurrency:
-  group: deploy-${{ github.event.ref || inputs.branch }}
+  group: deploy-${{ github.event.pull_request.head.ref || github.event.ref || inputs.branch }}
   cancel-in-progress: false
 
 jobs:
   delete-stack:
-    if: github.event_name == 'workflow_dispatch' || github.event.ref_type == 'branch'
+    # Run for: a manual dispatch, a branch-delete event, or a PR-close event —
+    # but for PR close only from a same-repo head branch (fork PRs don't get
+    # AWS secrets and never had a sandbox deployed for them).
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'delete' && github.event.ref_type == 'branch') ||
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     permissions:
       id-token: write   # required for OIDC auth to AWS
       contents: read
 
     steps:
-      # The deleted branch no longer exists, so check out the default branch
+      # The branch may no longer exist, so check out the default branch
       # (only needed to read web/package.json for the sandbox stack's app-name prefix).
       - uses: actions/checkout@v4
         with:
@@ -57,11 +76,12 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Resolve branch slug
-        # RAW_BRANCH comes from untrusted event context (a branch name / dispatch
-        # input can contain shell metacharacters), so it MUST be passed via env and
-        # referenced as "$RAW_BRANCH" — never interpolated into the script body.
+        # RAW_BRANCH comes from untrusted event context (a branch name / PR head
+        # ref / dispatch input can contain shell metacharacters), so it MUST be
+        # passed via env and referenced as "$RAW_BRANCH" — never interpolated
+        # into the script body.
         env:
-          RAW_BRANCH: ${{ github.event.ref || inputs.branch }}
+          RAW_BRANCH: ${{ github.event.pull_request.head.ref || github.event.ref || inputs.branch }}
         run: |
           # Mirror scripts/build.sh's normalisation exactly, so this resolves to the
           # same --identifier the sandbox was deployed with: lowercase + dashes,
