@@ -61,7 +61,27 @@ response="$(curl -sf \
   "${auth_header[@]}" \
   "https://api.github.com/repos/${REPO}/issues?labels=${AGENTS_WORK_LABEL}&state=open&per_page=100")"
 
-numbers="$(jq -r '.[].number' <<<"$response")"
+if command -v jq >/dev/null 2>&1; then
+  numbers="$(jq -r '.[].number' <<<"$response")"
+else
+  # Fallback to node for JSON parsing if jq is not available
+  numbers="$(node - <<'EOF'
+    const stdin = process.stdin;
+    let data = '';
+    stdin.on('data', chunk => data += chunk);
+    stdin.on('end', () => {
+      try {
+        const arr = JSON.parse(data);
+        const out = arr.map(item => item.number).join('\n');
+        process.stdout.write(out);
+      } catch (e) {
+        // On parsing error, output nothing
+        process.exit(1);
+      }
+    });
+EOF
+    <<< "$response")"
+fi
 if [[ -n "${EXCLUDE_ISSUE:-}" ]]; then
   numbers="$(grep -v -x "$EXCLUDE_ISSUE" <<<"$numbers" || true)"
 fi
