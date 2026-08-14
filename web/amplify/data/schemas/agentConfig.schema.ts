@@ -2,6 +2,7 @@ import { a } from '@aws-amplify/backend';
 import { registerMcpTarget } from '../../functions/register-mcp-target/resource';
 import { listMcpTools } from '../../functions/list-mcp-tools/resource';
 import { invokeAgent } from '../../functions/invoke-agent/resource';
+import { completeResourceTokenAuth } from '../../functions/complete-resource-token-auth/resource';
 
 /**
  * Agent Configuration Schema
@@ -230,6 +231,35 @@ export const agentConfigSchema = a.schema({
   RegisterMcpTargetResult: a.customType({
     gatewayTargetId: a.string().required(),
   }),
+
+  // Result of completeResourceTokenAuth — success flag + a friendly error
+  // message (expired session, user mismatch, AWS-side failure) when it fails.
+  CompleteResourceTokenAuthResult: a.customType({
+    success: a.boolean().required(),
+    error: a.string(),
+  }),
+
+  // Mutation: epic #412 slice 5 (#417). The AgentCore OAuth return-URL
+  // callback page (web/app/oauth/agentcore-callback) calls this once
+  // AgentCore's hosted 3LO consent flow redirects back, to complete "URL
+  // session binding" — proving the SAME signed-in user finished the flow —
+  // before AgentCore vaults the OAuth2 token for them. `userToken` is the
+  // caller's own Cognito ACCESS token (the same one forwarded as
+  // `Authorization: Bearer` to the gateway for the elicited tool call — see
+  // harness-agent.ts's fetchCallerIdentity/buildTools); the handler
+  // cross-checks its `sub` claim against AppSync's verified identity so a
+  // token belonging to a different signed-in user is rejected as a clear
+  // "user mismatch" error rather than silently vaulting a token under the
+  // wrong identity.
+  completeResourceTokenAuth: a
+    .mutation()
+    .arguments({
+      sessionUri: a.string().required(),
+      userToken: a.string().required(),
+    })
+    .returns(a.ref('CompleteResourceTokenAuthResult'))
+    .handler(a.handler.function(completeResourceTokenAuth))
+    .authorization((allow) => [allow.authenticated()]),
 
   // Mutation: registers an MCP server URL as a gateway target and returns its target ID.
   // The caller is responsible for saving the returned gatewayTargetId to the McpServer record.
