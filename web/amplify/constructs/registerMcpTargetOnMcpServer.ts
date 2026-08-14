@@ -43,10 +43,14 @@ export class RegisterMcpTargetOnMcpServer extends Construct {
       bundling: { nodeModules: ['@aws-sdk/client-bedrock-agentcore-control'] },
     });
 
-    // Grant permissions to create gateway targets.
+    // Grant permissions to create and update gateway targets. Update is
+    // needed to attach/detach the OAuth2 credential provider (epic #412
+    // slice 3, #415) when an McpServer row's outbound auth config changes
+    // after the target already exists.
     fn.addToRolePolicy(new PolicyStatement({
       actions: [
         'bedrock-agentcore:CreateGatewayTarget',
+        'bedrock-agentcore:UpdateGatewayTarget',
         'bedrock-agentcore:SynchronizeGatewayTargets',
       ],
       resources: ['*'],
