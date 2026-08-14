@@ -1,4 +1,5 @@
 import type { Message, ToolCall } from '@ag-ui/client';
+import { elicitationFriendlyMessage, parseMcpElicitation } from './mcp-elicitation.ts';
 
 /**
  * Maps stored Bedrock Converse content into AG-UI `Message[]` for a
@@ -199,12 +200,18 @@ export function eventToMessages(ev: StoredEvent, index: number): Message[] {
             .filter(Boolean)
             .join('\n')
         : '';
+      // MCP elicitation (epic #412 slice 4): if this stored tool result is a
+      // -32042 consent-required error, show the friendly stand-in instead of
+      // the raw JSON-RPC payload on reload too — the live "Authenticate"
+      // banner only reacts to the in-flight CUSTOM event, but a page refresh
+      // should never surface the protocol error itself either.
+      const elicitation = parseMcpElicitation(resultText);
       out.push({
         id: idFor(base, `toolresult-${seq++}`),
         role: 'tool',
         toolCallId: tr.toolUseId ?? idFor(base, `tool-${seq}`),
-        content: resultText,
-        ...(tr.status === 'error' ? { error: resultText } : {}),
+        content: elicitation ? elicitationFriendlyMessage(elicitation) : resultText,
+        ...(tr.status === 'error' && !elicitation ? { error: resultText } : {}),
       } as Message);
     }
   }

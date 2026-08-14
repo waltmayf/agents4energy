@@ -30,6 +30,7 @@ import {
 import { buildRunErrorMessageEvents } from './harness-run-error';
 import { slugifyToolName } from './tool-name-slug';
 import { friendlyChatHarnessError } from './harness-error-message';
+import { MCP_ELICITATION_EVENT_NAME, elicitationFriendlyMessage, parseMcpElicitation } from './mcp-elicitation';
 import { encodeRuntimeUserId, SHARED_ACTOR_ID, type CallerIdentity } from './caller-identity';
 
 const custom = (outputs as {
@@ -260,6 +261,33 @@ export class HarnessAgent extends AbstractAgent {
             if (cancelled) break;
             if (event.validationException || event.internalServerException || event.runtimeClientError) {
               const ex = event.validationException ?? event.internalServerException ?? event.runtimeClientError;
+              // MCP elicitation (epic #412 slice 4): a -32042 consent-required
+              // error from a 3LO gateway target can surface as a stream-level
+              // exception rather than a normal tool result, depending on how
+              // the harness normalizes it. Detect it here too so it never
+              // reaches the user as a raw "run failed: {jsonrpc...}" bubble —
+              // surface the elicitation and end the run cleanly instead.
+              const elicitation = parseMcpElicitation(ex?.message);
+              if (elicitation) {
+                for (const aguiEvent of finalizeHarnessStream(streamState)) {
+                  subscriber.next(aguiEvent);
+                }
+                subscriber.next({
+                  type: EventType.CUSTOM,
+                  name: MCP_ELICITATION_EVENT_NAME,
+                  value: elicitation,
+                } as BaseEvent);
+                for (const aguiEvent of buildRunErrorMessageEvents(
+                  elicitationFriendlyMessage(elicitation),
+                  () => crypto.randomUUID(),
+                )) {
+                  subscriber.next(aguiEvent);
+                }
+                void clearActiveRun(sessionId).catch(() => {});
+                subscriber.next({ type: EventType.RUN_FINISHED, threadId: sessionId, runId } as BaseEvent);
+                subscriber.complete();
+                return;
+              }
               throw new Error(ex?.message ?? 'Harness stream exception');
             }
             for (const aguiEvent of translateHarnessStreamEvent(

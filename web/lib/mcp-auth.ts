@@ -126,7 +126,7 @@ interface OAuthCallbackMessage {
   errorDescription?: string;
 }
 
-function openAuthPopup(url: string): Window {
+export function openAuthPopup(url: string): Window {
   const width = 520;
   const height = 660;
   const left = Math.max(0, (screen.width - width) / 2);

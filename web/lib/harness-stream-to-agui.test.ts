@@ -156,6 +156,46 @@ test('finalize closes an unterminated tool call', () => {
   assert.equal((evs[evs.length - 1] as unknown as { toolCallId: string }).toolCallId, 't1');
 });
 
+test('a -32042 elicitation toolResult emits a CUSTOM event and a friendly TOOL_CALL_RESULT, not the raw JSON-RPC error', () => {
+  const rawElicitation = JSON.stringify({
+    jsonrpc: '2.0',
+    id: 7,
+    error: {
+      code: -32042,
+      message: 'This request requires more information.',
+      data: {
+        elicitations: [
+          {
+            mode: 'url',
+            elicitationId: 'elicit-abc',
+            url: 'https://idp.example.com/authorize?request_uri=urn%3Aietf%3Aparams%3Aoauth%3Arequest_uri%3Az',
+            message: 'Please login to this URL for authorization.',
+          },
+        ],
+      },
+    },
+  });
+  const evs = run([
+    { messageStart: { role: 'user' } },
+    {
+      contentBlockStart: { contentBlockIndex: 0, start: { toolResult: { toolUseId: 't1', status: 'error' } } },
+    },
+    { contentBlockDelta: { contentBlockIndex: 0, delta: { toolResult: [{ text: rawElicitation }] } } },
+    { contentBlockStop: { contentBlockIndex: 0 } },
+  ]);
+  assert.deepEqual(types(evs), [EventType.CUSTOM, EventType.TOOL_CALL_RESULT]);
+
+  const custom = evs[0] as unknown as { name: string; value: { elicitationId: string; url: string; sessionUri: string | null } };
+  assert.equal(custom.name, 'mcp_elicitation');
+  assert.equal(custom.value.elicitationId, 'elicit-abc');
+  assert.equal(custom.value.sessionUri, 'urn:ietf:params:oauth:request_uri:z');
+
+  const result = evs[1] as unknown as { toolCallId: string; content: string };
+  assert.equal(result.toolCallId, 't1');
+  assert.ok(!result.content.includes('-32042'));
+  assert.ok(!result.content.includes('jsonrpc'));
+});
+
 test('toolUse with a missing id falls back to a generated id', () => {
   const evs = run([
     { messageStart: { role: 'assistant' } },

@@ -1,4 +1,5 @@
 import { EventType, type BaseEvent } from '@ag-ui/client';
+import { MCP_ELICITATION_EVENT_NAME, elicitationFriendlyMessage, parseMcpElicitation } from './mcp-elicitation.ts';
 
 /**
  * Translates the AgentCore Harness's live Bedrock Converse event stream into
@@ -181,11 +182,21 @@ export function translateHarnessStreamEvent(
     }
     const result = state.resultBlocks.get(idx);
     if (result) {
+      const joined = result.parts.join('');
+      // MCP elicitation (epic #412 slice 4): the gateway can return a -32042
+      // JSON-RPC error instead of a normal tool result when 3LO consent is
+      // needed. Emit it as a CUSTOM event the chat UI can render an
+      // "Authenticate" affordance from, and swap the tool card's content for a
+      // friendly message so the raw JSON-RPC error never reaches the user.
+      const elicitation = parseMcpElicitation(joined);
+      if (elicitation) {
+        out.push({ type: EventType.CUSTOM, name: MCP_ELICITATION_EVENT_NAME, value: elicitation } as BaseEvent);
+      }
       out.push({
         type: EventType.TOOL_CALL_RESULT,
         messageId: genId(),
         toolCallId: result.toolCallId,
-        content: result.parts.join(''),
+        content: elicitation ? elicitationFriendlyMessage(elicitation) : joined,
         role: 'tool',
       } as BaseEvent);
       state.resultBlocks.delete(idx);
