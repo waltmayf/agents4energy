@@ -31,6 +31,7 @@ import { E2eTestUser } from './constructs/e2eTestUser/resource';
 import { AgentWebhookStack } from './constructs/agentWebhookStack';
 import { SyncCedarPolicies } from './constructs/syncCedarPolicies';
 import { RegisterMcpTargetOnMcpServer } from './constructs/registerMcpTargetOnMcpServer';
+import { SyncOauthCredentialProvider } from './constructs/syncOauthCredentialProvider';
 import { ReconcileGatewayAuthorizer } from './constructs/reconcileGatewayAuthorizer/resource';
 import { S3ToolsGatewayTarget } from './constructs/s3ToolsGatewayTarget/resource';
 import { S3ToolsMcpServerSeed } from './constructs/s3ToolsMcpServerSeed/resource';
@@ -717,6 +718,22 @@ if (AGENTCORE_GATEWAY_ID) {
   const registerMcpTargetOnServerStack = backend.createStack('register-mcp-target-on-mcp-server');
   new RegisterMcpTargetOnMcpServer(registerMcpTargetOnServerStack, 'RegisterMcpTargetOnMcpServer', {
     gatewayId: AGENTCORE_GATEWAY_ID,
+    mcpServerTable: backend.data.resources.tables['McpServer'],
+  });
+}
+
+// ============================================================================
+// SYNC-OAUTH-CREDENTIAL-PROVIDER Lambda (epic #412 slice 1, #413) — reconciles
+// each McpServer row's outbound OAuth2 config against an AgentCore Identity
+// OAuth2 credential provider (Create/Update/DeleteOauth2CredentialProvider),
+// writing oauthProviderArn/oauthCallbackUrl back onto the row. Own stack for
+// the same data↔function cycle reason as RegisterMcpTargetOnMcpServer above —
+// see the construct doc comment.
+// ============================================================================
+
+{
+  const syncOauthCredentialProviderStack = backend.createStack('sync-oauth-credential-provider');
+  new SyncOauthCredentialProvider(syncOauthCredentialProviderStack, 'SyncOauthCredentialProvider', {
     mcpServerTable: backend.data.resources.tables['McpServer'],
   });
 }
