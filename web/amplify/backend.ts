@@ -636,6 +636,14 @@ cfnUserPoolClient.supportedIdentityProviders = ['COGNITO'];
 // in either would risk a cross-stack cycle (see the S3ToolsGatewayTarget note).
 // Idempotent — the handler no-ops when the authorizer already matches, so a
 // steady-state redeploy makes no control-plane change.
+//
+// #412 slice 6/8: `allowedClients` and `callbackUrLs` above are otherwise
+// IaC-owned, so any out-of-band trust grant for a second deployment (or any
+// external caller) is drift the next deploy clobbers. TrustedOAuthClient
+// (federation.schema.ts) is the runtime, admin-editable source of truth for
+// EXTRA clients/callbacks — ReconcileGatewayAuthorizer unions its rows with
+// the IaC-known base sets below, and reconciles on every change to that
+// table (via a DynamoDB Stream), not only on deploy.
 if (AGENTCORE_GATEWAY_ID) {
   const reconcileStack = backend.createStack('reconcile-gateway-authorizer');
   new ReconcileGatewayAuthorizer(reconcileStack, 'ReconcileGatewayAuthorizer', {
@@ -647,6 +655,11 @@ if (AGENTCORE_GATEWAY_ID) {
     allowedClients: [backend.auth.resources.userPoolClient.userPoolClientId, serviceWebhookUserPoolClient.ref],
     // Changes every synth so the custom resource re-runs each deploy.
     nonce: Date.now().toString(),
+    userPoolId: backend.auth.resources.userPool.userPoolId,
+    userPoolArn: backend.auth.resources.userPool.userPoolArn,
+    primaryClientId: backend.auth.resources.userPoolClient.userPoolClientId,
+    baseCallbackUrls: [mcpOauthCallbackUrl],
+    trustedOAuthClientTable: backend.data.resources.tables['TrustedOAuthClient'],
   });
 }
 

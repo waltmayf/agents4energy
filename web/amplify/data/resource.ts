@@ -7,6 +7,7 @@ import { agentcoreMemorySchema } from './schemas/agentcoreMemory.schema';
 import { agentConfigSchema } from './schemas/agentConfig.schema';
 import { githubSchema } from './schemas/github.schema';
 import { knowledgeGraphSchema } from './schemas/knowledgeGraph.schema';
+import { federationSchema } from './schemas/federation.schema';
 
 // Grant the invoke-agent Lambda function read access to the agent config models.
 // allow.resource() must be applied to an individual schema, not a.combine().
@@ -21,6 +22,7 @@ const schema = a.combine([
   agentConfigSchemaWithFunctionAccess,
   githubSchema,
   knowledgeGraphSchema,
+  federationSchema,
 ]);
 
 export type Schema = ClientSchema<typeof schema>;

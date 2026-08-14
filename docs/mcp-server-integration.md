@@ -181,6 +181,12 @@ existing gateway's authorizer to the current stack's live pool + app client.
 only writes when the authorizer differs — so a steady-state redeploy makes no
 control-plane change.
 
+Since #418, `allowedClients` (and the app client's `callbackUrLs`) are also
+unioned with a runtime-editable `TrustedOAuthClient` table, and the same
+handler additionally reconciles on every change to that table (not only on
+deploy) — see [docs/gateway-oauth-local-clients.md](gateway-oauth-local-clients.md)
+for federating a second deployment without a redeploy.
+
 **Diagnosing manually.** Walk the discovery chain the client uses:
 
 ```bash
