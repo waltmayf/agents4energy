@@ -7,6 +7,7 @@ import { nameChatSession } from './functions/name-chat-session/resource';
 import { registerMcpTarget } from './functions/register-mcp-target/resource';
 import { listMcpTools } from './functions/list-mcp-tools/resource';
 import { invokeAgent } from './functions/invoke-agent/resource';
+import { completeResourceTokenAuth } from './functions/complete-resource-token-auth/resource';
 import { mintGithubToken } from './functions/mint-github-token/resource';
 import { agentWebhookReceiver } from './functions/agent-webhook-receiver/resource';
 import { agentWebhookPostComment } from './functions/agent-webhook-post-comment/resource';
@@ -154,6 +155,7 @@ const backend = defineBackend({
   registerMcpTarget,
   listMcpTools,
   invokeAgent,
+  completeResourceTokenAuth,
   mintGithubToken,
   agentWebhookReceiver,
   agentWebhookPostComment,
@@ -681,6 +683,29 @@ const updateSessionSummaryLambda = backend.updateSessionSummary.resources.lambda
 updateSessionSummaryLambda.addToRolePolicy(new PolicyStatement({
   actions: ['bedrock-agentcore:BatchUpdateMemoryRecords'],
   resources: [AGENTCORE_MEMORY_ARN],
+}));
+
+// ============================================================================
+// COMPLETE-RESOURCE-TOKEN-AUTH Lambda (epic #412 slice 5, #417) — completes
+// "URL session binding" for the AgentCore OAuth return-URL flow: called by
+// web/app/oauth/agentcore-callback once AgentCore's hosted 3LO consent flow
+// redirects back, so AgentCore can vault the token for the signed-in user.
+// A plain `defineFunction` (not an own-stack raw NodejsFunction like
+// SyncCedarPolicies/S3ToolsGatewayTarget) is safe here — unlike those, this
+// Lambda never reads/writes a data-stack table (no env/IAM/DynamoEventSource
+// pointed at one), so wiring it into AppSync via the shared function stack
+// can't close the `data -> function -> data` cycle #152 guards against; it
+// only calls the external bedrock-agentcore:CompleteResourceTokenAuth API.
+// ============================================================================
+
+const completeResourceTokenAuthLambda = backend.completeResourceTokenAuth.resources.lambda as LambdaFunction;
+completeResourceTokenAuthLambda.addToRolePolicy(new PolicyStatement({
+  // No fixed resource ARN to scope to — a session URI identifies a dynamic,
+  // per-user authorization session with no ARN known at synth time (same
+  // reasoning as the Oauth2CredentialProvider grants in
+  // syncOauthCredentialProvider.ts).
+  actions: ['bedrock-agentcore:CompleteResourceTokenAuth'],
+  resources: ['*'],
 }));
 
 // name-chat-session titles a session from its first message via Bedrock Converse
