@@ -38,6 +38,14 @@ export type McpServerInfo = {
   // Gateway routing is mandatory (#338) — a server without this is dropped by
   // HarnessAgent's buildTools rather than direct-connected.
   gatewayTargetId?: string | null;
+  // Outbound auth (3LO), epic #412. When OAUTH_3LO, the gateway injects this
+  // user's vaulted token outbound and elicits per-user consent (-32042) on the
+  // first tool call — surfaced in chat by McpElicitationBanner (slices 4/5).
+  outboundAuthType?: 'NONE' | 'OAUTH_3LO' | null;
+  // Callback URL AgentCore assigned to the credential provider — must be
+  // registered on the external IdP. Read-back only (surfaced in the MCP
+  // Servers panel), never populated by the client.
+  oauthCallbackUrl?: string | null;
 };
 
 export type AgentOption = {
@@ -121,6 +129,8 @@ export function useAgents(): AgentsState {
             enabled: s.enabled ?? true,
             oauthClientId: s.oauthClientId ?? null,
             gatewayTargetId: s.gatewayTargetId ?? null,
+            outboundAuthType: s.outboundAuthType ?? null,
+            oauthCallbackUrl: s.oauthCallbackUrl ?? null,
           });
         }
 
