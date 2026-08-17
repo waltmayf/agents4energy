@@ -1,5 +1,7 @@
 # Agent Config Runtime — Progress
 
+> **Historical note:** paths below like `agent/default/agentcore/...` reflect the repo layout at the time this work was done. `agent/default/` was deleted in #440 — AgentCore config now lives under `web/amplify/agentcore/` (typed `agentcore.config.ts`, consumed by the `AgentCoreApplication` CDK construct in `web/amplify/backend.ts`). This log is kept as-is for historical accuracy; see [docs/agentcore-cdk-construct.md](docs/agentcore-cdk-construct.md) for the current model.
+
 ## Goal
 
 Enable runtime agent configuration so a single deployed AgentCore harness can serve multiple named agents, each with its own system prompt, model override, and MCP server assignments. Users pick an agent from a dropdown in the chat UI.
