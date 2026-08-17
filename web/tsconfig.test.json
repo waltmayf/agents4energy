@@ -5,5 +5,5 @@
     "allowImportingTsExtensions": true
   },
   "include": ["**/*.test.ts", "**/*.test.tsx", "lib/**/*.ts"],
-  "exclude": ["node_modules"]
+  "exclude": ["node_modules", "amplify/agentcore/ClaudeCode/**", "amplify/agentcore/AguiAgent/**"]
 }

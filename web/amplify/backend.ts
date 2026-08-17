@@ -28,6 +28,14 @@ import { readFileSync } from 'fs';
 import { HostingConstruct } from './constructs/hostingConstruct';
 import { AgentCoreApplication, type HarnessDeployment } from './constructs/agentCoreApplication';
 import type { HarnessSpec } from '@aws/agentcore-cdk';
+import {
+  projectName,
+  memories,
+  runtimes,
+  policyEngines,
+  gateways,
+  agentcoreProjectRoot,
+} from './agentcore/agentcore.config';
 import { E2eTestUser } from './constructs/e2eTestUser/resource';
 import { AgentWebhookStack } from './constructs/agentWebhookStack';
 import { SyncCedarPolicies } from './constructs/syncCedarPolicies';
@@ -46,27 +54,23 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 // ============================================================================
-// AGENTCORE CONFIG — memories/gateways read from agentcore.json at synth time
-// (same file the `agentcore` CLI reads/writes; the CLI remains usable for local
-// iteration via `agentcore dev`/`agentcore validate`, but production deploys no
-// longer run `agentcore deploy` — this stack owns the resources directly).
+// AGENTCORE CONFIG — memories/runtimes/policyEngines/gateways come from the
+// typed `./agentcore/agentcore.config` (imported above). There is no
+// `agentcore deploy` step; this stack owns the AgentCore resources directly.
 //
 // Harnesses are inlined below as literal `HarnessSpec`s (the `harness.json`
-// shape @aws/agentcore-cdk validates) instead of living in agentcore.json, so
-// the system prompt + Cognito authorizer can be injected at synth time.
+// shape @aws/agentcore-cdk validates) instead of living in agentcore.config.ts,
+// so the system prompt + Cognito authorizer can be injected at synth time.
 // ============================================================================
 
-const agentcoreRoot = resolve(__dirname, '../../agent/default/agentcore');
-const projectSpec = JSON.parse(readFileSync(resolve(agentcoreRoot, 'agentcore.json'), 'utf8'));
+const agentcoreDir = resolve(agentcoreProjectRoot, 'agentcore');
 
-// MyHarness — see agent/default/app/MyHarness/. The system prompt is prose, not
-// config, so it lives in system-prompt.md and is read from disk here; everything
-// else is inlined below as a literal `HarnessSpec` (the shape @aws/agentcore-cdk
-// validates and turns into the AWS::BedrockAgentCore::Harness resource).
-const myHarnessSystemPrompt = readFileSync(
-  resolve(agentcoreRoot, '../app/MyHarness/system-prompt.md'),
-  'utf8',
-).trim();
+// MyHarness — see web/amplify/agentcore/MyHarness/. The system prompt is prose,
+// not config, so it lives in system-prompt.md and is read from disk here;
+// everything else is inlined below as a literal `HarnessSpec` (the shape
+// @aws/agentcore-cdk validates and turns into the AWS::BedrockAgentCore::Harness
+// resource).
+const myHarnessSystemPrompt = readFileSync(resolve(agentcoreDir, 'MyHarness/system-prompt.md'), 'utf8').trim();
 
 const harnessSpecs: HarnessSpec[] = [
   {
@@ -295,7 +299,7 @@ const serviceWebhookUserPoolClient = new cognito.CfnUserPoolClient(agentStack, '
 // both bedrock-agentcore:InvokeAgentRuntime and :InvokeHarness in the wiring
 // below — InvokeHarnessCommand's IAM authorization checks both actions).
 // Wrap each spec as a HarnessDeployment for the construct. `harnessDir` points
-// at agent/default/app/MyHarness/ so the construct can auto-discover a
+// at web/amplify/agentcore/MyHarness/ so the construct can auto-discover a
 // system-prompt.md there if `spec.systemPrompt` is ever omitted (we pass it
 // literally above, so this is belt-and-braces). No Cognito authorizer is
 // injected — MyHarness authorizes with AWS_IAM (see the comment above), so
@@ -311,32 +315,31 @@ const serviceWebhookUserPoolClient = new cognito.CfnUserPoolClient(agentStack, '
 const skipHarness = process.env.AGENTCORE_SKIP_HARNESS === '1';
 const harnessSpecsWithAuth: HarnessDeployment[] = (skipHarness ? [] : harnessSpecs).map((spec) => ({
   spec,
-  harnessDir: resolve(agentcoreRoot, '../app/MyHarness'),
+  harnessDir: resolve(agentcoreDir, 'MyHarness'),
 }));
 
-// Memory/Harness/Gateway from agentcore.json — same-stack CDK tokens, no
-// post-deploy control-plane resolution needed. agentcore.json's `runtimes` is
-// empty: the AgUiHandler runtime was retired (#33) and MyHarness is the sole
-// runtime.
+// Memory/Harness/Gateway from agentcore.config.ts — same-stack CDK tokens, no
+// post-deploy control-plane resolution needed.
 //
-// `name` in agentcore.json is just the logical/config name — the physical
+// `name` in agentcore.config.ts is just the logical/config name — the physical
 // CfnGateway name comes from `resourceName` when set (see Gateway.js in
 // @aws/agentcore-cdk). Override it per-deployment so concurrent sandboxes/
 // branches in the same account don't collide on physical gateway names.
-const agentCoreGatewaysWithUniqueNames = projectSpec.agentCoreGateways?.length
-  ? projectSpec.agentCoreGateways.map((gateway: { name: string; [key: string]: unknown }) => ({
+const agentCoreGatewaysWithUniqueNames = gateways.length
+  ? gateways.map((gateway) => ({
       ...gateway,
-      resourceName: toGatewayResourceName(projectSpec.name, gateway.name, backendNamespace ?? '', backendName ?? ''),
+      resourceName: toGatewayResourceName(projectName, gateway.name, backendNamespace ?? '', backendName ?? ''),
       // Re-derive the CUSTOM_JWT authorizer from THIS stack's own Cognito user
       // pool, the same way the harness authorizer is (see harnessSpecs comment
-      // above). agentcore.json pins a discoveryUrl/allowedClients to a specific
-      // pool id from whenever it was generated; on `main` the gateway already
+      // above). agentcore.config.ts intentionally omits authorizerType/
+      // authorizerConfiguration — a fixed discoveryUrl/allowedClients would
+      // pin a specific pool id and go stale: on `main` the gateway already
       // exists so CloudFormation never re-reads them, but every fresh
       // branch/sandbox creates a NEW gateway pointing at that now-deleted pool,
       // whose discovery document 404s → "failed to fetch discovery document …
       // Status Code: 400" → NotStabilized → the whole agent stack rolls back
       // (#128). Pointing it at the live pool fixes it for good.
-      authorizerType: 'CUSTOM_JWT',
+      authorizerType: 'CUSTOM_JWT' as const,
       authorizerConfiguration: {
         customJwtAuthorizer: {
           discoveryUrl: cognitoDiscoveryUrl,
@@ -356,39 +359,39 @@ const agentCoreGatewaysWithUniqueNames = projectSpec.agentCoreGateways?.length
 const longestResourceNameLength = Math.max(
   1,
   ...harnessSpecs.map((h) => h.name.length),
-  ...(projectSpec.memories ?? []).map((m: { name: string }) => m.name.length),
+  ...memories.map((m) => m.name.length),
   // Runtimes (e.g. ClaudeCode) share the same `${projectName}_${name}` naming
   // and 48-char cap as harnesses/memories.
-  ...(projectSpec.runtimes ?? []).map((r: { name: string }) => r.name.length),
+  ...runtimes.map((r) => r.name.length),
   // Policy engines (e.g. DefaultCedar, #271) share the same
   // `${projectName}_${name}` physical naming (see AgentCorePolicyEngine in
   // @aws/agentcore-cdk).
-  ...(projectSpec.policyEngines ?? []).map((p: { name: string }) => p.name.length),
+  ...policyEngines.map((p) => p.name.length),
 );
 const uniqueProjectName = toAgentCoreProjectName(
   48 - 1 - longestResourceNameLength,
-  projectSpec.name,
+  projectName,
   backendNamespace ?? '',
   backendName ?? '',
 );
 
 const agentCoreApp = new AgentCoreApplication(agentStack, 'AgentCoreApplication', {
   projectName: uniqueProjectName,
-  memories: projectSpec.memories ?? [],
-  // AgentCore Runtimes from agentcore.json — the ClaudeCode container agent
-  // (invoked via @agentcore-claude on GitHub issues/PRs, see agent/default/app/
-  // ClaudeCode). Built via CodeBuild → ECR → CfnRuntime by @aws/agentcore-cdk.
-  runtimes: projectSpec.runtimes ?? [],
-  // Policy engines from agentcore.json (e.g. DefaultCedar, #271) — the
+  memories,
+  // AgentCore Runtimes from agentcore.config.ts — the ClaudeCode container agent
+  // (invoked via @agentcore-claude on GitHub issues/PRs, see
+  // web/amplify/agentcore/ClaudeCode). Built via CodeBuild → ECR → CfnRuntime by
+  // @aws/agentcore-cdk.
+  runtimes,
+  // Policy engines from agentcore.config.ts (e.g. DefaultCedar, #271) — the
   // AgentCoreApplication wrapper previously dropped this field entirely, so
   // the engine and its policies were never actually synthesized into the CDK
-  // stack despite agentcore.json configuring them (#272).
-  policyEngines: projectSpec.policyEngines ?? [],
+  // stack despite agentcore.config.ts configuring them (#272).
+  policyEngines,
   harnesses: harnessSpecsWithAuth,
   mcpSpec: agentCoreGatewaysWithUniqueNames
     ? {
         agentCoreGateways: agentCoreGatewaysWithUniqueNames,
-        mcpRuntimeTools: projectSpec.mcpRuntimeTools,
       }
     : undefined,
 });
@@ -427,11 +430,10 @@ const memoryName = firstHarnessMemory?.mode === 'existing' ? firstHarnessMemory.
 // During the AGENTCORE_SKIP_HARNESS phase the harness isn't created, so its ARN
 // accessors would throw — treat the harness as absent (ARNs resolve to '').
 const harnessName = skipHarness ? undefined : harnessSpecs[0]?.name;
-const gatewayName = projectSpec.agentCoreGateways?.[0]?.name;
+const gatewayName = gateways[0]?.name;
 // The Cedar policy engine attached to the first gateway (DefaultCedar, #271) —
 // used by the sync-cedar-policies Lambda (#272) to push generated policies.
-const policyEngineName: string | undefined = projectSpec.agentCoreGateways?.[0]?.policyEngineConfiguration
-  ?.policyEngineName;
+const policyEngineName: string | undefined = gateways[0]?.policyEngineConfiguration?.policyEngineName;
 
 const AGENTCORE_MEMORY_ID = memoryName ? agentCoreApp.memoryId(memoryName) : '';
 const AGENTCORE_MEMORY_ARN = memoryName ? agentCoreApp.memoryArn(memoryName) : '';
@@ -445,26 +447,20 @@ const AGENTCORE_POLICY_ENGINE_ARN = policyEngineName ? agentCoreApp.policyEngine
 const AGENTCORE_REGION = Stack.of(agentStack).region;
 
 // ClaudeCode AgentCore Runtime — the container agent invoked via
-// @agentcore-claude on GitHub issues/PRs (see agent/default/app/ClaudeCode).
-// Its name matches the runtime `name` in agentcore.json; runtimes are optional
-// so this is '' when none are configured.
-const claudeCodeRuntimeName = (projectSpec.runtimes ?? []).find(
-  (r: { name: string }) => r.name === 'ClaudeCode',
-)?.name;
+// @agentcore-claude on GitHub issues/PRs (see web/amplify/agentcore/ClaudeCode).
+// Its name matches the runtime `name` in agentcore.config.ts; runtimes are
+// optional so this is '' when none are configured.
+const claudeCodeRuntimeName = runtimes.find((r) => r.name === 'ClaudeCode')?.name;
 const AGENTCORE_CLAUDE_CODE_RUNTIME_ARN = claudeCodeRuntimeName
   ? agentCoreApp.runtimeArn(claudeCodeRuntimeName)
   : '';
 
 // AguiAgent AgentCore Runtime — the AG-UI-native runtime (issue #176) that
 // emits AG-UI events directly instead of Bedrock Converse (see
-// agent/default/app/AguiAgent). Additive alongside ClaudeCode/MyHarness;
+// web/amplify/agentcore/AguiAgent). Additive alongside ClaudeCode/MyHarness;
 // '' when not configured on this branch.
-const aguiRuntimeName = (projectSpec.runtimes ?? []).find(
-  (r: { name: string }) => r.name === 'AguiAgent',
-)?.name;
-const AGENTCORE_AGUI_RUNTIME_ARN = aguiRuntimeName
-  ? agentCoreApp.runtimeArn(aguiRuntimeName)
-  : '';
+const aguiRuntimeName = runtimes.find((r) => r.name === 'AguiAgent')?.name;
+const AGENTCORE_AGUI_RUNTIME_ARN = aguiRuntimeName ? agentCoreApp.runtimeArn(aguiRuntimeName) : '';
 
 // MyHarness now authorizes with AWS_IAM, so the browser signs InvokeHarness
 // requests with Cognito Identity Pool credentials (see web/lib/agentcore-transport.ts).
@@ -1337,9 +1333,9 @@ if (claudeCodeRuntimeName) {
 // harness half uses (issue #186), so a run started via @agentcore-claude shows
 // up in the chat UI (HarnessAgent.loadHistory reads the same memory/session).
 // The runtime discovers the memory id/region via env vars (it calls CreateEvent
-// itself — see agent/default/app/ClaudeCode/server.js) rather than through the
-// agentcore.json envVars list, because the memory id is a deploy-time CDK token,
-// not something that can be hardcoded in that static config file.
+// itself — see web/amplify/agentcore/ClaudeCode/server.js) rather than through
+// agentcore.config.ts's envVars list, because the memory id is a deploy-time
+// CDK token, not something that can be hardcoded in that static config file.
 if (claudeCodeRuntimeName && AGENTCORE_MEMORY_ID) {
   agentCoreApp.addRuntimeEnvironmentVariable(claudeCodeRuntimeName, 'AGENTCORE_MEMORY_ID', AGENTCORE_MEMORY_ID);
   agentCoreApp.addRuntimeEnvironmentVariable(claudeCodeRuntimeName, 'AGENTCORE_MEMORY_REGION', AGENTCORE_REGION);
@@ -1351,7 +1347,7 @@ if (claudeCodeRuntimeName && AGENTCORE_MEMORY_ID) {
 
 // Same wiring for the AguiAgent runtime (issue #176) — it writes its own
 // turns into the same MyHarnessMemory resource (see
-// agent/default/app/AguiAgent/memory.ts) so a run through this runtime shows
+// web/amplify/agentcore/AguiAgent/memory.ts) so a run through this runtime shows
 // up in the chat UI's session history alongside harness/ClaudeCode runs.
 if (aguiRuntimeName && AGENTCORE_MEMORY_ID) {
   agentCoreApp.addRuntimeEnvironmentVariable(aguiRuntimeName, 'AGENTCORE_MEMORY_ID', AGENTCORE_MEMORY_ID);
