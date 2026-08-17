@@ -14,5 +14,11 @@
         "../.amplify/generated/*"
       ]
     }
-  }
+  },
+  // Test files (e.g. constructs/*.test.ts) are run by `node --test
+  // --experimental-strip-types`, which REQUIRES the `.ts` import extension.
+  // The Amplify backend type-check has no `allowImportingTsExtensions`, so it
+  // rejects that extension (TS5097). Excluding tests keeps them out of the
+  // backend synth type-check while `node --test` still runs them directly.
+  "exclude": ["**/*.test.ts", "**/*.test.mts"]
 }
