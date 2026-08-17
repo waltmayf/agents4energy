@@ -183,12 +183,20 @@ At the end of a wave the orchestrator emits a fenced ` ```monitor ` block:
 ```monitor
 {
   "intervalSeconds": 900,
-  "maxIterations": 40,
+  "maxIterations": 120,
   "checkCommand": "bash -c \"EXCLUDE_ISSUE=NNN /mnt/workspace/agents4energy/scripts/agents-done-check.sh\"",
   "followUpPrompt": "All dispatched worker runs have finished. Review and merge the green PRs, re-dispatch any issue that finished with no PR, then continue the epic-delivery loop."
 }
 ```
 ````
+
+`maxIterations: 120` at a 900s interval gives ~30h of coverage — prefer this
+long budget over a shorter one; a normal worker wave plus PR-green time has
+repeatedly outlasted a shorter poll and stalled the epic (issue #425, three
+occurrences on epic #412 before the ceiling was raised from 40). Even if the
+budget is exhausted without the check ever passing, the orchestrator is
+still re-invoked with this `followUpPrompt` rather than left idle — see
+"Known limitations" below.
 
 `scripts/agents-done-check.sh` (issue #378) is the standard `checkCommand` for
 this condition — see below. **`EXCLUDE_ISSUE` must be set to the orchestrator's
@@ -226,11 +234,13 @@ poll loop. Two orchestrator wait shapes (see issue #377):
 - **Condition poll** — keep `checkCommand` to wake *as soon as* workers are
   done, now with a long `intervalSeconds` so checks are infrequent.
 
-> **Today the monitor loop clamps `intervalSeconds` to `[30, 900]` and requires
-> a `checkCommand`** (in `agent/default/app/ClaudeCode/detect-monitor.js`),
-> capping a single wait at 15 minutes. Lifting that clamp and making
-> `checkCommand` optional (so a bare `Wait` up to the SFN max is honored) is
-> **issue #377** — a prerequisite of this operating model, not a workaround.
+> Both shapes are implemented (issue #377): `intervalSeconds`/`waitSeconds`
+> is clamped to `[30, 99999999]` (the Step Functions `Wait` state's own max,
+> ~3.17 years) rather than the old `[30, 900]`, and `checkCommand` is
+> optional — a bare `Wait` up to the SFN max is honored with no condition at
+> all. `maxIterations` (condition poll only) is a separate clamp, raised
+> `[1, 40]` → `[1, 120]` by issue #425 — see `docs/monitor-loop.md` for the
+> current values.
 
 **Two constraints to design around (documented in `docs/monitor-loop.md`):**
 
@@ -538,7 +548,11 @@ they added were deleted after the run.
   the problem once `maxIterations` is exhausted. A future fix should have
   `checkCommand` exit codes carry that distinction (e.g. a reserved exit code
   for "check itself failed") so a broken check fails loudly instead of
-  silently waiting out the budget.
+  silently waiting out the budget. Issue #425 raised `maxIterations` (40 →
+  120) and made expiry itself non-fatal — the orchestrator is re-invoked
+  rather than left idle when the budget runs out — so a flaky check no
+  longer *strands* the epic, but it can still burn the whole polling window
+  before that happens; this distinction is the remaining piece.
 - **Concurrent orchestrator executions on the same epic race.** Starting a
   second orchestrator execution for an epic that already has one `RUNNING`
   supersedes it (`cancelPriorRuns` is last-write-wins) — losing that first

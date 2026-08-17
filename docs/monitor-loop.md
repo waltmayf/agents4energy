@@ -75,7 +75,9 @@ block:
   ~3.17 years), default **60**. Note the *practical* ceiling is much lower —
   see "Execution timeout" below.
 - **`maxIterations`** (shape 1 only) — how many checks before giving up.
-  Clamped to **[1, 40]**, default **10**.
+  Clamped to **[1, 120]** (raised from 40 in issue #425 — a condition poll
+  at the recommended 900s interval now covers ~30h instead of ~10h, long
+  enough to survive a normal multi-worker wave), default **10**.
 - The validated spec is tagged `kind: 'condition' | 'timed'` so the state
   machine (`RouteMonitorKind`) can route it without re-deriving the shape.
 
@@ -129,7 +131,10 @@ RouteMonitorKind (Choice)
                                               ▼                                     │
                                         RouteCheck (Choice)                         │
                                            ├─ conditionMet == true ─► PrepareMonitorReinvoke (Pass) ─► InvokeClaude   (re-invoke w/ followUpPrompt)
-                                           ├─ iteration >= maxIterations ─► PostMonitorStoppedComment (final, non-error)
+                                           ├─ iteration >= maxIterations ─► PostMonitorStoppedComment (non-error comment,
+                                           │                                    ▼                      does NOT clear agent-working — see below)
+                                           │                                PrepareMonitorExpiredReinvoke (Pass) ─► InvokeClaude (re-invoke anyway w/
+                                           │                                                                          followUpPrompt + an expiry caveat)
                                            └─ otherwise ─► IncrementIteration (Pass) ──────────────┘  (iteration + 1, loop back to Wait)
 ```
 
@@ -155,11 +160,21 @@ Key properties:
   `conditionMet = (exitCode === 0)`. Write the check so it exits 0 exactly when
   you want the follow-up to fire.
 - **Doubly bounded (condition poll); singly bounded (timed wait).** The
-  condition-poll loop stops at `maxIterations` (spec) **and** is capped by the
-  state machine's execution `timeout`. A never-satisfied monitor posts a
-  "Monitoring stopped after N check(s)…" comment (non-error) rather than
-  looping forever. A timed wait has no `maxIterations` — it's bounded only by
-  the execution `timeout` (see below).
+  condition-poll loop stops polling at `maxIterations` (spec) **and** is
+  capped by the state machine's execution `timeout`. A timed wait has no
+  `maxIterations` — it's bounded only by the execution `timeout` (see below).
+- **`maxIterations` expiry is non-fatal (issue #425).** A never-satisfied
+  monitor no longer just posts "Monitoring stopped after N check(s)…" and
+  ends the execution — that repeatedly stranded a healthy epic (three
+  occurrences on #412: the worker being waited on had already finished, but
+  nothing re-armed the loop once the poll gave up). Instead,
+  `PostMonitorStoppedComment` posts that same comment for the audit trail
+  (without touching `agent-working`/`agent-error` — the run isn't over) and
+  `PrepareMonitorExpiredReinvoke` immediately re-invokes the agent with its
+  own `followUpPrompt`, wrapped in a `<monitor_context>` note telling it the
+  check never passed and to re-derive current state itself rather than trust
+  the follow-up's premise either way. The agent then decides whether to
+  resume, wrap up, or emit a fresh monitor block.
 - **Transient check failures don't kill the run.** If `RunMonitorCheck` itself
   errors (an exec hiccup, not a non-zero exit), its `Catch` routes to
   `IncrementIteration` — the tick is treated as "not yet met" and the loop
@@ -253,7 +268,9 @@ quickest way to confirm ticks are actually happening and see each one's timing.
 - `web/amplify/constructs/agentWebhookStack.ts` — the `RouteAgentResult` Choice;
   `InitMonitor` / `RouteMonitorKind`; the condition-poll states (`MonitorWait` /
   `RunMonitorCheck` / `RouteCheck` / `PrepareMonitorReinvoke` /
-  `IncrementIteration` / `PostMonitorStoppedComment`); the timed-wait states
+  `IncrementIteration` / `PostMonitorStoppedComment` /
+  `PrepareMonitorExpiredReinvoke`, the last non-fatal-expiry pair added in
+  #425); the timed-wait states
   (`TimedMonitorWait` / `PrepareTimedMonitorReinvoke`, #377); and the state
   machine's `timeout:` prop (364 days, #377).
 - `web/amplify/functions/agent-webhook-monitor-check/` — the `RunMonitorCheck`

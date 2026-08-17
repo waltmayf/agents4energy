@@ -132,7 +132,7 @@ polling in-session. Pick the shape that fits what you're waiting on:
   ```monitor
   {
     "intervalSeconds": 900,
-    "maxIterations": 40,
+    "maxIterations": 120,
     "checkCommand": "bash -c \"EXCLUDE_ISSUE=NNN /mnt/workspace/agents4energy/scripts/agents-done-check.sh\"",
     "followUpPrompt": "Resume the epic-delivery loop for epic #NNN. Read the delivery-ledger comment on #NNN, then continue."
   }
@@ -146,6 +146,19 @@ polling in-session. Pick the shape that fits what you're waiting on:
   duration — including while parked in this very `Wait` — so without the
   exclusion the epic issue always matches and this condition could never
   return 0 (see #395).
+  **Prefer this long-budget `900s × 120` spec (~30h) over a shorter
+  interval** — a worker wave plus PR-green time has repeatedly outlasted a
+  shorter poll budget and stalled the epic (issue #425; three occurrences on
+  epic #412). If you have reason to expect an unusually long wave, raise
+  `intervalSeconds` further rather than shrinking `maxIterations` below this
+  default — `maxIterations` is capped at 120 (`detect-monitor.js`), but
+  `intervalSeconds` has effectively no ceiling.
+  Even if this poll does exhaust its budget without the check ever passing,
+  you are **not** stranded: the state machine re-invokes you anyway with
+  this same `followUpPrompt` (issue #425) instead of leaving the epic idle.
+  Re-derive state from GitHub as normal — don't assume the workers are done
+  just because you were woken, and don't assume they aren't just because the
+  check never fired.
 - **Nothing to dispatch right now but not done either** (e.g. everything
   ready is already dispatched, or you're intentionally spacing out waves) →
   a timed wait:
