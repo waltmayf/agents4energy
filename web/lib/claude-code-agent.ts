@@ -25,11 +25,11 @@ export const CLAUDE_CODE_AGENT_ID = '__claude_code__';
 /**
  * A client-side AG-UI agent backed by the ClaudeCode AgentCore Runtime — the
  * same container agent invoked by the GitHub `@agentcore-claude` webhook
- * (agent/default/app/ClaudeCode), but driven from the chat UI instead.
+ * (web/amplify/agentcore/ClaudeCode), but driven from the chat UI instead.
  *
  * Unlike HarnessAgent, the ClaudeCode runtime is invoked with
  * `InvokeAgentRuntime` (a plain HTTP body request/response, not the harness's
- * optimized Converse event stream) — see agent/default/app/ClaudeCode/server.js's
+ * optimized Converse event stream) — see web/amplify/agentcore/ClaudeCode/server.js's
  * `POST /invocations`. With no `taskToken` in the payload, the runtime runs the
  * `claude` CLI to completion synchronously and returns its final text in the
  * HTTP response body, so `run()` streams that body and emits the result as a
@@ -38,7 +38,7 @@ export const CLAUDE_CODE_AGENT_ID = '__claude_code__';
  *
  * `runtimeSessionId` is set to the same AgentCore session id used as the AG-UI
  * threadId, so the runtime's workspace clone and AgentCore Memory persistence
- * (agent/default/app/ClaudeCode/memory.js, issue #186) are reused across turns
+ * (web/amplify/agentcore/ClaudeCode/memory.js, issue #186) are reused across turns
  * on the same chat session — exactly like a follow-up `@agentcore-claude`
  * comment on the same issue reuses them.
  *

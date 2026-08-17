@@ -31,7 +31,7 @@ export interface S3ToolsMcpServerSeedProps {
  * to the Amplify Data (AppSync) API at deploy time, not something CloudFormation
  * has a native resource for. The handler is a plain IAM principal (not a
  * Cognito user), so it calls AppSync directly over HTTPS with SigV4 signing —
- * same approach as agent/default/app/ClaudeCode/active-run.js.
+ * same approach as web/amplify/agentcore/ClaudeCode/active-run.js.
  */
 export class S3ToolsMcpServerSeed extends Construct {
   constructor(scope: Construct, id: string, props: S3ToolsMcpServerSeedProps) {

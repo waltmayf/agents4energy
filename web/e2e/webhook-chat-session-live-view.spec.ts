@@ -17,7 +17,7 @@ import { BedrockAgentCoreClient, CreateEventCommand } from '@aws-sdk/client-bedr
 // yet (exactly the state right after a webhook's initial comment is posted),
 // then writes directly to AgentCore Memory under that same id — the same
 // CreateEvent call the ClaudeCode AgentCore Runtime makes for its own turns
-// (agent/default/app/ClaudeCode/memory.js) and the harness itself makes
+// (web/amplify/agentcore/ClaudeCode/memory.js) and the harness itself makes
 // implicitly on every turn — and asserts the polling picks it up without a
 // reload. This exercises the exact read path a live webhook run would produce
 // (list-session-messages -> converse-to-agui -> HarnessAgent.refreshHistory),
@@ -73,7 +73,7 @@ test.describe('Webhook chat-session live view (issue #64)', () => {
 
     // Simulate the "external run" half of the flow: write a user turn then an
     // assistant turn to the SAME session, via the same CreateEvent call a real
-    // harness/ClaudeCode turn would make — see agent/default/app/ClaudeCode/memory.js.
+    // harness/ClaudeCode turn would make — see web/amplify/agentcore/ClaudeCode/memory.js.
     // The harness's stored payload is a Converse ContentBlock[] JSON string
     // (see web/amplify/functions/list-session-messages/handler.ts), which is
     // what converse-to-agui.ts expects for contentJson.

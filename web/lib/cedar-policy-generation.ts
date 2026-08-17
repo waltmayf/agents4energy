@@ -1,6 +1,6 @@
 // Translates GroupToolGrant rows (web/amplify/data/schemas/agentConfig.schema.ts)
 // into Cedar policies for the `DefaultCedar` policy engine associated with
-// `default-gateway` (agent/default/agentcore/agentcore.json, added in #271).
+// `default-gateway` (web/amplify/agentcore/agentcore.config.ts, added in #271).
 //
 // This module is pure/synchronous — no AWS SDK calls — so the mapping can be
 // unit-tested without a live gateway. syncCedarPolicies (cedar-policy-sync.ts)

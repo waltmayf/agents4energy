@@ -1,6 +1,6 @@
 import { defineFunction } from '@aws-amplify/backend';
 
-// Kicks off the Claude Code AgentCore Runtime (agent/default/app/ClaudeCode) for
+// Kicks off the Claude Code AgentCore Runtime (web/amplify/agentcore/ClaudeCode) for
 // `@agentcore-claude` mentions. Invoked via the Step Functions callback pattern
 // (WAIT_FOR_TASK_TOKEN, issue #175): it hands the runtime a task token, waits
 // only for the runtime's quick "job accepted" ack, and returns. The runtime runs
