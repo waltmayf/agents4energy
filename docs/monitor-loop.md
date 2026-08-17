@@ -61,7 +61,7 @@ loop giving dispatched workers a fixed window before checking back in.
 
 ### Validation
 
-`agent/default/app/ClaudeCode/detect-monitor.js` parses and validates the
+`web/amplify/agentcore/ClaudeCode/detect-monitor.js` parses and validates the
 block:
 
 - **`followUpPrompt`** is **required** in both shapes. A block missing it (or
@@ -261,7 +261,7 @@ quickest way to confirm ticks are actually happening and see each one's timing.
 
 ## Where the code lives
 
-- `agent/default/app/ClaudeCode/detect-monitor.js` — parses/validates the
+- `web/amplify/agentcore/ClaudeCode/detect-monitor.js` — parses/validates the
   ```monitor``` block; `server.js` emits `agentStatus: 'monitoring'` (and its
   `--append-system-prompt` "MONITOR HANDOFF" block is what teaches the agent
   the block schema and the microVM-reclaim constraint in the first place).

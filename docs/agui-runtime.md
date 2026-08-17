@@ -1,13 +1,13 @@
 # AG-UI-native AgentCore Runtime (`AguiAgent`)
 
-Source: [`agent/default/app/AguiAgent/`](../agent/default/app/AguiAgent/).
+Source: [`web/amplify/agentcore/AguiAgent/`](../web/amplify/agentcore/AguiAgent/).
 
 Issue #176's premise: the harness's native handler (`MyHarness`) only emits Bedrock **Converse** events, so the frontend has to translate those into AG-UI events itself (`web/lib/converse-to-agui.ts`) to make [CopilotKit](https://www.copilotkit.ai/) / AG-UI-based UIs work with it. `AguiAgent` is a second, independent AgentCore Runtime that emits [AG-UI protocol](https://docs.ag-ui.com/introduction) events **natively** over the wire — no translation layer needed by a frontend built against it.
 
 This does **not** replace anything:
 
-- `MyHarness` (`agent/default/app/MyHarness/`) — the Bedrock Converse harness the `/chat` page uses today — is untouched.
-- `ClaudeCode` (`agent/default/app/ClaudeCode/`) — the `@agentcore-claude` GitHub runtime — is untouched.
+- `MyHarness` (`web/amplify/agentcore/MyHarness/`) — the Bedrock Converse harness the `/chat` page uses today — is untouched.
+- `ClaudeCode` (`web/amplify/agentcore/ClaudeCode/`) — the `@agentcore-claude` GitHub runtime — is untouched.
 
 `AguiAgent` is registered as a third, additional entry in `agentcore.json`'s `runtimes[]` and in `web/amplify/backend.ts`'s runtime wiring, following the same additive pattern `ClaudeCode` uses.
 

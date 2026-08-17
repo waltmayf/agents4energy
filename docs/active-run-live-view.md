@@ -20,7 +20,7 @@ Defined in `web/amplify/data/schemas/chat.schema.ts`:
 | `status` | `'streaming'` while a turn is in flight; the row is deleted (not set to `'done'`) once the turn finishes |
 | `updatedAt` | Last write time — used by the consumer's staleness guard |
 
-Every access path (both producers, the consumer) finds the row by `sessionId`, so the model declares a **secondary index on `sessionId`** exposed as the `listActiveRunBySession(sessionId)` query field. Without it, `.list({ filter: { sessionId } })` is a full-table DynamoDB Scan whose cost grows with the number of concurrent active runs; the GSI makes each lookup an O(1) key query. `web/lib/active-run.ts` and `agent/default/app/ClaudeCode/active-run.js` both call this index query rather than a filtered list/scan.
+Every access path (both producers, the consumer) finds the row by `sessionId`, so the model declares a **secondary index on `sessionId`** exposed as the `listActiveRunBySession(sessionId)` query field. Without it, `.list({ filter: { sessionId } })` is a full-table DynamoDB Scan whose cost grows with the number of concurrent active runs; the GSI makes each lookup an O(1) key query. `web/lib/active-run.ts` and `web/amplify/agentcore/ClaudeCode/active-run.js` both call this index query rather than a filtered list/scan.
 
 Auth: `[allow.owner(), allow.authenticated(), allow.guest()]` — the browser producer and viewers are both Cognito principals, so no IAM/backend auth is required for this slice.
 
@@ -52,7 +52,7 @@ Any error fetching the `ActiveRun` row is caught and logged — history loading 
 
 A browser tab that crashes or loses network mid-stream never reaches the `clearActiveRun()` call, leaving a `status: 'streaming'` row with no one left to clean it up. `loadHistory()` guards against this by ignoring any `ActiveRun` row whose `updatedAt` is more than 60 seconds old (or missing/unparseable) — preventing a permanently stuck in-flight bubble for other viewers.
 
-## Producer: server-side throttled write (`agent/default/app/ClaudeCode/`)
+## Producer: server-side throttled write (`web/amplify/agentcore/ClaudeCode/`)
 
 The browser producer above covers only a user with the chat page open, streaming a turn themselves. #15's core scenario — a browserless run started via `@agentcore-claude` (or any process-driven invocation of the ClaudeCode AgentCore runtime) whose in-flight text no browser is producing — needs a **server-side producer** running inside that runtime.
 
@@ -60,8 +60,8 @@ An earlier iteration (#232, now reverted) tried to reach `ActiveRun` through a `
 
 So the runtime calls AppSync's GraphQL endpoint directly, over HTTPS, signing each request with SigV4:
 
-- **`agent/default/app/ClaudeCode/active-run.js`** — `upsertActiveRun()` / `clearActiveRun()`, mirroring `web/lib/active-run.ts`'s semantics byte-for-byte (list-by-`sessionId` → update-if-found-else-create; delete on clear) using raw `listActiveRunBySession`/`createActiveRun`/`updateActiveRun`/`deleteActiveRun` GraphQL operations, signed with `@aws-sdk/signature-v4` + `@aws-crypto/sha256-js` against `@aws-sdk/credential-providers`' `fromNodeProviderChain()` (the runtime's own ambient execution-role credentials — no Cognito involved).
-- **`agent/default/app/ClaudeCode/server.js`** — hooks into the `stream-json` loop right where `persistClaudeStreamEvent()` already runs: accumulates assistant `text` blocks across events, throttle-writes (~750ms, trailing-edge) via `upsertActiveRun()`, and on the terminal `result` event (or an error/close) flushes a final write then calls `clearActiveRun()` so the row never outlives the job. `sessionId` is `memorySessionId` (the same id memory events use — see `docs/webhook-stepfunction-integration.md`). All best-effort: every call swallows and logs its own errors, exactly like the browser producer and every other memory write in this runtime.
+- **`web/amplify/agentcore/ClaudeCode/active-run.js`** — `upsertActiveRun()` / `clearActiveRun()`, mirroring `web/lib/active-run.ts`'s semantics byte-for-byte (list-by-`sessionId` → update-if-found-else-create; delete on clear) using raw `listActiveRunBySession`/`createActiveRun`/`updateActiveRun`/`deleteActiveRun` GraphQL operations, signed with `@aws-sdk/signature-v4` + `@aws-crypto/sha256-js` against `@aws-sdk/credential-providers`' `fromNodeProviderChain()` (the runtime's own ambient execution-role credentials — no Cognito involved).
+- **`web/amplify/agentcore/ClaudeCode/server.js`** — hooks into the `stream-json` loop right where `persistClaudeStreamEvent()` already runs: accumulates assistant `text` blocks across events, throttle-writes (~750ms, trailing-edge) via `upsertActiveRun()`, and on the terminal `result` event (or an error/close) flushes a final write then calls `clearActiveRun()` so the row never outlives the job. `sessionId` is `memorySessionId` (the same id memory events use — see `docs/webhook-stepfunction-integration.md`). All best-effort: every call swallows and logs its own errors, exactly like the browser producer and every other memory write in this runtime.
 
 ### Cycle-safe wiring (`web/amplify/backend.ts` + `scripts/build.sh`)
 

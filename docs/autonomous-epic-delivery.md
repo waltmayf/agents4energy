@@ -159,12 +159,12 @@ Each worker is a single `@agentcore-claude` dispatch against one issue. It:
 ### Starting an orchestrator run
 
 The orchestrator has a versioned persona:
-[`agent/default/app/ClaudeCode/prompts/orchestrator.md`](../agent/default/app/ClaudeCode/prompts/orchestrator.md).
+[`web/amplify/agentcore/ClaudeCode/prompts/orchestrator.md`](../web/amplify/agentcore/ClaudeCode/prompts/orchestrator.md).
 Orchestrator and worker are the **same** `@agentcore-claude` runtime — they
 differ only in which prompt they're told to follow. No code change is needed
 to dispatch an orchestrator: the webhook already appends this repo's
 `AGENTS.md` to every run's system prompt via `--append-system-prompt`
-(`agent/default/app/ClaudeCode/server.js`, `runClaudeCode()`, ~line 465,
+(`web/amplify/agentcore/ClaudeCode/server.js`, `runClaudeCode()`, ~line 465,
 fed from `agentsSystemPrompt` in `agent-webhook-invoke-claude/handler.ts`) —
 the orchestrator prompt just rides on top of that as a file the agent reads
 from its own repo checkout, rather than requiring a second injection path.
@@ -174,7 +174,7 @@ drive:
 
 ```
 @agentcore-claude Act as the orchestrator described in
-agent/default/app/ClaudeCode/prompts/orchestrator.md — read that file now
+web/amplify/agentcore/ClaudeCode/prompts/orchestrator.md — read that file now
 and follow it exactly as your operating loop for this epic. Start the first
 wave: rebuild the backlog view, dispatch every ready sub-issue, then sleep
 per the monitor-loop instructions in that file.
@@ -503,7 +503,7 @@ These are tracked under **epic #376** and its child issues:
 
 5. ✅ **Orchestrator agent persona (#381, closed).** A versioned orchestrator
    system prompt now exists —
-   [`agent/default/app/ClaudeCode/prompts/orchestrator.md`](../agent/default/app/ClaudeCode/prompts/orchestrator.md)
+   [`web/amplify/agentcore/ClaudeCode/prompts/orchestrator.md`](../web/amplify/agentcore/ClaudeCode/prompts/orchestrator.md)
    — encoding the pick-slice → dispatch → sleep → review/merge → repeat loop,
    the stateless-per-wave design (delivery-ledger comment, tiny
    `followUpPrompt`), and the `PROJECT_PHASE`-gated merge bar. Dispatched the

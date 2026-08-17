@@ -15,7 +15,7 @@ AgentCore Runtime executes each session in a Firecracker microVM — **no Docker
 
 ## The container
 
-Source: [`agent/default/app/ClaudeCode/`](../agent/default/app/ClaudeCode/).
+Source: [`web/amplify/agentcore/ClaudeCode/`](../web/amplify/agentcore/ClaudeCode/).
 
 | File | What it does |
 |---|---|
@@ -25,7 +25,7 @@ Source: [`agent/default/app/ClaudeCode/`](../agent/default/app/ClaudeCode/).
 
 ### What the server does
 
-On `POST /invocations` ([server.js](../agent/default/app/ClaudeCode/server.js)) the server:
+On `POST /invocations` ([server.js](../web/amplify/agentcore/ClaudeCode/server.js)) the server:
 
 1. **Sets up the workspace.** If the payload carries `repo` + `githubToken`, it configures `git`/`gh` credentials (a git credential store seeded with the short-lived GitHub App token, plus `GH_TOKEN` for the CLI) and clones the repo into the session-storage mount (`/mnt/workspace`, persistent across stop/resume so a follow-up comment reuses the clone). No repo → a throwaway temp dir.
 2. **Runs Claude Code headlessly** — `claude -p "<prompt>" --model <bedrock model> --output-format stream-json --verbose --permission-mode acceptEdits --dangerously-skip-permissions`, with an `--append-system-prompt` telling it the repo is cloned, `git`/`gh` are authenticated, and to open a PR with `gh` if it makes changes. `CLAUDE_CODE_USE_BEDROCK=1` routes the model through Bedrock using the runtime execution role's credentials.
@@ -53,19 +53,19 @@ The Bedrock model is `ANTHROPIC_MODEL` (default `us.anthropic.claude-sonnet-5`),
 
 ### The AgentCore Browser tool (issue #183)
 
-Claude Code speaks MCP natively but has no built-in browser tool, so `runManagedJob` gives it one for the duration of each job via [`browser-mcp.js`](../agent/default/app/ClaudeCode/browser-mcp.js):
+Claude Code speaks MCP natively but has no built-in browser tool, so `runManagedJob` gives it one for the duration of each job via [`browser-mcp.js`](../web/amplify/agentcore/ClaudeCode/browser-mcp.js):
 
 1. **Start a session.** `new Browser({ region }).startSession({ timeout: 28800 })` (the `bedrock-agentcore` npm SDK) starts an AgentCore Browser session on the AWS-managed default browser (8h timeout — long enough for the multi-hour jobs described above).
 2. **Sign a CDP endpoint.** `browser.generateWebSocketUrl()` returns a `wss://` URL plus SigV4 auth headers for the browser's Chrome DevTools Protocol endpoint (same signing the harness's `agentcore_browser` tool call uses under the hood).
 3. **Wrap it in an MCP server.** Rather than teaching Claude Code raw CDP, `@playwright/mcp` (a pinned dependency, not `npx`'d at runtime) is pointed at that endpoint via `--cdp-endpoint`/`--cdp-header` — it becomes a thin MCP wrapper over the already-running remote browser instead of launching its own local Chromium.
-4. **Load it into the CLI.** The `{ mcpServers: { "agentcore-browser": { command, args }, ... } }` config — merged with the gateway entry below by [`mcp-config.js`](../agent/default/app/ClaudeCode/mcp-config.js) into one file — is written to a `.mcp-agentcore.json` in the job's `workDir` and passed to `claude -p` via `--mcp-config`, so the model gets `browser_navigate`/`browser_click`/`browser_type`/`browser_screenshot`/etc. through the standard MCP tool-call surface.
+4. **Load it into the CLI.** The `{ mcpServers: { "agentcore-browser": { command, args }, ... } }` config — merged with the gateway entry below by [`mcp-config.js`](../web/amplify/agentcore/ClaudeCode/mcp-config.js) into one file — is written to a `.mcp-agentcore.json` in the job's `workDir` and passed to `claude -p` via `--mcp-config`, so the model gets `browser_navigate`/`browser_click`/`browser_type`/`browser_screenshot`/etc. through the standard MCP tool-call surface.
 5. **Tear down.** `runManagedJob`'s `finally` stops the session (`browser.stopSession()`) and deletes the temp MCP config after the job (success or failure) — one browser session per job, not shared across concurrent runs on the same microVM.
 
 If the session fails to start (e.g. a role that predates the browser connection), `runManagedJob` logs and continues without a browser entry rather than failing the whole job — a missing browser tool is better than no Claude Code run at all.
 
 ### Gateway-routed MCP tools (#339)
 
-Every other MCP tool this runtime can reach goes through the AgentCore gateway — never a direct/container-local connection — exactly like the browser `HarnessAgent` chat path (`buildTools` in `web/lib/harness-agent.ts`, #338). [`gateway-mcp.js`](../agent/default/app/ClaudeCode/gateway-mcp.js) builds the entry:
+Every other MCP tool this runtime can reach goes through the AgentCore gateway — never a direct/container-local connection — exactly like the browser `HarnessAgent` chat path (`buildTools` in `web/lib/harness-agent.ts`, #338). [`gateway-mcp.js`](../web/amplify/agentcore/ClaudeCode/gateway-mcp.js) builds the entry:
 
 ```jsonc
 "agentcore-gateway": {
@@ -138,7 +138,7 @@ The CLI invocation changed from `--output-format json` (one result object at the
 
 ### Event shape — matching the harness exactly
 
-[`memory.js`](../agent/default/app/ClaudeCode/memory.js) translates each `stream-json` line into the same shape the harness SDK writes: a `CreateEvent` call whose `payload[0].conversational` is `{ role, content: { text: JSON.stringify(contentBlocks) } }`, where `contentBlocks` is a Bedrock Converse `ContentBlock[]`:
+[`memory.js`](../web/amplify/agentcore/ClaudeCode/memory.js) translates each `stream-json` line into the same shape the harness SDK writes: a `CreateEvent` call whose `payload[0].conversational` is `{ role, content: { text: JSON.stringify(contentBlocks) } }`, where `contentBlocks` is a Bedrock Converse `ContentBlock[]`:
 
 | `stream-json` block | Converse block written |
 |---|---|
@@ -176,7 +176,7 @@ The control plane sends this cancel payload via `InvokeAgentRuntime` with `runti
 
 ## Detecting an ask-for-input final message (issue #185)
 
-[`detect-awaiting-input.js`](../agent/default/app/ClaudeCode/detect-awaiting-input.js) exports a pure `detectAwaitingInput(resultText)` helper that inspects the CLI's final `result` text (the same string `runClaudeCode` resolves as the run's return value) and returns `{ awaiting: boolean, question?: string }`. The signal it keys on: `stream-json` has no distinct "asking for input" event — an ask-for-input turn is just a normal `assistant` text block — so the only concrete, always-present post-hoc signal is the final message's own text ending in a question mark; the extracted `question` is that text's last non-empty line (covering the common "here are the options... which one?" shape). It's a heuristic that errs toward false negatives (a missed ask just behaves as a normal completion, as today).
+[`detect-awaiting-input.js`](../web/amplify/agentcore/ClaudeCode/detect-awaiting-input.js) exports a pure `detectAwaitingInput(resultText)` helper that inspects the CLI's final `result` text (the same string `runClaudeCode` resolves as the run's return value) and returns `{ awaiting: boolean, question?: string }`. The signal it keys on: `stream-json` has no distinct "asking for input" event — an ask-for-input turn is just a normal `assistant` text block — so the only concrete, always-present post-hoc signal is the final message's own text ending in a question mark; the extracted `question` is that text's last non-empty line (covering the common "here are the options... which one?" shape). It's a heuristic that errs toward false negatives (a missed ask just behaves as a normal completion, as today).
 
 **Wired into the callback path (increment 2):** in `server.js`'s callback (`taskToken`) branch, once `runManagedJob` resolves with the run's final text, `detectAwaitingInput(finalText)` runs before the `SendTaskSuccess` call. When `awaiting` is `true`:
 - a `awaiting_input detected: <question>` line is logged, and
@@ -278,7 +278,7 @@ A synchronous `LambdaInvoke` bounded the whole run at Lambda's **15-minute** har
 
 1. The task passes `sfn.JsonPath.taskToken` in the Lambda payload and **pauses** — its 3-hour `taskTimeout` (the state machine timeout is raised to 4 h so the task-level timeout, not the execution timeout, surfaces to `Catch`) is the new upper bound, matching AgentCore's multi-hour session limit.
 2. The `InvokeClaude` Lambda forwards that token to the runtime, waits only for a **quick "job accepted" ack**, and returns. Its function timeout drops from 840 s to 60 s — it no longer awaits the job.
-3. The runtime ([`server.js`](../agent/default/app/ClaudeCode/server.js)) sees the `taskToken`, immediately replies `200 { started: true }`, and runs Claude Code **in the background**. When the job finishes it calls `SendTaskSuccess` (output reshaped into the `$.agentResult.Output.Message.Content` shape) — or `SendTaskFailure` on a non-zero CLI exit — **resuming the paused task itself**.
+3. The runtime ([`server.js`](../web/amplify/agentcore/ClaudeCode/server.js)) sees the `taskToken`, immediately replies `200 { started: true }`, and runs Claude Code **in the background**. When the job finishes it calls `SendTaskSuccess` (output reshaped into the `$.agentResult.Output.Message.Content` shape) — or `SendTaskFailure` on a non-zero CLI exit — **resuming the paused task itself**.
 
 So Step Functions does **not** poll, and the Lambda does not block for the job's duration: the runtime pushes the result back over the task token when it's done. Without a `taskToken` the runtime keeps its old synchronous behavior (used by the direct-invoke smoke test).
 

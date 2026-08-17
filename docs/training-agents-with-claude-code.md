@@ -137,7 +137,7 @@ the trainee disciplines you too.
 ## Gotchas learned the hard way
 
 - **The prompt is deployed, not live-edited.** Editing
-  `agent/default/app/MyHarness/system-prompt.md` changes nothing until the
+  `web/amplify/agentcore/MyHarness/system-prompt.md` changes nothing until the
   Amplify/AgentCore stack redeploys and the `CfnHarness` resource updates.
   Verify the deploy touched the harness resource, or you'll test the old prompt.
 - **`SUCCEEDED` ≠ success.** The webhook Step Function catches failures into a
