@@ -32,7 +32,16 @@ interface PostCommentInput {
   // agent-error — it must NOT go through 'final's success-path "no PR was
   // opened" heuristic, which would overwrite this stage's own explanatory
   // message with a misleading "ran out of turn" one (confirmed end-to-end).
-  stage: 'initial' | 'final' | 'awaiting_input' | 'monitor_stopped';
+  // 'monitor_expired' (issue #425): like 'monitor_stopped', maxIterations was
+  // reached without the check ever passing, but the run is NOT ending here —
+  // the state machine re-invokes the agent right after this comment posts
+  // (see PostMonitorStoppedComment → PrepareMonitorExpiredReinvoke in
+  // agentWebhookStack.ts). A stalled orchestrator wave silently stranded a
+  // healthy epic three times (#412) because nothing re-armed the loop after
+  // a poll timed out. So this stage posts the "monitoring stopped" comment
+  // for the audit trail but deliberately does NOT touch agent-working/
+  // agent-error — the run is still in flight.
+  stage: 'initial' | 'final' | 'awaiting_input' | 'monitor_stopped' | 'monitor_expired';
   // github
   repo?: string;
   issueNumber?: number;
@@ -322,6 +331,24 @@ export const handler = async (input: PostCommentInput): Promise<PostCommentOutpu
           console.warn(`Could not remove ${WORKING_LABEL} label: ${err instanceof Error ? err.message : String(err)}`);
         }
       }
+    } else {
+      if (!input.issueKey) throw new Error('issueKey required for jira source');
+      await postJiraComment(input.issueKey, body);
+    }
+    return {};
+  }
+
+  if (input.stage === 'monitor_expired') {
+    // Post the same informational text a terminal 'monitor_stopped' would,
+    // but deliberately skip ALL label bookkeeping (issue #425): the state
+    // machine re-invokes the agent immediately after this comment, so
+    // agent-working must stay set — clearing it here would make an
+    // in-flight run look finished to anything watching the label (e.g.
+    // scripts/wait-for-agents.sh), even though it's about to keep going.
+    const body = sanitizeHarmony(input.responseText || 'Monitoring stopped without the condition being met.');
+    if (input.source === 'github') {
+      if (!input.repo || input.issueNumber === undefined) throw new Error('repo/issueNumber required for github source');
+      await postGithubComment(input.repo, input.issueNumber, body);
     } else {
       if (!input.issueKey) throw new Error('issueKey required for jira source');
       await postJiraComment(input.issueKey, body);

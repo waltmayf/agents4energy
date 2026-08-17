@@ -441,31 +441,57 @@ export class AgentWebhookStack extends Construct {
     });
     incrementIteration.next(monitorWait);
 
-    // maxIterations reached without the condition being met — stop looping and
-    // post a normal (non-error) final comment explaining why.
+    // maxIterations reached without the condition ever being met. This used to
+    // be a terminal state — post a comment and end the execution — but a
+    // never-satisfied check (a genuinely-unmet condition OR a flaky/erroring
+    // checkCommand indistinguishable from "not met") then stranded whatever
+    // was waiting on the loop with nothing left to drive it: the epic-#412
+    // orchestrator stalled this way three times even though the worker it was
+    // waiting on had actually finished (issue #425). So expiry is now
+    // non-fatal: post the same informational comment for the audit trail,
+    // then re-invoke the agent with its own followUpPrompt instead of ending
+    // here — the agent re-derives current state from GitHub itself (it must
+    // not assume the follow-up's premise holds just because it fired, nor
+    // that it doesn't just because the check never passed) and decides
+    // whether to resume, wrap up, or re-arm a fresh monitor.
     const postMonitorStopped = new tasks.LambdaInvoke(this, 'PostMonitorStoppedComment', {
       lambdaFunction: props.postCommentLambda,
       payload: sfn.TaskInput.fromObject({
         runId: sfn.JsonPath.stringAt('$.runId'),
         source: sfn.JsonPath.stringAt('$.source'),
-        // A dedicated stage (not 'final'): the plain 'final' success path runs
-        // a "did this GitHub run open a PR?" heuristic that overwrites
-        // responseText with an unrelated "ran out of turn" message whenever no
-        // PR exists — which is always, for a monitor run — silently discarding
-        // this explanatory text (confirmed end-to-end, issue #263).
-        stage: 'monitor_stopped',
+        // 'monitor_expired' (issue #425), not 'monitor_stopped': this stage
+        // must NOT touch the agent-working label (see handler.ts) because the
+        // run keeps going right after this comment posts. It also can't reuse
+        // the plain 'final' stage — that path's "did this GitHub run open a
+        // PR?" heuristic overwrites responseText with an unrelated "ran out
+        // of turn" message whenever no PR exists, which is always true here
+        // (confirmed end-to-end, issue #263).
+        stage: 'monitor_expired',
         trigger: sfn.JsonPath.stringAt('$.trigger'),
         repo: sfn.JsonPath.stringAt('$.repo'),
         issueNumber: sfn.JsonPath.numberAt('$.issueNumber'),
         issueKey: sfn.JsonPath.stringAt('$.issueKey'),
         responseText: sfn.JsonPath.format(
-          'Monitoring stopped after {} check(s) without the condition being met.',
+          'Monitoring stopped after {} check(s) without the condition being met. Re-invoking with the follow-up prompt so this doesn\'t strand the run.',
           sfn.JsonPath.stringAt('$.monitor.spec.maxIterations'),
         ),
       }),
       payloadResponseOnly: true,
       resultPath: '$.finalComment',
     });
+
+    // Re-invoke unconditionally on expiry (issue #425) rather than stopping.
+    // Same newline-free-template caveat as the other Prepare*Reinvoke states —
+    // States.Format only accepts \\ \' \{ \} escapes.
+    const prepareMonitorExpiredReinvoke = new sfn.Pass(this, 'PrepareMonitorExpiredReinvoke', {
+      parameters: {
+        'effectivePrompt.$':
+          "States.Format('<monitor_context>Your monitor exhausted its {} check(s) without checkCommand ever exiting 0 — this may mean the condition is genuinely still unmet, or that the check itself was flaky/erroring. Do NOT assume the follow-up below is now true just because you were woken, and do NOT assume the condition is false just because the check never passed — re-derive current state yourself, then resume, wrap up, or emit a fresh monitor block as appropriate.</monitor_context> {}', $.monitor.spec.maxIterations, $.monitor.spec.followUpPrompt)",
+      },
+      resultPath: '$.prepared',
+    });
+    postMonitorStopped.next(prepareMonitorExpiredReinvoke);
+    prepareMonitorExpiredReinvoke.next(invokeClaude);
 
     // RouteCheck: passing → re-invoke; else if next iteration would reach
     // maxIterations → stop; else → bump + loop. Guard the conditionMet read with
