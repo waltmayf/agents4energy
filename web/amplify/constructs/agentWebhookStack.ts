@@ -133,6 +133,7 @@ export class AgentWebhookStack extends Construct {
         repo: sfn.JsonPath.stringAt('$.repo'),
         issueNumber: sfn.JsonPath.numberAt('$.issueNumber'),
         issueKey: sfn.JsonPath.stringAt('$.issueKey'),
+        executionArn: sfn.JsonPath.stringAt('$$.Execution.Id'),
       }),
       payloadResponseOnly: true,
       resultPath: '$.initialComment',
