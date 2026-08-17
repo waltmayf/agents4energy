@@ -6,11 +6,11 @@ Each branch that runs `pnpm deploy` (`scripts/build.sh`) creates a single branch
 
 | Stack | Resources | Identifier |
 |---|---|---|
-| Amplify sandbox root stack | Cognito, AppSync, Lambda, DynamoDB, plus nested `hosting` stack (S3 + CloudFront) | `amplify-web-<slug>-sandbox-<hash>`, deployed with `--identifier <slug>` |
+| Amplify sandbox root stack | Cognito, AppSync, Lambda, DynamoDB, plus nested `hosting` and `agent` stacks | `amplify-web-<slug>-sandbox-<hash>`, deployed with `--identifier <slug>` |
 
 Hosting (S3 + CloudFront) is a **nested stack** inside the sandbox root stack (`backend.createStack('hosting')` in `web/amplify/backend.ts`), not a separately deployed CDK app — deleting the root stack tears down hosting too. The hosting bucket has `autoDeleteObjects: true` (`web/amplify/constructs/hostingConstruct.ts`), so CloudFormation empties it automatically; no manual `aws s3 rm` is needed before deletion.
 
-The AgentCore harness, gateway, and memory (`agent/default/agentcore/`) are **not** branch-scoped — they deploy once to the single target named `default` in `aws-targets.json` and are shared by every branch. Deleting a branch must never tear these down.
+The AgentCore harness, gateway, memory, and runtimes (`web/amplify/agentcore/`, config in `agentcore.config.ts`) are built by the `AgentCoreApplication` construct inside `agentStack` — also a **nested stack** (`backend.createStack('agent')`) inside the same sandbox root deployment, with physical resource names made unique per branch (`${projectName}_<name>`, where `projectName` is suffixed with the branch/sandbox identifier). They **are** branch-scoped: deleting a branch's sandbox root stack tears down that branch's own AgentCore resources along with everything else, exactly like hosting.
 
 ## Deleting a Branch's Stack
 
