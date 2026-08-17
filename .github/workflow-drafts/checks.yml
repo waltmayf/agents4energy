@@ -52,13 +52,13 @@ jobs:
       - run: pnpm install --frozen-lockfile
 
       # Parse-check the AgentCore runtime's hand-written ESM modules. `web`'s tsc
-      # excludes these (see web/amplify/tsconfig.json — they're plain .js, and are
-      # only ever parsed when the Docker image boots), and nothing in CI builds
-      # that image — so a syntax error here ships green and crashes every dispatch
-      # on boot with a generic RuntimeClientError (issue #324: an unescaped quote
-      # in a server.js prompt string; issue #310: a missing Dockerfile COPY).
-      # `node --check` is a credential-free syntax-only parse, exactly the cheap
-      # guard that was missing.
+      # never sees these (they live under web/amplify/agentcore/, are plain .js and
+      # excluded from the backend tsconfig, and are only ever parsed when the Docker
+      # image boots), and nothing in CI builds that image —
+      # so a syntax error here ships green and crashes every dispatch on boot with
+      # a generic RuntimeClientError (issue #324: an unescaped quote in a server.js
+      # prompt string; issue #310: a missing Dockerfile COPY). `node --check` is a
+      # credential-free syntax-only parse, exactly the cheap guard that was missing.
       - name: Parse-check AgentCore runtime modules
         run: |
           for f in web/amplify/agentcore/ClaudeCode/*.js; do
