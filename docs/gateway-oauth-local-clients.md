@@ -55,4 +55,4 @@ To trust deployment B's app client from deployment A's gateway, without redeploy
 3. Within seconds, deployment A's gateway authorizer accepts B's tokens, and (if a `callbackUrl` was set) A's hosted UI will redirect there after login — no `pnpm deploy` required.
 4. To revoke, set `enabled: false` (or delete the row) — the next reconcile drops both the `clientId` and `callbackUrl` from the live gateway/app-client.
 
-This is independent of, and a prerequisite for, the outbound "gateway calls another gateway" 3LO flow (#412 slice 8) being runtime-configurable — that slice still needs to be implemented separately.
+This is independent of, and a prerequisite for, the outbound "gateway calls another gateway" 3LO flow (epic #412): trusting B's inbound app client here (and, optionally, a redirect URI) is the lower layer that the outbound flow builds on. For the full deploy-twice runbook — creating a `CustomOauth2`/`GoogleOauth2` credential provider in A, pointing it at B's Hosted-UI discovery URL, registering B's `/mcp` as a 3LO target, and the two-identity / access-token (#327) model — see [docs/gateway-to-gateway-federation.md](gateway-to-gateway-federation.md).
