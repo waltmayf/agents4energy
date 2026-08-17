@@ -42,6 +42,10 @@ interface PostCommentInput {
   // for the audit trail but deliberately does NOT touch agent-working/
   // agent-error — the run is still in flight.
   stage: 'initial' | 'final' | 'awaiting_input' | 'monitor_stopped' | 'monitor_expired';
+  // Step Functions execution ARN ($$.Execution.Id), passed by the initial
+  // stage so the initial comment can link to the AWS console execution page
+  // (issue #399). Optional so an omission just skips the link.
+  executionArn?: string;
   // github
   repo?: string;
   issueNumber?: number;
@@ -189,6 +193,11 @@ async function removeLabel(repo: string, issueNumber: number, token: string, lab
   }
 }
 
+// AWS console deep link to a Step Functions execution's detail page (issue #399).
+function buildExecutionConsoleUrl(region: string, executionArn: string): string {
+  return `https://${region}.console.aws.amazon.com/states/home?region=${region}#/executions/details/${executionArn}`;
+}
+
 const secretsManager = new SecretsManagerClient({ region: REGION });
 
 async function getJiraApiToken(): Promise<string> {
@@ -243,6 +252,7 @@ export const handler = async (input: PostCommentInput): Promise<PostCommentOutpu
     const links = [];
     if (chatUrl) links.push(`[watch live in the chat UI](${chatUrl})`);
     if (liveTailUrl) links.push(`[watch live via CloudWatch Logs Live Tail](${liveTailUrl})`);
+    if (input.executionArn) links.push(`[watch the Step Functions execution](${buildExecutionConsoleUrl(REGION, input.executionArn)})`);
     let body = links.length
       ? `🤖 Working on it — ${links.join(' · ')}`
       : `🤖 Working on it (run \`${input.runId}\`)…`;
