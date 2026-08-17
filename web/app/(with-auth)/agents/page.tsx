@@ -9,6 +9,13 @@ import { Textarea } from '@/components/ui/textarea';
 import { Spinner } from '@/components/ui/spinner';
 import { Separator } from '@/components/ui/separator';
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import {
   Dialog,
   DialogContent,
   DialogHeader,
@@ -31,6 +38,9 @@ import {
   AlertCircleIcon,
   StarIcon,
   ShieldIcon,
+  CopyIcon,
+  ClockIcon,
+  ExternalLinkIcon,
 } from 'lucide-react';
 import {
   type McpCredential,
@@ -42,6 +52,7 @@ import {
 import { listMcpToolsForServer } from '@/lib/list-mcp-tools';
 import { useCurrentUser } from '@/lib/use-current-user';
 import { safeListMcpServers } from '@/lib/mcp-server-safe-list';
+import { useOutboundAuthStatus, type OutboundAuthStatus } from '@/lib/outbound-oauth-status';
 import { PermissionsPanel } from './permissions-panel';
 
 const amplifyClient = generateClient<Schema>({ authMode: 'userPool' });
@@ -65,6 +76,9 @@ async function listAll<T>(
 
 type McpServerHeader = { key: string; value: string };
 
+type OutboundAuthType = 'NONE' | 'OAUTH_3LO';
+type OauthVendor = 'GOOGLE' | 'CUSTOM';
+
 type McpServer = {
   id: string;
   name: string;
@@ -78,6 +92,18 @@ type McpServer = {
   // Gateway routing is mandatory, so a server without this can't be assigned
   // to an agent — see assertMcpServersRegistered below.
   gatewayTargetId?: string | null;
+  // Outbound auth (3LO), epic #412 slice 2 (#414). Absent/NONE = static
+  // headers / no outbound auth; OAUTH_3LO = per-user vaulted token injected by
+  // the gateway. oauthCallbackUrl / oauthProviderArn are written back by
+  // slice 1 (#413) once the credential provider exists — read-back only.
+  outboundAuthType?: OutboundAuthType | null;
+  oauthVendor?: OauthVendor | null;
+  oauthDiscoveryUrl?: string | null;
+  oauthClientSecretArn?: string | null;
+  oauthScopes?: string[] | null;
+  oauthReturnUrl?: string | null;
+  oauthProviderArn?: string | null;
+  oauthCallbackUrl?: string | null;
 };
 
 type AgentRecord = {
@@ -118,6 +144,14 @@ function toMcpServer(s: any): McpServer {
     ),
     oauthClientId: s.oauthClientId ?? null,
     gatewayTargetId: s.gatewayTargetId ?? null,
+    outboundAuthType: (s.outboundAuthType ?? null) as OutboundAuthType | null,
+    oauthVendor: (s.oauthVendor ?? null) as OauthVendor | null,
+    oauthDiscoveryUrl: s.oauthDiscoveryUrl ?? null,
+    oauthClientSecretArn: s.oauthClientSecretArn ?? null,
+    oauthScopes: (s.oauthScopes ?? null) as string[] | null,
+    oauthReturnUrl: s.oauthReturnUrl ?? null,
+    oauthProviderArn: s.oauthProviderArn ?? null,
+    oauthCallbackUrl: s.oauthCallbackUrl ?? null,
   };
 }
 
@@ -272,6 +306,17 @@ type McpServerForm = {
   enabled: boolean;
   headers: McpServerHeader[];
   oauthClientId: string;
+  // Outbound auth (3LO), epic #412 slice 7 (#419).
+  outboundAuthType: OutboundAuthType;
+  oauthVendor: OauthVendor;
+  oauthDiscoveryUrl: string;
+  // Write-only: the client secret is stored in Secrets Manager and referenced
+  // by oauthClientSecretArn — an existing value is never rendered back. This
+  // field carries the Secrets Manager ARN the operator provisions out-of-band.
+  oauthClientSecretArn: string;
+  // Comma/space/newline-separated in the form; split into an array on save.
+  oauthScopes: string;
+  oauthReturnUrl: string;
 };
 
 function serverToForm(s: McpServer): McpServerForm {
@@ -282,11 +327,38 @@ function serverToForm(s: McpServer): McpServerForm {
     enabled: s.enabled,
     headers: s.headers.map((h) => ({ ...h })),
     oauthClientId: s.oauthClientId ?? '',
+    outboundAuthType: (s.outboundAuthType ?? 'NONE') as OutboundAuthType,
+    oauthVendor: (s.oauthVendor ?? 'GOOGLE') as OauthVendor,
+    oauthDiscoveryUrl: s.oauthDiscoveryUrl ?? '',
+    // Never render an existing secret ARN back into the input (write-only).
+    oauthClientSecretArn: '',
+    oauthScopes: (s.oauthScopes ?? []).join(', '),
+    oauthReturnUrl: s.oauthReturnUrl ?? '',
   };
 }
 
 function emptyServerForm(): McpServerForm {
-  return { name: '', url: '', description: '', enabled: true, headers: [], oauthClientId: '' };
+  return {
+    name: '',
+    url: '',
+    description: '',
+    enabled: true,
+    headers: [],
+    oauthClientId: '',
+    outboundAuthType: 'NONE',
+    oauthVendor: 'GOOGLE',
+    oauthDiscoveryUrl: '',
+    oauthClientSecretArn: '',
+    oauthScopes: '',
+    oauthReturnUrl: '',
+  };
+}
+
+function parseScopes(raw: string): string[] {
+  return raw
+    .split(/[\s,]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
 }
 
 // ---------------------------------------------------------------------------
@@ -439,6 +511,115 @@ function DeleteConfirmDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Copy-to-clipboard button
+// ---------------------------------------------------------------------------
+
+function CopyButton({ value, label = 'Copy' }: { value: string; label?: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <Button
+      type="button"
+      variant="outline"
+      size="sm"
+      onClick={async () => {
+        try {
+          await navigator.clipboard.writeText(value);
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1500);
+        } catch { /* clipboard may be unavailable — no-op */ }
+      }}
+      data-testid="copy-callback-url"
+    >
+      {copied ? <CheckIcon className="size-3.5" /> : <CopyIcon className="size-3.5" />}
+      {copied ? 'Copied' : label}
+    </Button>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Per-user outbound-auth (3LO) consent section
+// ---------------------------------------------------------------------------
+
+/**
+ * Renders the per-user consent status (Authenticated / Needs auth / Expired)
+ * for a saved OAUTH_3LO server and an Authenticate action. The authoritative
+ * 3LO consent happens on the chat path: the first tool call through the
+ * gateway returns the `-32042` elicitation (slice 4/#416) and
+ * McpElicitationBanner completes consent (slice 5/#417). This panel can't mint
+ * that elicitation (there is no live tool call here), so Authenticate opens the
+ * chat surface where that flow runs; status is a best-effort per-user hint
+ * (see lib/outbound-oauth-status.ts) refreshed when the tab regains focus.
+ */
+function OutboundAuthAccess({ server }: { server: McpServer }) {
+  const { sub } = useCurrentUser();
+  const { status } = useOutboundAuthStatus(sub, server.id);
+
+  const providerReady = !!server.oauthCallbackUrl || !!server.oauthProviderArn;
+
+  const meta: Record<OutboundAuthStatus, { icon: ReactNode; text: string; cls: string }> = {
+    authenticated: {
+      icon: <CheckCircle2Icon className="size-4 text-green-600 shrink-0" />,
+      text: 'Authenticated — your access token is vaulted for this server.',
+      cls: '',
+    },
+    'needs-auth': {
+      icon: <AlertCircleIcon className="size-4 text-muted-foreground shrink-0" />,
+      text: 'Needs auth — authenticate to grant this server access on your behalf.',
+      cls: 'text-muted-foreground',
+    },
+    expired: {
+      icon: <ClockIcon className="size-4 text-amber-500 shrink-0" />,
+      text: 'Expired — re-authenticate to refresh your vaulted access token.',
+      cls: 'text-amber-700',
+    },
+  };
+  const current = meta[status];
+
+  function handleAuthenticate() {
+    // Consent completes on the chat path via McpElicitationBanner (slices 4/5):
+    // open chat, then run any tool from this server to be prompted to sign in.
+    window.open('/chat', '_blank', 'noopener');
+  }
+
+  return (
+    <section className="space-y-3" data-testid="outbound-auth-access">
+      <div className="flex items-center gap-1.5">
+        <KeyRoundIcon className="size-3.5 text-muted-foreground" />
+        <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+          Your access (outbound OAuth)
+        </h3>
+      </div>
+
+      {!providerReady ? (
+        <div className="rounded-lg border border-dashed px-3 py-2.5 flex items-center gap-3 text-sm text-muted-foreground">
+          <ClockIcon className="size-4 shrink-0" />
+          <span className="flex-1">Pending — the credential provider is still being created. Save and wait, then reopen this server.</span>
+        </div>
+      ) : (
+        <div className="rounded-lg border px-3 py-2.5 flex items-center gap-3" data-testid="outbound-auth-status">
+          {current.icon}
+          <span className={cn('text-sm flex-1', current.cls)}>{current.text}</span>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            onClick={handleAuthenticate}
+            className="shrink-0"
+            data-testid="outbound-authenticate-button"
+          >
+            <ExternalLinkIcon className="size-3.5" />
+            {status === 'authenticated' ? 'Re-authenticate' : 'Authenticate'}
+          </Button>
+        </div>
+      )}
+      <p className="text-xs text-muted-foreground">
+        Consent is completed the first time an agent calls a tool from this server in chat — you&apos;ll be prompted to sign in and grant access.
+      </p>
+    </section>
   );
 }
 
@@ -736,8 +917,157 @@ function McpServerEditPanel({
           )}
         </section>
 
+        <Separator />
+
+        {/* Outbound authentication (3LO) — vault model, epic #412 slice 7 (#419) */}
+        <section className="space-y-3" data-testid="outbound-auth-section">
+          <div className="flex items-center gap-1.5">
+            <KeyRoundIcon className="size-3.5 text-muted-foreground" />
+            <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+              Outbound authentication
+            </h3>
+          </div>
+          <label className="text-sm font-medium block">
+            Outbound auth type
+            <Select
+              value={form.outboundAuthType}
+              onValueChange={(v) => setField('outboundAuthType', v as OutboundAuthType)}
+            >
+              <SelectTrigger className="mt-1" data-testid="select-outbound-auth-type">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="NONE">None (static headers / no auth)</SelectItem>
+                <SelectItem value="OAUTH_3LO">OAuth 3-legged (per-user vaulted token)</SelectItem>
+              </SelectContent>
+            </Select>
+            <span className="text-xs font-normal text-muted-foreground mt-0.5 block">
+              OAuth 3-legged uses an AgentCore Identity credential provider — each user consents once and the gateway injects their vaulted token outbound.
+            </span>
+          </label>
+
+          {form.outboundAuthType === 'OAUTH_3LO' && (
+            <div className="space-y-2">
+              <label className="text-sm font-medium block">
+                Vendor
+                <Select
+                  value={form.oauthVendor}
+                  onValueChange={(v) => setField('oauthVendor', v as OauthVendor)}
+                >
+                  <SelectTrigger className="mt-1" data-testid="select-oauth-vendor">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="GOOGLE">Google (fixed endpoints)</SelectItem>
+                    <SelectItem value="CUSTOM">Custom (OIDC discovery)</SelectItem>
+                  </SelectContent>
+                </Select>
+              </label>
+
+              {form.oauthVendor === 'CUSTOM' && (
+                <label className="text-sm font-medium block">
+                  Discovery URL
+                  <Input
+                    className="mt-1 font-mono text-xs"
+                    placeholder="https://idp.example.com/.well-known/openid-configuration"
+                    value={form.oauthDiscoveryUrl}
+                    onChange={(e) => setField('oauthDiscoveryUrl', e.target.value)}
+                    data-testid="input-oauth-discovery-url"
+                  />
+                </label>
+              )}
+
+              <label className="text-sm font-medium block">
+                Client ID
+                <Input
+                  className="mt-1 font-mono text-xs"
+                  placeholder="OAuth2 client ID registered with the IdP"
+                  value={form.oauthClientId}
+                  onChange={(e) => setField('oauthClientId', e.target.value)}
+                  data-testid="input-outbound-client-id"
+                />
+              </label>
+
+              <label className="text-sm font-medium block">
+                Client secret
+                <Input
+                  type="password"
+                  className="mt-1 font-mono text-xs"
+                  placeholder={server?.oauthClientSecretArn ? '•••••••• (secret configured — leave blank to keep)' : 'Secrets Manager ARN holding the client secret'}
+                  value={form.oauthClientSecretArn}
+                  onChange={(e) => setField('oauthClientSecretArn', e.target.value)}
+                  data-testid="input-oauth-client-secret"
+                  autoComplete="off"
+                />
+                <span className="text-xs font-normal text-muted-foreground mt-0.5 block">
+                  Write-only — paste the Secrets Manager ARN whose value is <span className="font-mono">{'{ "clientSecret": "…" }'}</span>. The existing value is never shown.
+                </span>
+              </label>
+
+              <label className="text-sm font-medium block">
+                Scopes
+                <Input
+                  className="mt-1 font-mono text-xs"
+                  placeholder="openid, email, profile"
+                  value={form.oauthScopes}
+                  onChange={(e) => setField('oauthScopes', e.target.value)}
+                  data-testid="input-oauth-scopes"
+                />
+                <span className="text-xs font-normal text-muted-foreground mt-0.5 block">
+                  Comma- or space-separated.
+                </span>
+              </label>
+
+              <label className="text-sm font-medium block">
+                Return URL
+                <Input
+                  className="mt-1 font-mono text-xs"
+                  placeholder={`${typeof window !== 'undefined' ? window.location.origin : 'https://…'}/oauth/agentcore-callback`}
+                  value={form.oauthReturnUrl}
+                  onChange={(e) => setField('oauthReturnUrl', e.target.value)}
+                  data-testid="input-oauth-return-url"
+                />
+                <span className="text-xs font-normal text-muted-foreground mt-0.5 block">
+                  Where AgentCore redirects after consent — point at this app&apos;s <span className="font-mono">/oauth/agentcore-callback</span>.
+                </span>
+              </label>
+
+              {/* Issued callback URL — post-save read-back (design decision: unknown until the provider exists) */}
+              <div className="rounded-lg border px-3 py-2.5 space-y-1.5" data-testid="callback-url-readback">
+                <p className="text-xs font-medium text-foreground">Provider callback URL</p>
+                {server?.oauthCallbackUrl ? (
+                  <>
+                    <div className="flex items-center gap-2">
+                      <code className="flex-1 min-w-0 truncate rounded bg-muted px-2 py-1 text-xs font-mono" title={server.oauthCallbackUrl}>
+                        {server.oauthCallbackUrl}
+                      </code>
+                      <CopyButton value={server.oauthCallbackUrl} />
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      Register this exact URL as an authorized redirect URI on the external IdP so consent can complete.
+                    </p>
+                  </>
+                ) : (
+                  <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                    <ClockIcon className="size-3.5 shrink-0" />
+                    Pending — save and wait for the credential provider to be created, then reopen this server.
+                  </p>
+                )}
+              </div>
+            </div>
+          )}
+        </section>
+
+        {/* Per-user access status + Authenticate — saved OAUTH_3LO servers only */}
+        {server?.id && form.outboundAuthType === 'OAUTH_3LO' && (
+          <>
+            <Separator />
+            <OutboundAuthAccess server={server} />
+          </>
+        )}
+
         {/* OAuth credential status — only shown for saved servers with oauthClientId */}
-        {server?.id && form.oauthClientId.trim() && (
+        {server?.id && form.oauthClientId.trim() && form.outboundAuthType !== 'OAUTH_3LO' && (
           <>
             <Separator />
             <section className="space-y-3" data-testid="credential-section">
@@ -1622,6 +1952,40 @@ export default function AgentsPage() {
       .map((h) => ({ key: h.key.trim(), value: h.value }));
     const oauthClientId = form.oauthClientId.trim() || undefined;
 
+    // Outbound auth (3LO), epic #412 slice 7 (#419). `undefined` omits a field
+    // from the mutation (preserving any existing value) rather than nulling it
+    // — the default DynamoDB resolver REMOVEs attributes set to null (#387),
+    // which matters for the write-only secret: a blank input must keep the
+    // previously-provisioned oauthClientSecretArn, not clear it.
+    const isOauth = form.outboundAuthType === 'OAUTH_3LO';
+    const outboundFields: {
+      outboundAuthType: OutboundAuthType;
+      oauthVendor?: OauthVendor;
+      oauthDiscoveryUrl?: string;
+      oauthClientSecretArn?: string;
+      oauthScopes?: string[];
+      oauthReturnUrl?: string;
+    } = {
+      outboundAuthType: form.outboundAuthType,
+      oauthVendor: isOauth ? form.oauthVendor : undefined,
+      oauthDiscoveryUrl: isOauth && form.oauthVendor === 'CUSTOM' ? (form.oauthDiscoveryUrl.trim() || undefined) : undefined,
+      oauthScopes: isOauth ? parseScopes(form.oauthScopes) : undefined,
+      oauthReturnUrl: isOauth ? (form.oauthReturnUrl.trim() || undefined) : undefined,
+    };
+    if (isOauth && form.oauthClientSecretArn.trim()) {
+      outboundFields.oauthClientSecretArn = form.oauthClientSecretArn.trim();
+    }
+
+    // Read-back fields (written by the backend, not the client) to preserve in
+    // the optimistic local update so the callback read-back / status don't
+    // flicker to "pending" after saving an already-provisioned server.
+    const existing = pageState.status === 'ready' ? pageState.mcpServers.find((s) => s.id === id) : undefined;
+    const readBacks = {
+      gatewayTargetId: existing?.gatewayTargetId ?? null,
+      oauthProviderArn: existing?.oauthProviderArn ?? null,
+      oauthCallbackUrl: existing?.oauthCallbackUrl ?? null,
+    };
+
     if (id) {
       const updateRes = await amplifyClient.models.McpServer.update({
         id,
@@ -1631,12 +1995,13 @@ export default function AgentsPage() {
         enabled: form.enabled,
         headers,
         oauthClientId,
+        ...outboundFields,
       });
       if (updateRes.errors?.length) throw new Error(updateRes.errors.map((e) => e.message).join('; '));
 
       dispatch({
         type: 'upsertMcpServer',
-        server: toMcpServer({ id, name: form.name, url: form.url, description: form.description || null, enabled: form.enabled, headers, oauthClientId: oauthClientId ?? null }),
+        server: toMcpServer({ id, name: form.name, url: form.url, description: form.description || null, enabled: form.enabled, headers, oauthClientId: oauthClientId ?? null, ...outboundFields, ...readBacks }),
       });
     } else {
       const createRes = await amplifyClient.models.McpServer.create({
@@ -1646,17 +2011,18 @@ export default function AgentsPage() {
         enabled: form.enabled,
         headers,
         oauthClientId,
+        ...outboundFields,
       });
       if (createRes.errors?.length) throw new Error(createRes.errors.map((e) => e.message).join('; '));
 
       const newId = createRes.data!.id;
       dispatch({
         type: 'upsertMcpServer',
-        server: toMcpServer({ id: newId, name: form.name, url: form.url, description: form.description || null, enabled: form.enabled, headers, oauthClientId: oauthClientId ?? null }),
+        server: toMcpServer({ id: newId, name: form.name, url: form.url, description: form.description || null, enabled: form.enabled, headers, oauthClientId: oauthClientId ?? null, ...outboundFields }),
       });
       setSelectedMcpId(newId);
     }
-  }, []);
+  }, [pageState]);
 
   // Delete MCP server — remove join rows first
   const handleDeleteMcpServer = useCallback(async (id: string) => {
