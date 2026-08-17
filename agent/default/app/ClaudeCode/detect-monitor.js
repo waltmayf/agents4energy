@@ -37,7 +37,11 @@ const MIN_INTERVAL_SECONDS = 30;
 const MAX_INTERVAL_SECONDS = 99999999;
 const DEFAULT_INTERVAL_SECONDS = 60;
 const MIN_MAX_ITERATIONS = 1;
-const MAX_MAX_ITERATIONS = 40;
+// Raised 40 → 120 (issue #425): a condition poll at the orchestrator's
+// recommended 900s interval previously topped out at ~10h of coverage, which
+// a normal multi-worker wave (worker time + PR-green time) could outlast —
+// the epic-#412 orchestrator stalled on this three times. 120 * 900s ≈ 30h.
+const MAX_MAX_ITERATIONS = 120;
 const DEFAULT_MAX_ITERATIONS = 10;
 
 const MONITOR_BLOCK_RE = /```monitor\s*\n([\s\S]*?)```/;

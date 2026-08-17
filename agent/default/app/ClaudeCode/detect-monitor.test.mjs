@@ -50,11 +50,26 @@ test('condition-poll intervalSeconds is no longer clamped to 900 — a multi-hou
     spec: {
       kind: 'condition',
       intervalSeconds: 10800,
-      maxIterations: 40, // maxIterations clamp is unchanged
+      maxIterations: 120, // maxIterations clamp ceiling (issue #425: 40 → 120)
       checkCommand: 'exit 0',
       followUpPrompt: 'Follow up.',
     },
   });
+});
+
+test('maxIterations up to the raised ceiling (120) passes through unclamped', () => {
+  const resultText = [
+    '```monitor',
+    JSON.stringify({
+      intervalSeconds: 900,
+      maxIterations: 120,
+      checkCommand: 'exit 0',
+      followUpPrompt: 'Follow up.',
+    }),
+    '```',
+  ].join('\n');
+  const { spec } = detectMonitorRequest(resultText);
+  assert.equal(spec.maxIterations, 120);
 });
 
 test('intervalSeconds below the minimum is still clamped up', () => {
