@@ -21,7 +21,7 @@ const JIRA_WEBHOOK_SECRET_ARN = process.env.JIRA_WEBHOOK_SECRET_ARN ?? '';
 const STATE_MACHINE_ARN = process.env.STATE_MACHINE_ARN ?? '';
 // Lets the receiver reach into the Claude Code runtime and kill a superseded
 // background job (issue #182's data plane, already built in server.js — see
-// agent/default/app/ClaudeCode/server.js). Empty on branches that don't deploy
+// web/amplify/agentcore/ClaudeCode/server.js). Empty on branches that don't deploy
 // the runtime, in which case cancelRuntimeJob is a no-op and cancelPriorRuns
 // falls back to StopExecution only.
 const CLAUDE_CODE_RUNTIME_ARN = process.env.CLAUDE_CODE_RUNTIME_ARN ?? '';
@@ -56,7 +56,7 @@ const OWN_APP_BOT_LOGIN = 'waltmayf-claude-code-app[bot]';
 const secretsManager = new SecretsManagerClient({ region: REGION });
 const sfn = new SFNClient({ region: REGION });
 // Only used to fire the cancel control payload at the Claude Code runtime
-// (issue #182's data plane, see agent/default/app/ClaudeCode/server.js) before
+// (issue #182's data plane, see web/amplify/agentcore/ClaudeCode/server.js) before
 // stopping a superseded execution. Same runtime the invoke-claude Lambda calls.
 const agentCore = new BedrockAgentCoreClient({ region: REGION });
 
@@ -91,7 +91,7 @@ async function describeExecutionInput(executionArn: string): Promise<{ runId?: s
 }
 
 // Cause reported (via SendTaskFailure) when a run is cancelled. Mirrors the
-// runtime's own SUPERSEDED_CAUSE (agent/default/app/ClaudeCode/server.js) —
+// runtime's own SUPERSEDED_CAUSE (web/amplify/agentcore/ClaudeCode/server.js) —
 // deliberately contains no raw "@" mention so the PostFailureComment note it
 // produces can never re-trigger the webhook.
 const SUPERSEDED_ERROR = 'SupersededByNewerComment';

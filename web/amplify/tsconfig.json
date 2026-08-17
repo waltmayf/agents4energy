@@ -20,5 +20,14 @@
   // The Amplify backend type-check has no `allowImportingTsExtensions`, so it
   // rejects that extension (TS5097). Excluding tests keeps them out of the
   // backend synth type-check while `node --test` still runs them directly.
-  "exclude": ["**/*.test.ts", "**/*.test.mts"]
+  //
+  // agentcore/ClaudeCode and agentcore/AguiAgent are container build contexts
+  // with their own tsconfig/deps (AguiAgent's only exist inside its image) —
+  // excluded here for the same TS5097 reason plus missing-deps errors.
+  "exclude": [
+    "**/*.test.ts",
+    "**/*.test.mts",
+    "agentcore/ClaudeCode/**",
+    "agentcore/AguiAgent/**"
+  ]
 }

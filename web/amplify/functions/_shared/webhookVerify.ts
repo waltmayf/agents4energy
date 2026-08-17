@@ -28,7 +28,7 @@ export function verifyJiraSharedSecret(providedSecret: string | undefined, expec
 }
 
 // `@agentcore-claude` routes to the Claude Code AgentCore Runtime (the
-// container agent in agent/default/app/ClaudeCode); a bare `@agentcore` routes
+// container agent in web/amplify/agentcore/ClaudeCode); a bare `@agentcore` routes
 // to MyHarness. Note `/@agentcore\b/` ALSO matches `@agentcore-claude` (the
 // word boundary sits between "agentcore" and "-"), so the claude pattern must
 // be tested first — see parseMention.

@@ -32,5 +32,11 @@
     ".next/dev/types/**/*.ts",
     "**/*.mts"
   ],
-  "exclude": ["node_modules", "**/*.test.ts", "**/*.test.tsx"]
+  "exclude": [
+    "node_modules",
+    "**/*.test.ts",
+    "**/*.test.tsx",
+    "amplify/agentcore/ClaudeCode/**",
+    "amplify/agentcore/AguiAgent/**"
+  ]
 }

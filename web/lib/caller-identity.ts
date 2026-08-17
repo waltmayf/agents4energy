@@ -26,8 +26,8 @@ export interface CallerIdentity {
  *
  * Trade-off: the shared namespace is readable by any signed-in user — acceptable
  * because webhook runs aren't attributable to a browser user anyway. The three
- * runtime writers that keep this value (agent/default/app/ClaudeCode/memory.js,
- * agent/default/app/AguiAgent/memory.ts) hard-code the same string; they're
+ * runtime writers that keep this value (web/amplify/agentcore/ClaudeCode/memory.js,
+ * web/amplify/agentcore/AguiAgent/memory.ts) hard-code the same string; they're
  * separate Docker deploy artifacts and can't import this module.
  */
 export const SHARED_ACTOR_ID = 'default';

@@ -1,6 +1,6 @@
 /**
  * Recognizes the terminal "awaiting_input" marker turn that
- * `agent/default/app/ClaudeCode/memory.js`'s `buildAwaitingInputMarkerBlocks`
+ * `web/amplify/agentcore/ClaudeCode/memory.js`'s `buildAwaitingInputMarkerBlocks`
  * persists to AgentCore Memory when a Claude Code run ends asking the user a
  * question (issue #185). Mirrored here — not imported — since that file is
  * plain Node.js outside this TypeScript project.

@@ -104,7 +104,7 @@ export const handler = async (input: InvokeClaudeInput): Promise<{ started: true
     void log(logGroupName, logStreamName, `[${runId}] ${msg}`);
   });
 
-  // The runtime's server.js reads these fields (see agent/default/app/ClaudeCode/server.js).
+  // The runtime's server.js reads these fields (see web/amplify/agentcore/ClaudeCode/server.js).
   // When `taskToken` is present the runtime runs the job in the background and
   // resumes this paused task itself; the HTTP ack below is just "job accepted".
   const payload = {

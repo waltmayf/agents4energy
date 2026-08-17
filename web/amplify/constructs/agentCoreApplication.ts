@@ -29,13 +29,16 @@ const {
 
 // Both RealAgentCoreApplication (for its runtime/harness container builds) and
 // AgentCoreMcp call the CLI's findConfigRoot(), which walks up from
-// process.cwd() looking for an agentcore/ directory. Under `ampx sandbox` cwd
-// is web/, not the repo root, so it never finds agent/default/agentcore — point
-// it there explicitly (mirrors what `agentcore` CLI commands do after `init`).
-// Runtime `codeLocation`s in agentcore.json resolve relative to the *parent* of
-// this directory (agent/default/), so "app/ClaudeCode" → agent/default/app/ClaudeCode.
+// process.cwd() looking for an agentcore/ directory containing an
+// agentcore.json (existence only — its contents are never read, see
+// web/amplify/agentcore/README.md). Under `ampx sandbox` cwd is web/, not the
+// repo root, so it never finds web/amplify/agentcore — point it there
+// explicitly (mirrors what `agentcore` CLI commands do after `init`).
+// Runtime `codeLocation`s in agentcore.config.ts are absolute paths (via
+// `resolve(dirname(import.meta.url), ...)`), so they're decoupled from this
+// project root and unaffected by where the sentinel lives.
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const projectRoot = resolve(__dirname, '../../../agent/default');
+const projectRoot = resolve(__dirname, '..');
 setSessionProjectRoot(projectRoot);
 
 /**
@@ -49,23 +52,23 @@ export interface HarnessDeployment {
   spec: HarnessSpec;
   /**
    * Directory holding this harness's `system-prompt.md` (auto-discovered when
-   * `spec.systemPrompt` is unset). Relative paths resolve from `agent/default/`.
+   * `spec.systemPrompt` is unset). Relative paths resolve from `web/amplify/agentcore/`.
    */
   harnessDir?: string;
 }
 
 export interface AgentCoreApplicationProps {
-  /** Project name prefix used for physical resource names (matches agentcore.json `name`). */
+  /** Project name prefix used for physical resource names (matches agentcore.config.ts `projectName`). */
   projectName: string;
-  /** Memory resources to create (from agentcore.json `memories`). */
+  /** Memory resources to create (from agentcore.config.ts `memories`). */
   memories: Memory[];
-  /** Runtime (AgentCore Runtime) specs to create (from agentcore.json `runtimes`). */
+  /** Runtime (AgentCore Runtime) specs to create (from agentcore.config.ts `runtimes`). */
   runtimes?: AgentEnvSpec[];
   /** Harnesses to create — full specs, inlined by the caller (see `HarnessDeployment`). */
   harnesses: HarnessDeployment[];
-  /** Gateway/MCP spec (from agentcore.json `agentCoreGateways`), if any gateways are configured. */
+  /** Gateway/MCP spec (from agentcore.config.ts `gateways`), if any gateways are configured. */
   mcpSpec?: AgentCoreMcpSpec;
-  /** Policy engines to create (from agentcore.json `policyEngines`), if any are configured. */
+  /** Policy engines to create (from agentcore.config.ts `policyEngines`), if any are configured. */
   policyEngines?: PolicyEngine[];
 }
 
@@ -86,7 +89,7 @@ export interface AgentCoreApplicationProps {
  * `policyEngineConfiguration.policyEngineName` back off this app's
  * `policyEngines` map to attach it — see @aws/agentcore-cdk's AgentCoreMcp).
  *
- * Harness/memory/runtime specs come from `agentcore.json` (memories/runtimes)
+ * Harness/memory/runtime specs come from `agentcore.config.ts` (memories/runtimes)
  * and `backend.ts` (harness specs, so the system prompt + Cognito authorizer
  * can be injected at synth). No `harness.json`/translation layer.
  */
@@ -165,7 +168,7 @@ export class AgentCoreApplication extends Construct {
     return role.roleArn;
   }
 
-  /** ARN of an AgentCore Runtime by its logical name (the runtime `name` from agentcore.json), e.g. "ClaudeCode". */
+  /** ARN of an AgentCore Runtime by its logical name (the runtime `name` from agentcore.config.ts), e.g. "ClaudeCode". */
   public runtimeArn(name: string): string {
     const env = this.app.environments.get(name);
     if (!env) throw new Error(`Runtime "${name}" not found in AgentCoreApplication`);
@@ -195,9 +198,9 @@ export class AgentCoreApplication extends Construct {
 
   /**
    * Set an environment variable on an AgentCore Runtime's container (merges with
-   * any envVars already declared in agentcore.json). Used to hand the ClaudeCode
+   * any envVars already declared in agentcore.config.ts). Used to hand the ClaudeCode
    * runtime the memory id/region — resolved post-synth from the same-stack
-   * `AgentCoreMemory` construct, so it can't be hardcoded in agentcore.json.
+   * `AgentCoreMemory` construct, so it can't be hardcoded in agentcore.config.ts.
    */
   public addRuntimeEnvironmentVariable(name: string, key: string, value: string): void {
     const env = this.app.environments.get(name);
@@ -216,7 +219,7 @@ export class AgentCoreApplication extends Construct {
    * Callers need this to grant the gateway role identity-based permissions
    * (e.g. `lambda:InvokeFunction` on a Lambda target). The `Gateway` component
    * only auto-grants that when it creates a Lambda target itself (inline
-   * `agentCoreGateways[].targets[]` in agentcore.json); targets registered
+   * `agentCoreGateways[].targets[]` in agentcore.config.ts); targets registered
    * out-of-band via a custom resource (e.g. `S3ToolsGatewayTarget`) never go
    * through that path, so the grant must be added explicitly — the
    * resource-based Lambda permission (`AllowGatewayInvoke`) alone is not
@@ -261,7 +264,7 @@ export class AgentCoreApplication extends Construct {
     return gateway.attrGatewayIdentifier;
   }
 
-  /** ARN of a policy engine by its logical name (the `PolicyEngine.name` from agentcore.json), e.g. "DefaultCedar". */
+  /** ARN of a policy engine by its logical name (the `PolicyEngine.name` from agentcore.config.ts), e.g. "DefaultCedar". */
   public policyEngineArn(name: string): string {
     const policyEngine = this.app.policyEngines.get(name);
     if (!policyEngine) throw new Error(`Policy engine "${name}" not found in AgentCoreApplication`);
