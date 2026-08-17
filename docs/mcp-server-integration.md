@@ -2,6 +2,13 @@
 
 This document describes what an MCP server must support to work with this system, and the requirements for OAuth2-protected servers.
 
+The OAuth2 flow below covers **inbound, per-user PKCE** auth (each user authenticates in the
+browser and their token is stored in `McpServerCredential`). For the **outbound 3-legged
+OAuth (3LO)** case — where an AgentCore gateway registers an external OIDC-protected `/mcp`
+as a target and injects each user's vaulted token when it calls out (including the
+deploy-twice "gateway calls another gateway" flow) — see
+[docs/gateway-to-gateway-federation.md](gateway-to-gateway-federation.md).
+
 ---
 
 ## Protocol requirements
