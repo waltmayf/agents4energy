@@ -50,9 +50,26 @@ survives in context. So:
    agrees). This governs whether you may merge autonomously this wave.
 2. **Rebuild the backlog view** for this epic: list its open sub-issues
    (`gh issue view <epic> --json body` for the checklist / native sub-issue
-   list, or `gh api` for sub-issues if the repo uses native linking), and for
-   each, check whether it is still `blocked-by` an unmerged issue. An issue
-   whose blockers are all closed is **ready**.
+   list, or `gh api` for sub-issues if the repo uses native linking). Compute
+   readiness with the GitHub GraphQL `blockedBy`-state query — don't infer it
+   heuristically:
+
+   ```graphql
+   repository(owner: "<owner>", name: "<repo>") {
+     issues(first: 100, states: OPEN) {
+       nodes {
+         number
+         blockedBy(first: 50) { nodes { number state } }
+       }
+     }
+   }
+   ```
+
+   **Readiness rule:** an open epic/sub-issue is **ready** when its
+   `blockedBy` list contains zero `OPEN` nodes (an empty list and an
+   all-`CLOSED` list both count). Within a ready epic, the *worker* you
+   dispatch is responsible for sequencing that epic's own child issues — you
+   don't need a second query or heuristic for that.
 3. **Read (or create) the delivery-ledger comment** on the epic to see what
    you already dispatched and what state each sub-issue was in as of the
    last wave. Reconcile it against GitHub's actual current state — GitHub

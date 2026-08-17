@@ -111,6 +111,34 @@ stopping to ask. A human can request changes later. Reserve `needs-review` for
 decisions that are genuinely the human's to make (product direction, an
 irreversible external action, an ambiguity no default resolves).
 
+**Computing the ready-set.** Don't infer "unblocked" heuristically from issue
+bodies or a project-board view — the GitHub GraphQL API hands it over directly.
+Each issue's `blockedBy` connection returns every blocking issue **with its
+current state**, so one query over the open epics is enough to compute the
+whole ready-set in a single round trip:
+
+```graphql
+repository(owner: "<owner>", name: "<repo>") {
+  issues(first: 100, states: OPEN) {
+    nodes {
+      number
+      blockedBy(first: 50) { nodes { number state } }
+    }
+  }
+}
+```
+
+**Readiness rule:** an open epic is ready when its `blockedBy` list contains
+zero `OPEN` nodes — that covers both "never had a blocker" (empty list) and
+"every blocker is now closed" (all nodes `CLOSED`). This is the same query
+whether it's the first wave or the fiftieth; there's no separate "recheck
+after a merge" logic — post-merge you just run it again.
+
+This rule is about **epic-level** readiness only. Once an epic is ready, the
+worker dispatched against it is responsible for ordering and sequencing that
+epic's own child issues — the orchestrator doesn't need a second query or
+heuristic for that.
+
 ### The workers
 
 Each worker is a single `@agentcore-claude` dispatch against one issue. It:
