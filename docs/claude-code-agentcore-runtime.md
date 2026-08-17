@@ -33,7 +33,7 @@ On `POST /invocations` ([server.js](../web/amplify/agentcore/ClaudeCode/server.j
    > **Root + `--dangerously-skip-permissions`.** The container image runs as `root`, and the CLI otherwise **refuses** `--dangerously-skip-permissions` under root (*"cannot be used with root/sudo privileges for security reasons"*, exit 1) — which manifests as an HTTP 500 from the runtime with that line in CloudWatch. The fix is `IS_SANDBOX=1` in the spawn env (set in `server.js`): AgentCore Runtime already executes each session in an isolated Firecracker microVM, so declaring the sandbox is accurate and lets the headless run proceed as root (keeping the `/mnt/workspace` mount writable). Do **not** drop `--dangerously-skip-permissions` — it's required for non-interactive operation, not a security toggle to remove.
 3. **Streams each turn to AgentCore Memory** as the CLI runs (see [Memory persistence](#memory-persistence-agentcore-claude-turns-in-the-chat-ui) below) and **returns the final text** — the last `stream-json` line is a `result` event whose `result` field is the final assistant text; the server returns `{ result, repo, issueNumber }`. A non-zero CLI exit becomes a 500 with the tail of stderr (tokens redacted).
 
-> **`/mnt/workspace`'s disk quota and `pnpm install` (issue #180).** The session-storage mount is small — observed **1GB** — and `AWS::BedrockAgentCore::Runtime`'s `SessionStorageConfigurationProperty` (checked in the CloudFormation resource spec and the `@aws/agentcore-cdk` schema) exposes only `mountPath`, no size/quota field, so the limit isn't configurable from `agentcore.json`. On a repo the size of this one, `pnpm install`'s **virtual store** (`node_modules/.pnpm` — a symlink farm with one entry per resolved package, the actual bulk of `node_modules`) defaults to *inside the project directory*, i.e. onto that 1GB mount, and blows the quota with `ENOSPC` even though the container's root filesystem has several GB free. pnpm's content-addressable *store* was already fine — it lives under `HOME` (`/root`, root fs) — only the virtual store needed to move. `server.js` sets `npm_config_virtual_store_dir` (pnpm's env-var form of `--virtual-store-dir`) to `$HOME/.pnpm-virtual-store` in the spawned `claude` process's env, so any `pnpm install` Claude Code runs lands `node_modules/.pnpm` on the root fs while `/mnt/workspace` keeps holding only the git clone (source-only, as the issue's Option 2 suggested) — no separate re-clone under `/root` needed. `setupWorkspace` already deletes and re-clones the repo on every run, so nothing that would benefit from mount persistence is lost. `setupWorkspace` also logs `df -h /mnt/workspace` right after cloning, so a future quota regression shows up in CloudWatch instead of only surfacing as an `ENOSPC` deep inside `pnpm install`.
+> **`/mnt/workspace`'s disk quota and `pnpm install` (issue #180).** The session-storage mount is small — observed **1GB** — and `AWS::BedrockAgentCore::Runtime`'s `SessionStorageConfigurationProperty` (checked in the CloudFormation resource spec and the `@aws/agentcore-cdk` schema) exposes only `mountPath`, no size/quota field, so the limit isn't configurable from `agentcore.config.ts`. On a repo the size of this one, `pnpm install`'s **virtual store** (`node_modules/.pnpm` — a symlink farm with one entry per resolved package, the actual bulk of `node_modules`) defaults to *inside the project directory*, i.e. onto that 1GB mount, and blows the quota with `ENOSPC` even though the container's root filesystem has several GB free. pnpm's content-addressable *store* was already fine — it lives under `HOME` (`/root`, root fs) — only the virtual store needed to move. `server.js` sets `npm_config_virtual_store_dir` (pnpm's env-var form of `--virtual-store-dir`) to `$HOME/.pnpm-virtual-store` in the spawned `claude` process's env, so any `pnpm install` Claude Code runs lands `node_modules/.pnpm` on the root fs while `/mnt/workspace` keeps holding only the git clone (source-only, as the issue's Option 2 suggested) — no separate re-clone under `/root` needed. `setupWorkspace` already deletes and re-clones the repo on every run, so nothing that would benefit from mount persistence is lost. `setupWorkspace` also logs `df -h /mnt/workspace` right after cloning, so a future quota regression shows up in CloudWatch instead of only surfacing as an `ENOSPC` deep inside `pnpm install`.
 
 Payload shape (sent by `agent-webhook-invoke-claude`):
 
@@ -49,7 +49,7 @@ Payload shape (sent by `agent-webhook-invoke-claude`):
 }
 ```
 
-The Bedrock model is `ANTHROPIC_MODEL` (default `us.anthropic.claude-sonnet-5`), overridable via the runtime's `envVars` in `agentcore.json` — no code change to bump it.
+The Bedrock model is `ANTHROPIC_MODEL` (default `us.anthropic.claude-sonnet-5`), overridable via the runtime's `envVars` in `agentcore.config.ts` — no code change to bump it.
 
 ### The AgentCore Browser tool (issue #183)
 
@@ -77,11 +77,11 @@ Every other MCP tool this runtime can reach goes through the AgentCore gateway �
 
 `AGENTCORE_GATEWAY_ENDPOINT` is a runtime env var (wired in `backend.ts`, same value the browser harness path uses); `cognitoAccessToken` is the `payload` field above, relayed verbatim by `web/lib/claude-code-agent.ts` from the signed-in chat user's session — **the ACCESS token, not the ID token** (#327: the gateway's `CUSTOM_JWT` authorizer 403s an ID token with `insufficient_scope`). If either is missing (e.g. the `@agentcore-claude` webhook path, which has no signed-in browser user — see #340), the entry is simply omitted and this run gets no gateway MCP tools, same as before this issue. The container never constructs a `{sub, groups}` claims blob itself — Cedar reads `cognito:groups` straight off the relayed JWT, identically to the harness path.
 
-This is wired at the infrastructure level in [`agentcore.json`](../agent/default/agentcore/agentcore.json)'s `ClaudeCode` runtime entry:
+This is wired at the infrastructure level in [`agentcore.config.ts`](../web/amplify/agentcore/agentcore.config.ts)'s `ClaudeCode` runtime entry:
 
-```jsonc
-"connections": [
-  { "id": "browser", "to": { "type": "browser" } }
+```ts
+connections: [
+  { id: 'browser', to: { type: 'browser' } },
 ]
 ```
 
@@ -89,28 +89,28 @@ This is wired at the infrastructure level in [`agentcore.json`](../agent/default
 
 ## How it's provisioned (`AgentCoreApplication`)
 
-The runtime is declared in [`agent/default/agentcore/agentcore.json`](../agent/default/agentcore/agentcore.json) under `runtimes[]`:
+The runtime is declared in [`agentcore.config.ts`](../web/amplify/agentcore/agentcore.config.ts) under `runtimes[]`:
 
-```jsonc
+```ts
 {
-  "name": "ClaudeCode",
-  "build": "Container",
-  "codeLocation": "app/ClaudeCode",   // resolved relative to agent/default/
-  "dockerfile": "Dockerfile",
-  "entrypoint": "server.js",
-  "protocol": "HTTP",
-  "networkMode": "PUBLIC",
-  "filesystemConfigurations": [
-    { "sessionStorage": { "mountPath": "/mnt/workspace" } }
+  name: 'ClaudeCode',
+  build: 'Container',
+  codeLocation: resolve(__dirname, 'ClaudeCode'),   // absolute path — decoupled from the agentcore.json sentinel
+  dockerfile: 'Dockerfile',
+  entrypoint: 'server.js',
+  protocol: 'HTTP',
+  networkMode: 'PUBLIC',
+  filesystemConfigurations: [
+    { sessionStorage: { mountPath: '/mnt/workspace' } },
   ],
-  "envVars": [{ "name": "ANTHROPIC_MODEL", "value": "us.anthropic.claude-sonnet-5" }]
+  envVars: [{ name: 'ANTHROPIC_MODEL', value: 'us.anthropic.claude-sonnet-5' }],
 }
 ```
 
-The real **`AgentCoreApplication`** L3 construct from `@aws/agentcore-cdk` — the same one that now creates the harness and memory — turns that entry into infrastructure. `backend.ts` passes `projectSpec.runtimes` straight into the construct via the thin wrapper ([`web/amplify/constructs/agentCoreApplication.ts`](../web/amplify/constructs/agentCoreApplication.ts)):
+The real **`AgentCoreApplication`** L3 construct from `@aws/agentcore-cdk` — the same one that now creates the harness and memory — turns that entry into infrastructure. `backend.ts` passes `runtimes` straight into the construct via the thin wrapper ([`web/amplify/constructs/agentCoreApplication.ts`](../web/amplify/constructs/agentCoreApplication.ts)):
 
 ```
-agentcore.json runtimes[] ─▶ AgentCoreApplication (props.runtimes)
+agentcore.config.ts runtimes[] ─▶ AgentCoreApplication (props.runtimes)
                                │  for each runtime:
                                │    CodeBuild builds the ARM64 image (codeLocation + Dockerfile)
                                │    └▶ pushes to ECR
@@ -119,12 +119,12 @@ agentcore.json runtimes[] ─▶ AgentCoreApplication (props.runtimes)
                             app.environments.get("ClaudeCode").runtime.runtimeArn
 ```
 
-Because the construct runs at CDK **synth** time inside the Amplify stack, the runtime's ARN is a same-stack token — no post-deploy control-plane lookup. `backend.ts` reads it via the wrapper's `runtimeArn('ClaudeCode')` accessor and threads it into two places ([backend.ts](../web/amplify/backend.ts) ~line 327):
+Because the construct runs at CDK **synth** time inside the Amplify stack, the runtime's ARN is a same-stack token — no post-deploy control-plane lookup. `backend.ts` reads it via the wrapper's `runtimeArn('ClaudeCode')` accessor and threads it into two places ([backend.ts](../web/amplify/backend.ts)):
 
 - The `agent-webhook-invoke-claude` Lambda's **`CLAUDE_CODE_RUNTIME_ARN`** env var.
 - An **SSM parameter** `/agentcore/<stackName>/claude_code_runtime_arn` (for out-of-band tooling; cross-stack exports are stripped — see the export note in `backend.ts`).
 
-Physical names follow the construct's `${projectName}_${name}` scheme (with `projectName` made unique per deployment), so the runtime is `default_web_<branch>_ClaudeCode` and concurrent branches/sandboxes don't collide. Runtimes are optional: if `agentcore.json` has no `ClaudeCode` runtime, `AGENTCORE_CLAUDE_CODE_RUNTIME_ARN` resolves to `''` and every consumer tolerates the empty ARN (the invoke Lambda throws a clean *"runtime not deployed on this branch"* at call time rather than failing synth).
+Physical names follow the construct's `${projectName}_${name}` scheme (with `projectName` made unique per deployment), so the runtime is `default_web_<branch>_ClaudeCode` and concurrent branches/sandboxes don't collide. Runtimes are optional: if `agentcore.config.ts` has no `ClaudeCode` runtime, `AGENTCORE_CLAUDE_CODE_RUNTIME_ARN` resolves to `''` and every consumer tolerates the empty ARN (the invoke Lambda throws a clean *"runtime not deployed on this branch"* at call time rather than failing synth).
 
 > The `agentcore_code_interpreter` sandbox tool was removed (#191); Claude Code runs shell commands directly in the container. The container is a Runtime, **not** a harness — the CMD (`node server.js`) is honored as-is.
 
@@ -155,7 +155,7 @@ This is exactly the shape [`list-session-messages/handler.ts`](../web/amplify/fu
 
 - **Session id**: `InvokeAgentRuntime` forwards `runtimeSessionId` to the container as the `X-Amzn-Bedrock-AgentCore-Runtime-Session-Id` request header (not in the JSON body); `server.js` reads it via `req.get(...)`, falling back to `payload.runId`. This is the same id `agent-webhook-invoke-claude` already sets to the Step Function's `runId`, so a GitHub-triggered run's memory events land under the exact session id `?sessionId=<runId>` opens in the chat UI (see the initial-comment link in [`agent-webhook-post-comment/handler.ts`](../web/amplify/functions/agent-webhook-post-comment/handler.ts)).
 - **Actor id**: hardcoded `'default'`, matching `list-session-messages`/`harness-agent.ts` (memory is keyed by agent name, not per-GitHub-user identity).
-- **Memory id/region**: the runtime discovers these via `AGENTCORE_MEMORY_ID`/`AGENTCORE_MEMORY_REGION` env vars, set in [`backend.ts`](../web/amplify/backend.ts) through a new `agentCoreApp.addRuntimeEnvironmentVariable('ClaudeCode', ...)` accessor — the memory id is a deploy-time CDK token, so it can't be hardcoded in `agentcore.json`'s static `envVars`.
+- **Memory id/region**: the runtime discovers these via `AGENTCORE_MEMORY_ID`/`AGENTCORE_MEMORY_REGION` env vars, set in [`backend.ts`](../web/amplify/backend.ts) through a new `agentCoreApp.addRuntimeEnvironmentVariable('ClaudeCode', ...)` accessor — the memory id is a deploy-time CDK token, so it can't be hardcoded in `agentcore.config.ts`'s static `envVars`.
 - **IAM**: `backend.ts` grants the runtime's execution role `bedrock-agentcore:CreateEvent` on the memory ARN, guarded on both the runtime and the memory being deployed on the branch (mirrors the `states:SendTask*` grant pattern already used for the callback path).
 - **Failure mode**: every `CreateEvent` call is best-effort — a failure is logged and swallowed (`memory.js`), never thrown. Memory persistence must never fail, delay, or retry into the actual Claude Code run.
 
