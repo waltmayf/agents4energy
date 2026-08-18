@@ -15,17 +15,42 @@
  *
  * What it does:
  *   1. Reads `custom.agent_webhook_url` from web/amplify_outputs.json (written by
- *      `ampx sandbox` / `pnpm deploy`).
+ *      `ampx sandbox` / `pnpm deploy`), and resolves the receiver Lambda that
+ *      backs it by looking up the API Gateway (HTTP API) integration for that
+ *      URL's API id — this picks the exact receiver for *this* sandbox, not
+ *      just the first Lambda whose name happens to contain "webhookreceiver"
+ *      (see "Multiple sandboxes" below). Falls back to a `list-functions`
+ *      name-contains match if the API Gateway lookup fails.
  *   2. Resolves the webhook HMAC secret value. Preference order:
  *        a. --secret <value> (explicit),
- *        b. the deployed receiver Lambda's GITHUB_WEBHOOK_SECRET env var — the
- *           resolved value Amplify's secret() injected (issue #239), so what we
- *           register on GitHub can't drift from what the receiver verifies,
- *        c. --secret-arn / $GITHUB_WEBHOOK_SECRET_ARN → Secrets Manager
+ *        b. if the receiver Lambda carries an `AMPLIFY_SSM_ENV_CONFIG` env var
+ *           for `GITHUB_WEBHOOK_SECRET` — i.e. Amplify resolves the secret()
+ *           from SSM at cold start rather than baking the value into the
+ *           Lambda's static env — read the real value straight from SSM
+ *           Parameter Store (`ssm get-parameter --with-decryption`), trying
+ *           the sandbox-specific `path` first, then the shared `sharedPath`
+ *           (issue #446: the static env var is only a placeholder in this
+ *           case, and registering it on GitHub causes a 401 on every real
+ *           delivery even though the `ping` looks like it succeeded),
+ *        c. otherwise, the receiver Lambda's static GITHUB_WEBHOOK_SECRET env
+ *           var value — the resolved value Amplify's secret() baked in
+ *           directly (issue #239), so what we register on GitHub can't drift
+ *           from what the receiver verifies,
+ *        d. --secret-arn / $GITHUB_WEBHOOK_SECRET_ARN → Secrets Manager
  *           (legacy fallback for backends predating the secret() migration).
  *   3. Creates the repo webhook (event: issue_comment, content-type: json,
  *      secret: the HMAC value) — or, if a hook with the same payload URL already
  *      exists, updates it in place. Never creates a duplicate.
+ *
+ * Multiple sandboxes in one AWS account:
+ *   Every personal `ampx sandbox` deploy provisions its own receiver Lambda
+ *   (name suffixed with a per-sandbox hash), so `lambda list-functions
+ *   --query "contains(FunctionName,'ebhookrecei')"` can match more than one
+ *   function across an account with several active sandboxes — picking the
+ *   wrong one silently registers a secret (or, pre-#446, a placeholder) that
+ *   the intended sandbox's receiver never sees. Resolving the receiver via the
+ *   `agent_webhook_url`'s own API Gateway integration avoids the ambiguity
+ *   entirely, since that URL is specific to the sandbox in amplify_outputs.json.
  *
  * Prerequisites:
  *   gh CLI authenticated with a token that has admin:repo_hook (the `repo`
@@ -101,12 +126,73 @@ try {
 // ─── Resolve the webhook HMAC secret value ─────────────────────────────────────
 // Prefer the value the deployed receiver Lambda actually verifies against, so
 // the secret registered on GitHub can never drift from the backend. Since the
-// secret() migration (issue #239) the receiver holds the RESOLVED value in its
-// GITHUB_WEBHOOK_SECRET env var — read that directly. Fall back to the legacy
-// Secrets Manager ARN path for backends deployed before the migration.
+// secret() migration (issue #239) Amplify resolves GITHUB_WEBHOOK_SECRET one of
+// two ways, and we can't tell which without inspecting the function:
+//   - baked directly into the Lambda's static env (older/simple deploys), or
+//   - left as a placeholder in the static env, with the real value fetched
+//     from SSM Parameter Store at cold start via the AMPLIFY_SSM_ENV_CONFIG
+//     env var (issue #446) — registering the placeholder causes a silent 401
+//     on every real delivery.
+// Fall back to the legacy Secrets Manager ARN path for backends predating the
+// secret() migration entirely.
 
-// Returns [value | undefined, legacyArn | undefined] from the deployed receiver.
-function readReceiverEnv(): { value?: string; legacyArn?: string } {
+// Finds the API Gateway (HTTP API) integration target Lambda for
+// `webhookUrl`'s own API id, so we resolve the exact receiver for this
+// sandbox rather than guessing from a name substring across the account.
+function resolveReceiverFunctionNameFromApi(): string | undefined {
+  const apiId = webhookUrl.match(/^https:\/\/([a-z0-9]+)\.execute-api\./i)?.[1];
+  if (!apiId) return undefined;
+  try {
+    const integrations = JSON.parse(
+      aws(`apigatewayv2 get-integrations --region ${region} --api-id ${apiId} --output json`),
+    ) as { Items?: Array<{ IntegrationUri?: string }> };
+    for (const item of integrations.Items ?? []) {
+      const fnName = item.IntegrationUri?.match(/function:([^/:]+)/)?.[1];
+      if (fnName) return fnName;
+    }
+  } catch { /* fall through to the list-functions fallback */ }
+  return undefined;
+}
+
+function readSsmParam(name: string): string | undefined {
+  try {
+    const v = aws(
+      `ssm get-parameter --region ${region} --name "${name}" ` +
+      `--with-decryption --query Parameter.Value --output text`,
+    );
+    return v && v !== 'None' ? v : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+// Reads GITHUB_WEBHOOK_SECRET straight from SSM when the receiver's
+// AMPLIFY_SSM_ENV_CONFIG says the static env var is only a placeholder.
+// Tries the sandbox-specific `path` first, then the shared `sharedPath`.
+function resolveSsmSecret(envVars: Record<string, string>): { value: string; path: string } | undefined {
+  const raw = envVars.AMPLIFY_SSM_ENV_CONFIG;
+  if (!raw) return undefined;
+  let config: Record<string, { path?: string; sharedPath?: string }>;
+  try {
+    config = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  const entry = config.GITHUB_WEBHOOK_SECRET;
+  if (!entry) return undefined;
+  for (const path of [entry.path, entry.sharedPath]) {
+    if (!path) continue;
+    const value = readSsmParam(path);
+    if (value) return { value, path };
+  }
+  return undefined;
+}
+
+function readReceiverEnv(): { value?: string; legacyArn?: string; source?: string } {
+  const candidates: string[] = [];
+  const apiResolved = resolveReceiverFunctionNameFromApi();
+  if (apiResolved) candidates.push(apiResolved);
+
   try {
     const fns = JSON.parse(
       aws(
@@ -114,17 +200,28 @@ function readReceiverEnv(): { value?: string; legacyArn?: string } {
         `--query "Functions[?contains(FunctionName,'ebhookrecei')].FunctionName" --output json`,
       ),
     ) as string[];
-    for (const name of fns) {
+    for (const name of fns) if (!candidates.includes(name)) candidates.push(name);
+  } catch { /* fall through */ }
+
+  for (const name of candidates) {
+    try {
       const env = JSON.parse(
         aws(
           `lambda get-function-configuration --region ${region} ` +
           `--function-name ${name} --query "Environment.Variables" --output json`,
         ),
-      ) as Record<string, string>;
-      if (env?.GITHUB_WEBHOOK_SECRET) return { value: env.GITHUB_WEBHOOK_SECRET };
-      if (env?.GITHUB_WEBHOOK_SECRET_ARN) return { legacyArn: env.GITHUB_WEBHOOK_SECRET_ARN };
-    }
-  } catch { /* fall through */ }
+      ) as Record<string, string> | null;
+      if (!env) continue;
+
+      const ssm = resolveSsmSecret(env);
+      if (ssm) return { value: ssm.value, source: `SSM Parameter Store (${ssm.path}, via receiver Lambda ${name})` };
+
+      if (env.GITHUB_WEBHOOK_SECRET) {
+        return { value: env.GITHUB_WEBHOOK_SECRET, source: `receiver Lambda ${name} GITHUB_WEBHOOK_SECRET env var (static, Amplify secret)` };
+      }
+      if (env.GITHUB_WEBHOOK_SECRET_ARN) return { legacyArn: env.GITHUB_WEBHOOK_SECRET_ARN };
+    } catch { /* try the next candidate */ }
+  }
   return {};
 }
 
@@ -158,7 +255,7 @@ if (explicitValue) {
   const receiver = readReceiverEnv();
   if (receiver.value) {
     secretValue = receiver.value;
-    secretSource = 'receiver Lambda GITHUB_WEBHOOK_SECRET (Amplify secret)';
+    secretSource = receiver.source ?? 'receiver Lambda GITHUB_WEBHOOK_SECRET (Amplify secret)';
   } else if (receiver.legacyArn) {
     secretValue = readSecretFromArn(receiver.legacyArn);
     secretSource = `receiver Lambda legacy ARN (${receiver.legacyArn})`;
