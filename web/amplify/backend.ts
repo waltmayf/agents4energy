@@ -1116,6 +1116,15 @@ if (GITHUB_APP_PRIVATE_KEY_SECRET_ARN) {
     actions: ['secretsmanager:GetSecretValue'],
     resources: [GITHUB_APP_PRIVATE_KEY_SECRET_ARN],
   }));
+  // The @agentcore-claude invoke Lambda also mints a fresh GitHub App
+  // installation token at invoke time (issue #444), so every invocation —
+  // including monitor-loop re-invokes hours after the initial comment —
+  // gets a token that's seconds old instead of the one threaded from
+  // PostInitialComment, which expires (~1h) mid-loop.
+  webhookInvokeClaudeLambda.addToRolePolicy(new PolicyStatement({
+    actions: ['secretsmanager:GetSecretValue'],
+    resources: [GITHUB_APP_PRIVATE_KEY_SECRET_ARN],
+  }));
 }
 if (JIRA_API_TOKEN_SECRET_ARN) {
   webhookPostCommentLambda.addToRolePolicy(new PolicyStatement({
