@@ -48,11 +48,11 @@ Both reuse `web/lib/tool-permissions.ts` (`isToolGrantedToAnyGroup`).
 
 ## Cedar policy engine
 
-`agent/default/agentcore/agentcore.json` configures a Cedar `policyEngines` entry (`DefaultCedar`, #271) and associates it with `default-gateway` via `policyEngineConfiguration` in `mode: "ENFORCE"` (flipped from `LOG_ONLY` in #280, once #279 routed tool calls through the gateway so the engine has something real to evaluate).
+`web/amplify/agentcore/agentcore.config.ts` configures a Cedar `policyEngines` entry (`DefaultCedar`, #271) and associates it with the gateway via `policyEngineConfiguration` in `mode: "ENFORCE"` (flipped from `LOG_ONLY` in #280, once #279 routed tool calls through the gateway so the engine has something real to evaluate).
 
-`agentcore.json`'s `policyEngines[].policies` array is intentionally **empty** — the live policy set is generated and pushed directly to the deployed engine (see below), not hand-written in this file. Two prior static smoke-test policies (`AdminAllowAllTools`, `DefaultDenyUnauthenticated`) were removed once the generator landed.
+`agentcore.config.ts`'s `policyEngines[].policies` array is intentionally **empty** — the live policy set is generated and pushed directly to the deployed engine (see below), not hand-written in this file. Two prior static smoke-test policies (`AdminAllowAllTools`, `DefaultDenyUnauthenticated`) were removed once the generator landed.
 
-> **Important wiring note (#272):** the `AgentCoreApplication` CDK wrapper (`web/amplify/constructs/agentCoreApplication.ts`) previously built a minimal spec for `@aws/agentcore-cdk`'s real construct that read `name`/`memories`/`runtimes` but silently dropped `policyEngines` — so `agentcore.json`'s `DefaultCedar` engine was configured but **never actually synthesized into the deployed CDK stack** (only visible to `agentcore validate`/local CLI iteration). This was fixed alongside the generator; `policyEngines` now flows through to the real construct and `policyEngineArn`/`policyEngineId` accessors were added.
+> **Important wiring note (#272):** the `AgentCoreApplication` CDK wrapper (`web/amplify/constructs/agentCoreApplication.ts`) previously built a minimal spec for `@aws/agentcore-cdk`'s real construct that read `name`/`memories`/`runtimes` but silently dropped `policyEngines` — so `agentcore.config.ts`'s `DefaultCedar` engine was configured but **never actually synthesized into the deployed CDK stack**. This was fixed alongside the generator; `policyEngines` now flows through to the real construct and `policyEngineArn`/`policyEngineId` accessors were added.
 
 ### Generation: `GroupToolGrant` → Cedar (#272)
 
@@ -68,7 +68,7 @@ Every generated policy's `enforcementMode` is `ACTIVE` (#280), matching the engi
 
 ### Sync mechanism: DynamoDB Stream, not build-time (#272)
 
-`GroupToolGrant` rows are edited at **runtime** via the #247 admin UI (`PermissionsPanel`), not at deploy time — a build-time sync (baked into `agentcore.json` during `agentcore deploy`/CDK synth) would only reflect grants that existed as of the last deploy, silently drifting from the admin UI between deploys. So the sync is a **Lambda triggered by a DynamoDB Stream** on the `GroupToolGrant` table (`web/amplify/functions/sync-cedar-policies`), wired in `backend.ts` behind `if (AGENTCORE_POLICY_ENGINE_ID)`:
+`GroupToolGrant` rows are edited at **runtime** via the #247 admin UI (`PermissionsPanel`), not at deploy time — a build-time sync (baked into `agentcore.config.ts` at CDK synth) would only reflect grants that existed as of the last deploy, silently drifting from the admin UI between deploys. So the sync is a **Lambda triggered by a DynamoDB Stream** on the `GroupToolGrant` table (`web/amplify/functions/sync-cedar-policies`), wired in `backend.ts` behind `if (AGENTCORE_POLICY_ENGINE_ID)`:
 
 1. Any create/update/delete on `GroupToolGrant` fires the stream.
 2. The Lambda ignores the stream record's contents and instead **re-scans** every `GroupToolGrant` + `McpServer` row — a full reconcile rather than a diff of one record, so it can't drift after a batch edit, a failed prior invocation, or concurrent writes. Grant edits are an infrequent, admin-only action, so the extra Scan/API calls are an acceptable tradeoff for that guarantee.

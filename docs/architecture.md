@@ -6,9 +6,9 @@ This monorepo deploys everything from a single `npx ampx sandbox --once` command
 
 - **`web/`** — Next.js frontend backed by Amplify Gen 2 (Cognito auth, AppSync data)
 - **`hostingStack`** — S3 + CloudFront static website hosting (defined in `backend.ts`)
-- **`agentStack`** — the AgentCore Harness (`MyHarness`), Memory, and Gateway, built via the `AgentCoreApplication` construct (Memory/Gateway from `agent/default/agentcore/agentcore.json`, the Harness inlined literally in `backend.ts`). `MyHarness` is the sole runtime; the former `AgUiHandler` Python-container runtime was retired in #33.
+- **`agentStack`** — the AgentCore Harness (`MyHarness`), Memory, Gateway, and AgentCore Runtimes (`ClaudeCode`, `AguiAgent`), built via the `AgentCoreApplication` construct (memories/runtimes/policy engines/gateways from the typed `web/amplify/agentcore/agentcore.config.ts`, the Harness inlined literally in `backend.ts`). `MyHarness` is the sole harness; the former `AgUiHandler` Python-container runtime was retired in #33.
 
-All of this is deployed together with a single `npx ampx sandbox --once --identifier <branch>` command — there is no separate `agentcore deploy` step in the production pipeline. `amplify_outputs.json` is written by Amplify and includes all ARNs and endpoints needed for the frontend. The `agentcore` CLI (`agentcore dev`, `agentcore validate`, etc.) remains usable for local iteration against the same `agentcore.json` file for memories/gateways — it just isn't part of the deploy path anymore.
+All of this is deployed together with a single `npx ampx sandbox --once --identifier <branch>` command — there is no separate `agentcore deploy` step, and no standalone `agent/` project (deleted in #440). `amplify_outputs.json` is written by Amplify and includes all ARNs and endpoints needed for the frontend.
 
 ### Per-Branch Routing (`basePath`)
 
@@ -23,15 +23,16 @@ Every branch/sandbox deploys to its own S3 prefix and is served at `https://<dom
 │   │   ├── backend.ts          # Amplify backend — auth, data, hostingStack, agentStack
 │   │   ├── auth/resource.ts    # Cognito User Pool + Identity Pool
 │   │   ├── data/resource.ts    # AppSync GraphQL API
+│   │   ├── agentcore/
+│   │   │   ├── agentcore.config.ts          # Typed config: memories, runtimes, policyEngines, gateways
+│   │   │   ├── agentcore.json               # Required-but-inert sentinel (existence-only check)
+│   │   │   ├── MyHarness/system-prompt.md   # Harness system prompt (read from disk by backend.ts)
+│   │   │   ├── ClaudeCode/                  # @agentcore-claude container build context
+│   │   │   └── AguiAgent/                   # AguiAgent container build context
 │   │   └── constructs/
 │   │       ├── hostingConstruct.ts          # S3 + CloudFront hosting
-│   │       └── agentCoreApplication.ts      # Harness (inlined in backend.ts) + Memory/Gateway (from agentcore.json)
+│   │       └── agentCoreApplication.ts      # Harness (inlined in backend.ts) + Memory/Runtimes/Gateway (from agentcore.config.ts)
 │   └── amplify_outputs.json    # Written by Amplify after each deploy (DO NOT EDIT)
-│
-├── agent/
-│   ├── default/                # AgentCore CLI project root (agentcore.json)
-│   └── handler/                # Python handler (Dockerfile + agent.py)
-│       └── Dockerfile
 │
 ├── scripts/
 │   ├── build.sh                # Single deploy: ampx sandbox → build → S3 upload
@@ -55,7 +56,7 @@ pnpm run deploy
        │    ├─ Deploys Cognito, AppSync, Lambda functions
        │    ├─ hostingStack: S3 bucket + CloudFront distribution
        │    ├─ agentStack:
-       │    │    └─ AgentCoreApplication: Harness (MyHarness) + Memory + Gateway from agentcore.json
+       │    │    └─ AgentCoreApplication: Harness (MyHarness) + Memory + Runtimes + Gateway from agentcore.config.ts
        │    └─ writes web/amplify_outputs.json (all ARNs + endpoints)
        │
        ├─ pnpm --filter web build  (Next.js static export)

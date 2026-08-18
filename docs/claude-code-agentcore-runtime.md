@@ -15,7 +15,7 @@ AgentCore Runtime executes each session in a Firecracker microVM — **no Docker
 
 ## The container
 
-Source: [`agent/default/app/ClaudeCode/`](../agent/default/app/ClaudeCode/).
+Source: [`web/amplify/agentcore/ClaudeCode/`](../web/amplify/agentcore/ClaudeCode/).
 
 | File | What it does |
 |---|---|
@@ -25,7 +25,7 @@ Source: [`agent/default/app/ClaudeCode/`](../agent/default/app/ClaudeCode/).
 
 ### What the server does
 
-On `POST /invocations` ([server.js](../agent/default/app/ClaudeCode/server.js)) the server:
+On `POST /invocations` ([server.js](../web/amplify/agentcore/ClaudeCode/server.js)) the server:
 
 1. **Sets up the workspace.** If the payload carries `repo` + `githubToken`, it configures `git`/`gh` credentials (a git credential store seeded with the short-lived GitHub App token, plus `GH_TOKEN` for the CLI) and clones the repo into the session-storage mount (`/mnt/workspace`, persistent across stop/resume so a follow-up comment reuses the clone). No repo → a throwaway temp dir.
 2. **Runs Claude Code headlessly** — `claude -p "<prompt>" --model <bedrock model> --output-format stream-json --verbose --permission-mode acceptEdits --dangerously-skip-permissions`, with an `--append-system-prompt` telling it the repo is cloned, `git`/`gh` are authenticated, and to open a PR with `gh` if it makes changes. `CLAUDE_CODE_USE_BEDROCK=1` routes the model through Bedrock using the runtime execution role's credentials.
@@ -33,7 +33,7 @@ On `POST /invocations` ([server.js](../agent/default/app/ClaudeCode/server.js)) 
    > **Root + `--dangerously-skip-permissions`.** The container image runs as `root`, and the CLI otherwise **refuses** `--dangerously-skip-permissions` under root (*"cannot be used with root/sudo privileges for security reasons"*, exit 1) — which manifests as an HTTP 500 from the runtime with that line in CloudWatch. The fix is `IS_SANDBOX=1` in the spawn env (set in `server.js`): AgentCore Runtime already executes each session in an isolated Firecracker microVM, so declaring the sandbox is accurate and lets the headless run proceed as root (keeping the `/mnt/workspace` mount writable). Do **not** drop `--dangerously-skip-permissions` — it's required for non-interactive operation, not a security toggle to remove.
 3. **Streams each turn to AgentCore Memory** as the CLI runs (see [Memory persistence](#memory-persistence-agentcore-claude-turns-in-the-chat-ui) below) and **returns the final text** — the last `stream-json` line is a `result` event whose `result` field is the final assistant text; the server returns `{ result, repo, issueNumber }`. A non-zero CLI exit becomes a 500 with the tail of stderr (tokens redacted).
 
-> **`/mnt/workspace`'s disk quota and `pnpm install` (issue #180).** The session-storage mount is small — observed **1GB** — and `AWS::BedrockAgentCore::Runtime`'s `SessionStorageConfigurationProperty` (checked in the CloudFormation resource spec and the `@aws/agentcore-cdk` schema) exposes only `mountPath`, no size/quota field, so the limit isn't configurable from `agentcore.json`. On a repo the size of this one, `pnpm install`'s **virtual store** (`node_modules/.pnpm` — a symlink farm with one entry per resolved package, the actual bulk of `node_modules`) defaults to *inside the project directory*, i.e. onto that 1GB mount, and blows the quota with `ENOSPC` even though the container's root filesystem has several GB free. pnpm's content-addressable *store* was already fine — it lives under `HOME` (`/root`, root fs) — only the virtual store needed to move. `server.js` sets `npm_config_virtual_store_dir` (pnpm's env-var form of `--virtual-store-dir`) to `$HOME/.pnpm-virtual-store` in the spawned `claude` process's env, so any `pnpm install` Claude Code runs lands `node_modules/.pnpm` on the root fs while `/mnt/workspace` keeps holding only the git clone (source-only, as the issue's Option 2 suggested) — no separate re-clone under `/root` needed. `setupWorkspace` already deletes and re-clones the repo on every run, so nothing that would benefit from mount persistence is lost. `setupWorkspace` also logs `df -h /mnt/workspace` right after cloning, so a future quota regression shows up in CloudWatch instead of only surfacing as an `ENOSPC` deep inside `pnpm install`.
+> **`/mnt/workspace`'s disk quota and `pnpm install` (issue #180).** The session-storage mount is small — observed **1GB** — and `AWS::BedrockAgentCore::Runtime`'s `SessionStorageConfigurationProperty` (checked in the CloudFormation resource spec and the `@aws/agentcore-cdk` schema) exposes only `mountPath`, no size/quota field, so the limit isn't configurable from `agentcore.config.ts`. On a repo the size of this one, `pnpm install`'s **virtual store** (`node_modules/.pnpm` — a symlink farm with one entry per resolved package, the actual bulk of `node_modules`) defaults to *inside the project directory*, i.e. onto that 1GB mount, and blows the quota with `ENOSPC` even though the container's root filesystem has several GB free. pnpm's content-addressable *store* was already fine — it lives under `HOME` (`/root`, root fs) — only the virtual store needed to move. `server.js` sets `npm_config_virtual_store_dir` (pnpm's env-var form of `--virtual-store-dir`) to `$HOME/.pnpm-virtual-store` in the spawned `claude` process's env, so any `pnpm install` Claude Code runs lands `node_modules/.pnpm` on the root fs while `/mnt/workspace` keeps holding only the git clone (source-only, as the issue's Option 2 suggested) — no separate re-clone under `/root` needed. `setupWorkspace` already deletes and re-clones the repo on every run, so nothing that would benefit from mount persistence is lost. `setupWorkspace` also logs `df -h /mnt/workspace` right after cloning, so a future quota regression shows up in CloudWatch instead of only surfacing as an `ENOSPC` deep inside `pnpm install`.
 
 Payload shape (sent by `agent-webhook-invoke-claude`):
 
@@ -49,23 +49,23 @@ Payload shape (sent by `agent-webhook-invoke-claude`):
 }
 ```
 
-The Bedrock model is `ANTHROPIC_MODEL` (default `us.anthropic.claude-sonnet-5`), overridable via the runtime's `envVars` in `agentcore.json` — no code change to bump it.
+The Bedrock model is `ANTHROPIC_MODEL` (default `us.anthropic.claude-sonnet-5`), overridable via the runtime's `envVars` in `agentcore.config.ts` — no code change to bump it.
 
 ### The AgentCore Browser tool (issue #183)
 
-Claude Code speaks MCP natively but has no built-in browser tool, so `runManagedJob` gives it one for the duration of each job via [`browser-mcp.js`](../agent/default/app/ClaudeCode/browser-mcp.js):
+Claude Code speaks MCP natively but has no built-in browser tool, so `runManagedJob` gives it one for the duration of each job via [`browser-mcp.js`](../web/amplify/agentcore/ClaudeCode/browser-mcp.js):
 
 1. **Start a session.** `new Browser({ region }).startSession({ timeout: 28800 })` (the `bedrock-agentcore` npm SDK) starts an AgentCore Browser session on the AWS-managed default browser (8h timeout — long enough for the multi-hour jobs described above).
 2. **Sign a CDP endpoint.** `browser.generateWebSocketUrl()` returns a `wss://` URL plus SigV4 auth headers for the browser's Chrome DevTools Protocol endpoint (same signing the harness's `agentcore_browser` tool call uses under the hood).
 3. **Wrap it in an MCP server.** Rather than teaching Claude Code raw CDP, `@playwright/mcp` (a pinned dependency, not `npx`'d at runtime) is pointed at that endpoint via `--cdp-endpoint`/`--cdp-header` — it becomes a thin MCP wrapper over the already-running remote browser instead of launching its own local Chromium.
-4. **Load it into the CLI.** The `{ mcpServers: { "agentcore-browser": { command, args }, ... } }` config — merged with the gateway entry below by [`mcp-config.js`](../agent/default/app/ClaudeCode/mcp-config.js) into one file — is written to a `.mcp-agentcore.json` in the job's `workDir` and passed to `claude -p` via `--mcp-config`, so the model gets `browser_navigate`/`browser_click`/`browser_type`/`browser_screenshot`/etc. through the standard MCP tool-call surface.
+4. **Load it into the CLI.** The `{ mcpServers: { "agentcore-browser": { command, args }, ... } }` config — merged with the gateway entry below by [`mcp-config.js`](../web/amplify/agentcore/ClaudeCode/mcp-config.js) into one file — is written to a `.mcp-agentcore.json` in the job's `workDir` and passed to `claude -p` via `--mcp-config`, so the model gets `browser_navigate`/`browser_click`/`browser_type`/`browser_screenshot`/etc. through the standard MCP tool-call surface.
 5. **Tear down.** `runManagedJob`'s `finally` stops the session (`browser.stopSession()`) and deletes the temp MCP config after the job (success or failure) — one browser session per job, not shared across concurrent runs on the same microVM.
 
 If the session fails to start (e.g. a role that predates the browser connection), `runManagedJob` logs and continues without a browser entry rather than failing the whole job — a missing browser tool is better than no Claude Code run at all.
 
 ### Gateway-routed MCP tools (#339)
 
-Every other MCP tool this runtime can reach goes through the AgentCore gateway — never a direct/container-local connection — exactly like the browser `HarnessAgent` chat path (`buildTools` in `web/lib/harness-agent.ts`, #338). [`gateway-mcp.js`](../agent/default/app/ClaudeCode/gateway-mcp.js) builds the entry:
+Every other MCP tool this runtime can reach goes through the AgentCore gateway — never a direct/container-local connection — exactly like the browser `HarnessAgent` chat path (`buildTools` in `web/lib/harness-agent.ts`, #338). [`gateway-mcp.js`](../web/amplify/agentcore/ClaudeCode/gateway-mcp.js) builds the entry:
 
 ```jsonc
 "agentcore-gateway": {
@@ -77,11 +77,11 @@ Every other MCP tool this runtime can reach goes through the AgentCore gateway �
 
 `AGENTCORE_GATEWAY_ENDPOINT` is a runtime env var (wired in `backend.ts`, same value the browser harness path uses); `cognitoAccessToken` is the `payload` field above, relayed verbatim by `web/lib/claude-code-agent.ts` from the signed-in chat user's session — **the ACCESS token, not the ID token** (#327: the gateway's `CUSTOM_JWT` authorizer 403s an ID token with `insufficient_scope`). If either is missing (e.g. the `@agentcore-claude` webhook path, which has no signed-in browser user — see #340), the entry is simply omitted and this run gets no gateway MCP tools, same as before this issue. The container never constructs a `{sub, groups}` claims blob itself — Cedar reads `cognito:groups` straight off the relayed JWT, identically to the harness path.
 
-This is wired at the infrastructure level in [`agentcore.json`](../agent/default/agentcore/agentcore.json)'s `ClaudeCode` runtime entry:
+This is wired at the infrastructure level in [`agentcore.config.ts`](../web/amplify/agentcore/agentcore.config.ts)'s `ClaudeCode` runtime entry:
 
-```jsonc
-"connections": [
-  { "id": "browser", "to": { "type": "browser" } }
+```ts
+connections: [
+  { id: 'browser', to: { type: 'browser' } },
 ]
 ```
 
@@ -89,28 +89,28 @@ This is wired at the infrastructure level in [`agentcore.json`](../agent/default
 
 ## How it's provisioned (`AgentCoreApplication`)
 
-The runtime is declared in [`agent/default/agentcore/agentcore.json`](../agent/default/agentcore/agentcore.json) under `runtimes[]`:
+The runtime is declared in [`agentcore.config.ts`](../web/amplify/agentcore/agentcore.config.ts) under `runtimes[]`:
 
-```jsonc
+```ts
 {
-  "name": "ClaudeCode",
-  "build": "Container",
-  "codeLocation": "app/ClaudeCode",   // resolved relative to agent/default/
-  "dockerfile": "Dockerfile",
-  "entrypoint": "server.js",
-  "protocol": "HTTP",
-  "networkMode": "PUBLIC",
-  "filesystemConfigurations": [
-    { "sessionStorage": { "mountPath": "/mnt/workspace" } }
+  name: 'ClaudeCode',
+  build: 'Container',
+  codeLocation: resolve(__dirname, 'ClaudeCode'),   // absolute path — decoupled from the agentcore.json sentinel
+  dockerfile: 'Dockerfile',
+  entrypoint: 'server.js',
+  protocol: 'HTTP',
+  networkMode: 'PUBLIC',
+  filesystemConfigurations: [
+    { sessionStorage: { mountPath: '/mnt/workspace' } },
   ],
-  "envVars": [{ "name": "ANTHROPIC_MODEL", "value": "us.anthropic.claude-sonnet-5" }]
+  envVars: [{ name: 'ANTHROPIC_MODEL', value: 'us.anthropic.claude-sonnet-5' }],
 }
 ```
 
-The real **`AgentCoreApplication`** L3 construct from `@aws/agentcore-cdk` — the same one that now creates the harness and memory — turns that entry into infrastructure. `backend.ts` passes `projectSpec.runtimes` straight into the construct via the thin wrapper ([`web/amplify/constructs/agentCoreApplication.ts`](../web/amplify/constructs/agentCoreApplication.ts)):
+The real **`AgentCoreApplication`** L3 construct from `@aws/agentcore-cdk` — the same one that now creates the harness and memory — turns that entry into infrastructure. `backend.ts` passes `runtimes` straight into the construct via the thin wrapper ([`web/amplify/constructs/agentCoreApplication.ts`](../web/amplify/constructs/agentCoreApplication.ts)):
 
 ```
-agentcore.json runtimes[] ─▶ AgentCoreApplication (props.runtimes)
+agentcore.config.ts runtimes[] ─▶ AgentCoreApplication (props.runtimes)
                                │  for each runtime:
                                │    CodeBuild builds the ARM64 image (codeLocation + Dockerfile)
                                │    └▶ pushes to ECR
@@ -119,12 +119,12 @@ agentcore.json runtimes[] ─▶ AgentCoreApplication (props.runtimes)
                             app.environments.get("ClaudeCode").runtime.runtimeArn
 ```
 
-Because the construct runs at CDK **synth** time inside the Amplify stack, the runtime's ARN is a same-stack token — no post-deploy control-plane lookup. `backend.ts` reads it via the wrapper's `runtimeArn('ClaudeCode')` accessor and threads it into two places ([backend.ts](../web/amplify/backend.ts) ~line 327):
+Because the construct runs at CDK **synth** time inside the Amplify stack, the runtime's ARN is a same-stack token — no post-deploy control-plane lookup. `backend.ts` reads it via the wrapper's `runtimeArn('ClaudeCode')` accessor and threads it into two places ([backend.ts](../web/amplify/backend.ts)):
 
 - The `agent-webhook-invoke-claude` Lambda's **`CLAUDE_CODE_RUNTIME_ARN`** env var.
 - An **SSM parameter** `/agentcore/<stackName>/claude_code_runtime_arn` (for out-of-band tooling; cross-stack exports are stripped — see the export note in `backend.ts`).
 
-Physical names follow the construct's `${projectName}_${name}` scheme (with `projectName` made unique per deployment), so the runtime is `default_web_<branch>_ClaudeCode` and concurrent branches/sandboxes don't collide. Runtimes are optional: if `agentcore.json` has no `ClaudeCode` runtime, `AGENTCORE_CLAUDE_CODE_RUNTIME_ARN` resolves to `''` and every consumer tolerates the empty ARN (the invoke Lambda throws a clean *"runtime not deployed on this branch"* at call time rather than failing synth).
+Physical names follow the construct's `${projectName}_${name}` scheme (with `projectName` made unique per deployment), so the runtime is `default_web_<branch>_ClaudeCode` and concurrent branches/sandboxes don't collide. Runtimes are optional: if `agentcore.config.ts` has no `ClaudeCode` runtime, `AGENTCORE_CLAUDE_CODE_RUNTIME_ARN` resolves to `''` and every consumer tolerates the empty ARN (the invoke Lambda throws a clean *"runtime not deployed on this branch"* at call time rather than failing synth).
 
 > The `agentcore_code_interpreter` sandbox tool was removed (#191); Claude Code runs shell commands directly in the container. The container is a Runtime, **not** a harness — the CMD (`node server.js`) is honored as-is.
 
@@ -138,7 +138,7 @@ The CLI invocation changed from `--output-format json` (one result object at the
 
 ### Event shape — matching the harness exactly
 
-[`memory.js`](../agent/default/app/ClaudeCode/memory.js) translates each `stream-json` line into the same shape the harness SDK writes: a `CreateEvent` call whose `payload[0].conversational` is `{ role, content: { text: JSON.stringify(contentBlocks) } }`, where `contentBlocks` is a Bedrock Converse `ContentBlock[]`:
+[`memory.js`](../web/amplify/agentcore/ClaudeCode/memory.js) translates each `stream-json` line into the same shape the harness SDK writes: a `CreateEvent` call whose `payload[0].conversational` is `{ role, content: { text: JSON.stringify(contentBlocks) } }`, where `contentBlocks` is a Bedrock Converse `ContentBlock[]`:
 
 | `stream-json` block | Converse block written |
 |---|---|
@@ -155,7 +155,7 @@ This is exactly the shape [`list-session-messages/handler.ts`](../web/amplify/fu
 
 - **Session id**: `InvokeAgentRuntime` forwards `runtimeSessionId` to the container as the `X-Amzn-Bedrock-AgentCore-Runtime-Session-Id` request header (not in the JSON body); `server.js` reads it via `req.get(...)`, falling back to `payload.runId`. This is the same id `agent-webhook-invoke-claude` already sets to the Step Function's `runId`, so a GitHub-triggered run's memory events land under the exact session id `?sessionId=<runId>` opens in the chat UI (see the initial-comment link in [`agent-webhook-post-comment/handler.ts`](../web/amplify/functions/agent-webhook-post-comment/handler.ts)).
 - **Actor id**: hardcoded `'default'`, matching `list-session-messages`/`harness-agent.ts` (memory is keyed by agent name, not per-GitHub-user identity).
-- **Memory id/region**: the runtime discovers these via `AGENTCORE_MEMORY_ID`/`AGENTCORE_MEMORY_REGION` env vars, set in [`backend.ts`](../web/amplify/backend.ts) through a new `agentCoreApp.addRuntimeEnvironmentVariable('ClaudeCode', ...)` accessor — the memory id is a deploy-time CDK token, so it can't be hardcoded in `agentcore.json`'s static `envVars`.
+- **Memory id/region**: the runtime discovers these via `AGENTCORE_MEMORY_ID`/`AGENTCORE_MEMORY_REGION` env vars, set in [`backend.ts`](../web/amplify/backend.ts) through a new `agentCoreApp.addRuntimeEnvironmentVariable('ClaudeCode', ...)` accessor — the memory id is a deploy-time CDK token, so it can't be hardcoded in `agentcore.config.ts`'s static `envVars`.
 - **IAM**: `backend.ts` grants the runtime's execution role `bedrock-agentcore:CreateEvent` on the memory ARN, guarded on both the runtime and the memory being deployed on the branch (mirrors the `states:SendTask*` grant pattern already used for the callback path).
 - **Failure mode**: every `CreateEvent` call is best-effort — a failure is logged and swallowed (`memory.js`), never thrown. Memory persistence must never fail, delay, or retry into the actual Claude Code run.
 
@@ -176,7 +176,7 @@ The control plane sends this cancel payload via `InvokeAgentRuntime` with `runti
 
 ## Detecting an ask-for-input final message (issue #185)
 
-[`detect-awaiting-input.js`](../agent/default/app/ClaudeCode/detect-awaiting-input.js) exports a pure `detectAwaitingInput(resultText)` helper that inspects the CLI's final `result` text (the same string `runClaudeCode` resolves as the run's return value) and returns `{ awaiting: boolean, question?: string }`. The signal it keys on: `stream-json` has no distinct "asking for input" event — an ask-for-input turn is just a normal `assistant` text block — so the only concrete, always-present post-hoc signal is the final message's own text ending in a question mark; the extracted `question` is that text's last non-empty line (covering the common "here are the options... which one?" shape). It's a heuristic that errs toward false negatives (a missed ask just behaves as a normal completion, as today).
+[`detect-awaiting-input.js`](../web/amplify/agentcore/ClaudeCode/detect-awaiting-input.js) exports a pure `detectAwaitingInput(resultText)` helper that inspects the CLI's final `result` text (the same string `runClaudeCode` resolves as the run's return value) and returns `{ awaiting: boolean, question?: string }`. The signal it keys on: `stream-json` has no distinct "asking for input" event — an ask-for-input turn is just a normal `assistant` text block — so the only concrete, always-present post-hoc signal is the final message's own text ending in a question mark; the extracted `question` is that text's last non-empty line (covering the common "here are the options... which one?" shape). It's a heuristic that errs toward false negatives (a missed ask just behaves as a normal completion, as today).
 
 **Wired into the callback path (increment 2):** in `server.js`'s callback (`taskToken`) branch, once `runManagedJob` resolves with the run's final text, `detectAwaitingInput(finalText)` runs before the `SendTaskSuccess` call. When `awaiting` is `true`:
 - a `awaiting_input detected: <question>` line is logged, and
@@ -278,7 +278,7 @@ A synchronous `LambdaInvoke` bounded the whole run at Lambda's **15-minute** har
 
 1. The task passes `sfn.JsonPath.taskToken` in the Lambda payload and **pauses** — its 3-hour `taskTimeout` (the state machine timeout is raised to 4 h so the task-level timeout, not the execution timeout, surfaces to `Catch`) is the new upper bound, matching AgentCore's multi-hour session limit.
 2. The `InvokeClaude` Lambda forwards that token to the runtime, waits only for a **quick "job accepted" ack**, and returns. Its function timeout drops from 840 s to 60 s — it no longer awaits the job.
-3. The runtime ([`server.js`](../agent/default/app/ClaudeCode/server.js)) sees the `taskToken`, immediately replies `200 { started: true }`, and runs Claude Code **in the background**. When the job finishes it calls `SendTaskSuccess` (output reshaped into the `$.agentResult.Output.Message.Content` shape) — or `SendTaskFailure` on a non-zero CLI exit — **resuming the paused task itself**.
+3. The runtime ([`server.js`](../web/amplify/agentcore/ClaudeCode/server.js)) sees the `taskToken`, immediately replies `200 { started: true }`, and runs Claude Code **in the background**. When the job finishes it calls `SendTaskSuccess` (output reshaped into the `$.agentResult.Output.Message.Content` shape) — or `SendTaskFailure` on a non-zero CLI exit — **resuming the paused task itself**.
 
 So Step Functions does **not** poll, and the Lambda does not block for the job's duration: the runtime pushes the result back over the task token when it's done. Without a `taskToken` the runtime keeps its old synchronous behavior (used by the direct-invoke smoke test).
 

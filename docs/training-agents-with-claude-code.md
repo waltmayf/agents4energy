@@ -128,7 +128,7 @@ the trainee disciplines you too.
    (cross-link it), make the change, and verify it against the same gate the
    trainee must pass.
 6. **Redeploy and confirm the fix is live.** The system prompt is baked into the
-   harness at deploy (`agentcore deploy` / the `harnessSpecs` in
+   harness at deploy (`npx ampx sandbox --once` / the inlined `HarnessSpec` in
    `web/amplify/backend.ts`), *not* runtime-injected — so a prompt change only
    takes effect after a deploy. Confirm the harness resource actually updated
    (CloudFormation `UPDATE_COMPLETE` on `…HarnessMyHarness…`) before re-testing.
@@ -137,7 +137,7 @@ the trainee disciplines you too.
 ## Gotchas learned the hard way
 
 - **The prompt is deployed, not live-edited.** Editing
-  `agent/default/app/MyHarness/system-prompt.md` changes nothing until the
+  `web/amplify/agentcore/MyHarness/system-prompt.md` changes nothing until the
   Amplify/AgentCore stack redeploys and the `CfnHarness` resource updates.
   Verify the deploy touched the harness resource, or you'll test the old prompt.
 - **`SUCCEEDED` ≠ success.** The webhook Step Function catches failures into a

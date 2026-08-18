@@ -1,15 +1,15 @@
 # AG-UI-native AgentCore Runtime (`AguiAgent`)
 
-Source: [`agent/default/app/AguiAgent/`](../agent/default/app/AguiAgent/).
+Source: [`web/amplify/agentcore/AguiAgent/`](../web/amplify/agentcore/AguiAgent/).
 
 Issue #176's premise: the harness's native handler (`MyHarness`) only emits Bedrock **Converse** events, so the frontend has to translate those into AG-UI events itself (`web/lib/converse-to-agui.ts`) to make [CopilotKit](https://www.copilotkit.ai/) / AG-UI-based UIs work with it. `AguiAgent` is a second, independent AgentCore Runtime that emits [AG-UI protocol](https://docs.ag-ui.com/introduction) events **natively** over the wire — no translation layer needed by a frontend built against it.
 
 This does **not** replace anything:
 
-- `MyHarness` (`agent/default/app/MyHarness/`) — the Bedrock Converse harness the `/chat` page uses today — is untouched.
-- `ClaudeCode` (`agent/default/app/ClaudeCode/`) — the `@agentcore-claude` GitHub runtime — is untouched.
+- `MyHarness` (`web/amplify/agentcore/MyHarness/`) — the Bedrock Converse harness the `/chat` page uses today — is untouched.
+- `ClaudeCode` (`web/amplify/agentcore/ClaudeCode/`) — the `@agentcore-claude` GitHub runtime — is untouched.
 
-`AguiAgent` is registered as a third, additional entry in `agentcore.json`'s `runtimes[]` and in `web/amplify/backend.ts`'s runtime wiring, following the same additive pattern `ClaudeCode` uses.
+`AguiAgent` is registered as a third, additional entry in `agentcore.config.ts`'s `runtimes[]` and in `web/amplify/backend.ts`'s runtime wiring, following the same additive pattern `ClaudeCode` uses.
 
 ## How it's built
 
@@ -22,9 +22,9 @@ Per [AWS's "Deploy AG-UI servers in AgentCore Runtime" guide](https://docs.aws.a
 | `Dockerfile` | `node:22-bookworm-slim`, forced `linux/arm64` (the runtime contract requires ARM64); `tsc` compiles `server.ts`/`memory.ts` to `dist/`, `CMD ["node", "dist/server.js"]` |
 | `package.json` | `@strands-agents/sdk`, `@ag-ui/aws-strands`, `@ag-ui/core`, `@ag-ui/encoder`, `express`, `cors` |
 
-`agentcore.json` sets `"protocol": "AGUI"` on the runtime entry — this is what tells AgentCore Runtime to proxy the container as an AG-UI server (SSE over `/invocations`) rather than a plain HTTP JSON handler.
+`agentcore.config.ts` sets `protocol: 'AGUI'` on the runtime entry — this is what tells AgentCore Runtime to proxy the container as an AG-UI server (SSE over `/invocations`) rather than a plain HTTP JSON handler.
 
-The Bedrock model is `BEDROCK_MODEL_ID` (default `us.anthropic.claude-sonnet-5`), overridable via the runtime's `envVars` in `agentcore.json` — no code change to bump it.
+The Bedrock model is `BEDROCK_MODEL_ID` (default `us.anthropic.claude-sonnet-5`), overridable via the runtime's `envVars` in `agentcore.config.ts` — no code change to bump it.
 
 ## Memory persistence
 

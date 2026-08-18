@@ -1,6 +1,8 @@
-# AgentCore provisioning: the real `AgentCoreApplication` construct
+# AgentCore provisioning: the `AgentCoreApplication` construct
 
-`web/amplify/backend.ts` provisions all AgentCore resources — memory, the harness, the ClaudeCode runtime, and the MCP gateway — at CDK synth time, so their ARNs are same-stack tokens that flow straight into Lambda env vars and `amplify_outputs.json`. Production deploys no longer run `agentcore deploy`; this Amplify stack owns the resources. (`agentcore.json` is still the source of truth for memories/runtimes/gateways and stays usable for local `agentcore dev`/`validate`.)
+`web/amplify/backend.ts` provisions all AgentCore resources — memory, the harness, the AgentCore Runtimes (ClaudeCode, AguiAgent), and the MCP gateway — at CDK synth time, in the same Amplify deploy as everything else, so their ARNs are same-stack tokens that flow straight into Lambda env vars and `amplify_outputs.json`. There is no separate `agentcore deploy`/`agentcore status`/`agentcore dev` CLI step; a single `npx ampx sandbox --once` (via `scripts/build.sh`) owns and deploys these resources directly.
+
+Config is typed TypeScript, not a hand-edited `agentcore.json`: `web/amplify/agentcore/agentcore.config.ts` exports `memories`, `runtimes`, `policyEngines`, and `gateways` consts, which `backend.ts` imports and feeds to the construct. The `agentcore.json` file that still lives alongside it is a near-empty, required-but-inert **sentinel** (see [`web/amplify/agentcore/README.md`](../web/amplify/agentcore/README.md)) — `@aws/agentcore-cdk`'s `findConfigRoot()` throws at synth unless a directory literally named `agentcore/` contains a file literally named `agentcore.json`; it only checks that the file *exists* and never reads its contents. Do not delete it, and do not put real config back into it.
 
 ## The construct
 
@@ -8,14 +10,15 @@
 
 | Resource | Created by |
 |---|---|
-| Memories (`MyHarnessMemory`) | `AgentCoreApplication` (from `agentcore.json` `memories`) |
-| Runtimes (`ClaudeCode`) | `AgentCoreApplication` (from `agentcore.json` `runtimes` — CodeBuild → ECR → `CfnRuntime`) |
-| Harness (`MyHarness`) + its execution role | `AgentCoreApplication` (from the inlined `HarnessSpec` in `backend.ts`) |
-| MCP Gateway (`default-gateway`) | `AgentCoreMcp` (from `agentcore.json` `agentCoreGateways`) |
+| Memories (`MyHarnessMemory`) | `AgentCoreApplication` (from `agentcore.config.ts` `memories`) |
+| Runtimes (`ClaudeCode`, `AguiAgent`) | `AgentCoreApplication` (from `agentcore.config.ts` `runtimes` — CodeBuild → ECR → `CfnRuntime`) |
+| Policy engines (`DefaultCedar`) | `AgentCoreApplication` (from `agentcore.config.ts` `policyEngines`) |
+| Harness (`MyHarness`) + its execution role | `AgentCoreApplication` (from the inlined `HarnessSpec` literal in `backend.ts`) |
+| MCP Gateway | `AgentCoreMcp` (from `agentcore.config.ts` `gateways`, passed to the wrapper as `mcpSpec.agentCoreGateways`) |
 
-The wrapper keeps the accessor API `backend.ts` relies on (`harnessArn(name)`, `memoryArn(name)`, `runtimeArn(name)`, `gatewayArn(name)`, …), each reading a CDK token off the underlying construct's `harnesses` / `memories` / `environments` maps (and `AgentCoreMcp.gateways`).
+The wrapper keeps the accessor API `backend.ts` relies on (`harnessArn(name)`, `memoryArn(name)`, `runtimeArn(name)`, `gatewayArn(name)`, `policyEngineArn(name)`, …), each reading a CDK token off the underlying construct's `harnesses` / `memories` / `environments` / `policyEngines` maps (and `AgentCoreMcp.gateways`).
 
-Harness specs are inlined in `backend.ts` (not `agentcore.json`) as literal `HarnessSpec`s so the system prompt (read from `system-prompt.md`) and any authorizer can be injected at synth. Each is wrapped as a `HarnessDeployment` (`{ spec, harnessDir }`) — a full `spec` is what makes the construct emit the `AWS::BedrockAgentCore::Harness` resource (not just an IAM role).
+Harness specs are inlined in `backend.ts` (not `agentcore.config.ts`) as literal `HarnessSpec`s so the system prompt (read from `web/amplify/agentcore/MyHarness/system-prompt.md`) and the Cognito JWT authorizer can be injected at synth, per-deployment. Each is wrapped as a `HarnessDeployment` (`{ spec, harnessDir }`) — a full `spec` is what makes the construct emit the `AWS::BedrockAgentCore::Harness` resource (not just an IAM role).
 
 ### `@aws/agentcore-cdk` version requirement
 
@@ -23,13 +26,19 @@ First-class harness creation (the `AWS::BedrockAgentCore::Harness` resource) lan
 
 `HarnessSpec` (the `harness.json` shape) key fields: `model: { provider: 'bedrock'|'open_ai'|'gemini'|'lite_llm', modelId, apiFormat? }` (note `provider`+`modelId`, **not** `bedrockModelConfig.modelId`); `systemPrompt` (always literal text — file-backed prompts live in `system-prompt.md` in `harnessDir`); `tools: [{ type, name, config? }]`; `memory: { mode: 'managed'|'existing'|'disabled', name?/arn? }`; `truncation: { strategy, config? }`. Harness names are `≤40` chars (tighter than memory/runtime's 48).
 
-The package ships `require`-only exports (no ESM condition), so the wrapper loads its value bindings via `createRequire` while importing the types normally. It also calls `setSessionProjectRoot(agent/default)` so the construct's `findConfigRoot()` resolves `codeLocation`s relative to the AgentCore project root rather than `web/`.
+The package ships `require`-only exports (no ESM condition), so the wrapper loads its value bindings via `createRequire` while importing the types normally.
+
+### The `setSessionProjectRoot` / sentinel-`agentcore.json` mechanism
+
+Both `RealAgentCoreApplication` (for its runtime/harness container builds) and `AgentCoreMcp` call the SDK's `findConfigRoot()`, which walks up from `process.cwd()` looking for a directory literally named `agentcore/` containing a file literally named `agentcore.json` (existence-only check — contents are never read). Under `ampx sandbox` the cwd is `web/`, not `web/amplify/`, so it would never find `web/amplify/agentcore/` on its own. The wrapper calls `setSessionProjectRoot(projectRoot)` — where `projectRoot` is `web/amplify` (`agentcoreProjectRoot` from `agentcore.config.ts`, i.e. the parent of the `agentcore/` sentinel dir) — to point `findConfigRoot()` there explicitly, mirroring what the `agentcore` CLI does after `init`.
+
+Runtime `codeLocation`s in `agentcore.config.ts` are **absolute paths** (built via `resolve(dirname(import.meta.url), ...)`), so container build contexts (`ClaudeCode/`, `AguiAgent/`) are decoupled from wherever the `agentcore.json` sentinel happens to live and unaffected by `setSessionProjectRoot`.
 
 ## Physical names and the fixed-name migration gotcha
 
 The construct derives physical names as `${projectName}_${name}`, and `backend.ts` makes `projectName` unique per deployment (`default_web_<branch>`), so concurrent branches/sandboxes don't collide. The **memory**, **harness**, and **memory execution role** all get an AgentCore-generated random suffix on top of that, so a construct-tree change (new logical ID, same base name) replaces them cleanly.
 
-The **harness execution role is the exception**: `AgentCoreHarnessRole` gives it the bare `${projectName}_${name}` name with **no suffix**. So when the construct tree changes (e.g. this migration off the custom wrapper), its logical ID changes while its physical name stays fixed — and CloudFormation's default create-before-delete on the in-place update fails with **"`default_web_<branch>_MyHarness` already exists."**
+The **harness execution role is the exception**: `AgentCoreHarnessRole` gives it the bare `${projectName}_${name}` name with **no suffix**. So when the construct tree changes (e.g. a migration that alters the CDK construct path to the harness), its logical ID changes while its physical name stays fixed — and CloudFormation's default create-before-delete on the in-place update fails with **"`default_web_<branch>_MyHarness` already exists."**
 
 **One-time fix — two-phase deploy** (only needed when an *existing* stack's harness logical ID changes; fresh stacks are fine):
 
