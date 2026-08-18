@@ -19,8 +19,8 @@
 # enabled, so CloudFormation empties it automatically before deletion.
 #
 # Does NOT touch AgentCore (harness, gateway, memory). Those are deployed once to
-# a single shared "default" target (agent/default/agentcore/aws-targets.json) —
-# not per branch — so branch/PR teardown must never tear them down.
+# a single shared "default" target (see web/amplify/agentcore/) — not per
+# branch — so branch/PR teardown must never tear them down.
 #
 # NOTE: `pull_request` and `delete` events run the workflow definition from the
 # repo's DEFAULT branch, so this only takes effect once merged to main.
