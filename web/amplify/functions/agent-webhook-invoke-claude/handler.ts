@@ -2,12 +2,15 @@ import { BedrockAgentCoreClient, InvokeAgentRuntimeCommand } from '@aws-sdk/clie
 import { CognitoIdentityProviderClient, InitiateAuthCommand } from '@aws-sdk/client-cognito-identity-provider';
 import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
 import { appendLog } from '../_shared/liveTail';
+import { mintInstallationToken } from '../_shared/githubAppToken';
 
 const REGION = process.env.AWS_REGION ?? 'us-east-1';
 const CLAUDE_CODE_RUNTIME_ARN = process.env.CLAUDE_CODE_RUNTIME_ARN ?? '';
 const SERVICE_WEBHOOK_USER_POOL_CLIENT_ID = process.env.SERVICE_WEBHOOK_USER_POOL_CLIENT_ID ?? '';
 const SERVICE_WEBHOOK_EMAIL_SSM_PATH = process.env.SERVICE_WEBHOOK_EMAIL_SSM_PATH ?? '';
 const SERVICE_WEBHOOK_PASSWORD_SSM_PATH = process.env.SERVICE_WEBHOOK_PASSWORD_SSM_PATH ?? '';
+const GITHUB_APP_ID = process.env.GITHUB_APP_ID ?? '';
+const GITHUB_APP_PRIVATE_KEY_SECRET_ARN = process.env.GITHUB_APP_PRIVATE_KEY_SECRET_ARN ?? '';
 
 // The Claude Code runtime authorizes with AWS_IAM (the default when a runtime
 // has no CUSTOM_JWT authorizer), so the SDK signs InvokeAgentRuntime with this
@@ -54,6 +57,34 @@ async function mintServiceWebhookAccessToken(log: (msg: string) => void): Promis
   } catch (err) {
     log(`failed to mint a service-webhook access token; continuing without gateway MCP tools: ${err instanceof Error ? err.message : String(err)}`);
     return undefined;
+  }
+}
+
+/**
+ * Mints a fresh (seconds-old) GitHub App installation token at invoke time,
+ * instead of relying on the ~1h token minted once at PostInitialComment and
+ * threaded through `$.initialComment.githubToken`. Fixes the monitor-loop
+ * case where a run re-invokes hours after the initial comment and the
+ * threaded token has long since expired (issue #444).
+ *
+ * Best-effort: on any failure (env not configured on this branch, a
+ * transient GitHub/Secrets Manager error, ...) falls back to the threaded
+ * token — same behavior as before this fix — rather than failing the run.
+ */
+async function mintFreshGithubToken(
+  repo: string | null,
+  fallbackToken: string | null | undefined,
+  log: (msg: string) => void,
+): Promise<string | undefined> {
+  if (!repo || !GITHUB_APP_ID || !GITHUB_APP_PRIVATE_KEY_SECRET_ARN) {
+    return fallbackToken ?? undefined;
+  }
+  try {
+    const { token } = await mintInstallationToken(repo, GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY_SECRET_ARN);
+    return token;
+  } catch (err) {
+    log(`failed to mint a fresh GitHub token; falling back to the threaded token: ${err instanceof Error ? err.message : String(err)}`);
+    return fallbackToken ?? undefined;
   }
 }
 
@@ -104,6 +135,10 @@ export const handler = async (input: InvokeClaudeInput): Promise<{ started: true
     void log(logGroupName, logStreamName, `[${runId}] ${msg}`);
   });
 
+  const freshGithubToken = await mintFreshGithubToken(repo, githubToken, (msg) => {
+    void log(logGroupName, logStreamName, `[${runId}] ${msg}`);
+  });
+
   // The runtime's server.js reads these fields (see web/amplify/agentcore/ClaudeCode/server.js).
   // When `taskToken` is present the runtime runs the job in the background and
   // resumes this paused task itself; the HTTP ack below is just "job accepted".
@@ -115,7 +150,7 @@ export const handler = async (input: InvokeClaudeInput): Promise<{ started: true
     prompt,
     repo: repo ?? undefined,
     issueNumber: issueNumber ?? undefined,
-    githubToken: githubToken ?? undefined,
+    githubToken: freshGithubToken,
     // AGENTS.md-derived system prompt (fetched by PostInitialComment), passed
     // through so the runtime can append it to Claude Code's system prompt.
     systemAppend: agentsSystemPrompt ?? undefined,

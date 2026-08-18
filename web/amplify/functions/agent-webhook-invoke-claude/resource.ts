@@ -25,5 +25,12 @@ export const agentWebhookInvokeClaude = defineFunction({
     SERVICE_WEBHOOK_USER_POOL_CLIENT_ID: '',
     SERVICE_WEBHOOK_EMAIL_SSM_PATH: '',
     SERVICE_WEBHOOK_PASSWORD_SSM_PATH: '',
+    // GitHub App credentials (issue #444) — lets this Lambda mint a fresh
+    // installation token at invoke time instead of relying on the ~1h token
+    // threaded from PostInitialComment, which goes stale across monitor-loop
+    // re-invokes. Populated in backend.ts; empty on branches without the App
+    // configured, in which case the handler falls back to the threaded token.
+    GITHUB_APP_ID: process.env.GITHUB_APP_ID ?? '',
+    GITHUB_APP_PRIVATE_KEY_SECRET_ARN: process.env.GITHUB_APP_PRIVATE_KEY_SECRET_ARN ?? '',
   },
 });
