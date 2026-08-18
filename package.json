@@ -1,5 +1,5 @@
 {
-  "name": "agentcore-cli-agent",
+  "name": "agents4energy",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -20,7 +20,6 @@
   },
   "scripts": {
     "build": "bash scripts/build.sh",
-    "predeploy": "bash scripts/set-aws-targets.sh",
     "deploy": "pnpm run build",
     "deploy:web": "bash scripts/deploy-web.sh",
     "act:deploy": "bash scripts/act-deploy.sh",
@@ -29,18 +28,20 @@
     "act:deploy:draft:dryrun": "bash scripts/act-deploy.sh --draft -n",
     "setup:deploy-role": "npx tsx scripts/setup-deploy-role.ts",
     "fetch:e2e-config": "npx tsx scripts/fetch-e2e-config.ts",
-    "destroy": "pnpm --filter agent run destroy && (cd web && npx ampx delete --force)",
-    "clean": "pnpm --filter web exec rm -rf .next && pnpm --filter agentcore-cdk-app run clean && find . -name 'node_modules' -type d -prune -exec rm -rf {} + && rm -rf node_modules"
+    "destroy": "(cd web && npx ampx delete --force)",
+    "clean": "pnpm --filter web exec rm -rf .next && find . -name 'node_modules' -type d -prune -exec rm -rf {} + && rm -rf node_modules"
   },
   "dependencies": {
     "@agentcore/shared-types": "workspace:*"
   },
   "devDependencies": {
+    "@aws-crypto/sha256-js": "^5.2.0",
     "@aws-sdk/client-bedrock-agentcore": "^3.1065.0",
     "@aws-sdk/client-cognito-identity-provider": "^3.1065.0",
     "@aws-sdk/client-ssm": "^3.1075.0",
     "@aws-sdk/credential-providers": "^3.1081.0",
     "@octokit/rest": "^21.1.1",
+    "@smithy/signature-v4": "^5.1.1",
     "@types/node": "^25.9.3",
     "esbuild": "^0.28.0",
     "tsx": "^4.22.4",
