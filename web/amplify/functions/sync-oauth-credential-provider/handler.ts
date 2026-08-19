@@ -62,6 +62,7 @@ interface McpServerRecord {
   oauthInitialAccessTokenArn?: string;
   oauthRegistrationClientUri?: string;
   oauthRegistrationAccessTokenArn?: string;
+  oauthError?: string;
 }
 
 function unmarshalItem(image: unknown): McpServerRecord | undefined {
@@ -485,7 +486,15 @@ export const handler: DynamoDBStreamHandler = async (event) => {
     // set and no client_id exists yet. Idempotent — a row that already has
     // oauthClientId is handled by the normal sync path below. DCR writes its
     // results back, re-triggering this stream for the normal reconcile.
-    if (item.oauthDynamicRegistration && !item.oauthClientId) {
+    //
+    // The `!item.oauthError` guard breaks a failure loop: on a persistent
+    // registration failure the catch records oauthError, which is itself a
+    // MODIFY that would otherwise re-satisfy the flag/no-client_id condition and
+    // hammer the AS /register + AgentCore create/delete forever. A failed
+    // attempt therefore parks until the operator clears oauthError (e.g. by
+    // re-saving the row after fixing the discovery URL / initial access token),
+    // whose MODIFY then re-triggers DCR.
+    if (item.oauthDynamicRegistration && !item.oauthClientId && !item.oauthError) {
       await performDynamicRegistration(item);
       continue;
     }
