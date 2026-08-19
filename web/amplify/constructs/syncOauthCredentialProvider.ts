@@ -76,6 +76,21 @@ export class SyncOauthCredentialProvider extends Construct {
       resources: ['*'],
     }));
 
+    // CreateOauth2CredentialProvider provisions the provider *inside* the
+    // account's default token vault, and the control-plane checks
+    // CreateTokenVault/GetTokenVault on that vault even when it already exists
+    // (it's created idempotently on first use). Without these the very first
+    // provider create in a fresh account/sandbox fails with
+    // "not authorized to perform: bedrock-agentcore:CreateTokenVault on
+    // token-vault/default" — a gap that only surfaces at runtime, not at synth
+    // (caught deploying #449 into a clean sandbox). Scope to the default vault.
+    fn.addToRolePolicy(new PolicyStatement({
+      actions: ['bedrock-agentcore:CreateTokenVault', 'bedrock-agentcore:GetTokenVault'],
+      resources: [
+        `arn:aws:bedrock-agentcore:${Stack.of(this).region}:${Stack.of(this).account}:token-vault/default*`,
+      ],
+    }));
+
     // CreateOauth2CredentialProvider/UpdateOauth2CredentialProvider read an
     // EXTERNAL client secret using the caller's own credentials, so this
     // handler's role needs read access to whichever secret an McpServer row
