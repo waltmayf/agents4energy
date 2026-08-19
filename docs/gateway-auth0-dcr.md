@@ -21,12 +21,19 @@ Crucially:
 - **The gateway does no DCR itself, on either leg.** DCR is a capability of the *authorization server*, not the resource server. The gateway just validates whatever JWT arrives. Swapping the `discoveryUrl` from Cognito to Auth0 is what lets a *DCR-capable* authorization server sit behind the gateway — Auth0 is the piece that actually registers clients.
 - **DCR client IDs are dynamic**, so you cannot enumerate them into a static `allowedClients` list. The authorizer must instead validate on **`allowedAudience`** (and optionally `allowedScopes`) — every DCR-registered client requests the same API audience, so audience is the stable trust anchor.
 
-## Prerequisites in Auth0
+## Configure Auth0 to allow DCR (inbound)
 
-1. **An Auth0 tenant.** Its issuer base URL is `https://<tenant>.<region>.auth0.com/`; its OIDC discovery URL is `https://<tenant>.<region>.auth0.com/.well-known/openid-configuration`. That URL and the JWKS it points at must be reachable over HTTPS from the gateway's control plane.
-2. **Dynamic Client Registration enabled.** Turn on **OIDC Dynamic Application Registration** (tenant setting `enable_dynamic_client_registration`) and, if you want to restrict who can register, **promoted connections** + an **initial access token**/**software statement** policy (see "Trust model" below). With DCR on, Auth0 exposes the `/oidc/register` endpoint that MCP clients hit.
-3. **An API (resource server) with an identifier (audience).** Create an Auth0 **API** whose identifier is the audience the gateway will validate on — e.g. `https://gateway.<your-domain>/mcp`. Define the scopes/permissions the MCP tools map to.
-4. **A roles/groups claim** for tool governance. Cedar in this repo authorizes off `cognito:groups` (see below) — you'll add an Auth0 **Action** (or rule) that injects a namespaced custom claim such as `https://agents4energy/groups` into the access token, populated from the user's Auth0 roles.
+These are the concrete Auth0-side steps that make the gateway able to accept self-registering clients. Do them before the CDK swap below — the gateway's `discoveryUrl` has to point at a tenant that already has DCR and an API configured.
+
+1. **Have (or create) an Auth0 tenant.** Its issuer base URL is `https://<tenant>.<region>.auth0.com/`; its OIDC discovery URL is `https://<tenant>.<region>.auth0.com/.well-known/openid-configuration`. That URL and the JWKS it points at must be reachable over HTTPS from the gateway's control plane (they're public by default).
+
+2. **Create an API (resource server) whose identifier is the gateway audience.** In **Applications → APIs → Create API**, set the *Identifier* to the value the gateway will validate on — e.g. `https://gateway.<your-domain>/mcp`. This identifier is the `allowedAudience` in step 2 of the swap below. Define the permissions/scopes your MCP tools map to (e.g. `mcp:invoke`).
+
+3. **Turn on Dynamic Client Registration.** Enable the tenant flag `enable_dynamic_client_registration` (Management API `PATCH /api/v2/tenants/settings`, or **Settings → Advanced**). This exposes the `POST /oidc/register` endpoint ([RFC 7591](https://datatracker.ietf.org/doc/html/rfc7591)) that MCP clients (and this repo's outbound DCR flow, gap 1) hit to self-register. To keep registration from being fully anonymous, also set a **promoted connections** allow-list and require an **initial access token** or a signed **software statement** (see "Trust model" below).
+
+4. **Set a Default Audience = the API from step 2 — this is what closes the "audience gap".** Auth0 only mints a *JWT* access token (which the gateway can validate against JWKS) when the token request carries an `audience` naming that API; without it Auth0 returns an *opaque* token the `CUSTOM_JWT` authorizer rejects. Set the tenant **Default Audience** (Management API `PATCH /api/v2/tenants/settings` with `default_audience`, or **Settings → General → API Authorization Settings**) to the step-2 identifier so *every* authorization request — including ones from clients that don't know to send `audience` — gets a gateway-scoped JWT. This is a runtime tenant setting, no code change on either the gateway or the caller.
+
+5. **Emit a roles/groups claim for tool governance.** Cedar in this repo authorizes off `cognito:groups` (see "Remap Cedar" below). Add an Auth0 **Action** on the *post-login* / *credentials-exchange* trigger that injects a namespaced custom claim (e.g. `https://agents4energy/groups`) into the access token, populated from the user's Auth0 roles. Until this claim exists and Cedar is remapped to read it, every tool call fails closed.
 
 ## The swap, step by step
 
@@ -110,7 +117,9 @@ If disrupting the working Cognito-based internal auth is unattractive, stand up 
 
 ## What this does NOT change
 
-Outbound auth — the agent calling a *third-party* MCP server that requires OIDC — is a separate mechanism and is unaffected. That path is the `McpServer` row (`OAUTH_3LO` + `CUSTOM` vendor) → `sync-oauth-credential-provider` creates a `CustomOauth2` credential provider → `register-mcp-target-stream` attaches it as a gateway target, with per-user consent via the elicitation banner. See [docs/gateway-to-gateway-federation.md](gateway-to-gateway-federation.md) for the outbound/federation runbook. Note that outbound has **no** DCR either — creating a `CustomOauth2` provider requires a pre-issued `clientId`/`clientSecret` from the third party.
+Outbound auth — the agent calling a *third-party* MCP server that requires OIDC — is a separate mechanism and is unaffected by the inbound swap above. That path is the `McpServer` row (`OAUTH_3LO` + `CUSTOM` vendor) → `sync-oauth-credential-provider` creates a `CustomOauth2` credential provider → `register-mcp-target-stream` attaches it as a gateway target, with per-user consent via the elicitation banner. See [docs/gateway-to-gateway-federation.md](gateway-to-gateway-federation.md) for the outbound/federation runbook.
+
+Note the two DCR legs are independent: **inbound DCR** (this doc — our gateway *accepting* self-registering clients via Auth0) is config/docs-only, whereas **outbound DCR** (our app *self-registering* as a client against a DCR-capable third-party server, e.g. `mcp.shop`) is a code feature tracked in #449. Until #449 lands, the outbound path requires a pre-issued `clientId`/`clientSecret` from the third party; #449 adds the provider-first automatic `POST /oidc/register` flow so no manual client provisioning is needed.
 
 ## Rollback
 
