@@ -20,7 +20,7 @@ import { Observable, type Subscriber } from 'rxjs';
 import outputs from '../amplify_outputs.json';
 import { dedupeStoredEvents, eventsToAguiMessages, type StoredEvent } from './converse-to-agui';
 import { fetchActiveRun, upsertActiveRun, clearActiveRun } from './active-run';
-import { mergeActiveRunSnapshot } from './active-run-merge';
+import { isActiveRunStreaming, mergeActiveRunSnapshot } from './active-run-merge';
 import {
   createHarnessStreamState,
   translateHarnessStreamEvent,
@@ -190,6 +190,15 @@ export function messageText(m: Message): string {
 export class HarnessAgent extends AbstractAgent {
   private client: BedrockAgentCoreClient;
   private getConfig: () => HarnessAgentConfig;
+
+  /**
+   * True once `refreshHistory()` has set `isRunning = true` itself, from
+   * ActiveRun evidence, rather than a local `run()` (issue #451). Lets
+   * `refreshHistory()` tell "this tab's own genuine stream, never touch it"
+   * apart from "isRunning is true because polling said so, keep polling for
+   * when it ends" — both look like `isRunning === true` otherwise.
+   */
+  private remoteRunActive = false;
 
   constructor(opts: { threadId?: string; getConfig?: () => HarnessAgentConfig }) {
     super({ agentId: 'default', threadId: opts.threadId });
@@ -372,8 +381,25 @@ export class HarnessAgent extends AbstractAgent {
    * run's Observable, which runs run()'s teardown below (abort.abort()) and
    * completes the run — no RUN_ERROR, so the partial assistant message is
    * left in place rather than rendered as a failure.
+   *
+   * When the "responding" state was set by `refreshHistory()`'s ActiveRun
+   * detection instead (issue #451 — no local run() is in flight, so there is
+   * no Observable to detach), the only actionable "stop" available to this
+   * tab is to drop the ActiveRun row: it flips this view back to idle
+   * immediately rather than waiting for the row to go stale. It can't reach
+   * into whatever tab/webhook runtime is actually producing the turn, so the
+   * underlying job keeps running — same limitation InvokeHarness's stream
+   * itself has once its originating tab is gone.
    */
   abortRun(): void {
+    if (this.remoteRunActive) {
+      this.remoteRunActive = false;
+      this.isRunning = false;
+      const sessionId = this.threadId;
+      if (sessionId) void clearActiveRun(sessionId).catch(() => {});
+      this.setMessages([...this.messages]);
+      return;
+    }
     void this.detachActiveRun();
   }
 
@@ -387,9 +413,17 @@ export class HarnessAgent extends AbstractAgent {
    * run (or another tab) writes to the same AgentCore session; connect() only
    * runs on (re)mount, so without polling those messages surface only on reload.
    *
+   * Issue #451: also mirrors ActiveRun's live/streaming status into `isRunning`
+   * itself, so a turn arriving purely through this poll (a webhook run, another
+   * tab, or this tab after a reload mid-stream) shows the same "responding"
+   * state — Stop button included — as a turn streamed by this tab's own run().
+   * `remoteRunActive` distinguishes "isRunning because we set it from polling"
+   * from "isRunning because a genuine local run() is in flight", so the guard
+   * below only ever skips the latter.
+   *
    * Guards keep it safe to run on an interval:
-   *  - never applies while a live local turn is streaming (isRunning), so it
-   *    can't clobber optimistic/streamed messages not yet persisted to memory.
+   *  - never touches messages/isRunning while a genuine local run is streaming,
+   *    so it can't clobber optimistic/streamed messages not yet persisted.
    *  - only grows the transcript (applies when the fetched set is larger), so a
    *    persistence lag that momentarily returns fewer events can't wipe the
    *    messages the user is currently looking at.
@@ -397,15 +431,26 @@ export class HarnessAgent extends AbstractAgent {
    * Returns the number of messages shown afterwards, for idle-backoff bookkeeping.
    */
   async refreshHistory(): Promise<number> {
-    if (this.isRunning) return this.messages.length;
     const sessionId = this.threadId;
     if (!sessionId) return this.messages.length;
+    if (this.isRunning && !this.remoteRunActive) return this.messages.length;
 
-    const history = await loadHistory(sessionId);
-    // Re-check isRunning: a local turn may have started during the async fetch.
-    if (!this.isRunning && history.length > this.messages.length) {
+    const { messages: history, activeRunStreaming } = await loadHistory(sessionId);
+    // Re-check: a genuine local run may have started during the async fetch above.
+    if (this.isRunning && !this.remoteRunActive) return this.messages.length;
+
+    if (history.length > this.messages.length) {
       this.setMessages(history);
     }
+
+    if (activeRunStreaming !== this.remoteRunActive) {
+      this.remoteRunActive = activeRunStreaming;
+      this.isRunning = activeRunStreaming;
+      // Force a re-render even when the message count didn't change this tick
+      // (e.g. the remote run just ended with nothing new persisted yet).
+      this.setMessages([...this.messages]);
+    }
+
     return this.messages.length;
   }
 
@@ -423,7 +468,7 @@ export class HarnessAgent extends AbstractAgent {
       (async () => {
         subscriber.next({ type: EventType.RUN_STARTED, threadId: sessionId, runId } as BaseEvent);
         try {
-          const messages = await loadHistory(sessionId);
+          const { messages } = await loadHistory(sessionId);
           if (cancelled) return;
           subscriber.next({ type: EventType.MESSAGES_SNAPSHOT, messages } as BaseEvent);
           subscriber.next({ type: EventType.RUN_FINISHED, threadId: sessionId, runId } as BaseEvent);
@@ -443,6 +488,18 @@ export class HarnessAgent extends AbstractAgent {
   }
 }
 
+/** Return shape of loadHistory() — see field docs below. */
+export interface HistoryLoadResult {
+  messages: Message[];
+  /**
+   * True when ActiveRun currently reports a live in-flight turn for this
+   * session (see isActiveRunStreaming) — read by refreshHistory() to mirror
+   * that into `isRunning`/the Stop button (issue #451). Computed here rather
+   * than with a second fetchActiveRun() call in the caller.
+   */
+  activeRunStreaming: boolean;
+}
+
 /**
  * Fetch all stored events for a session (paging through the query) and map them
  * to AG-UI messages. Returns the full conversation, including turns that predate
@@ -450,7 +507,7 @@ export class HarnessAgent extends AbstractAgent {
  * rather than a mid-turn fragment. The Converse→AG-UI parse happens exactly
  * once, in converse-to-agui.ts.
  */
-export async function loadHistory(sessionId: string): Promise<Message[]> {
+export async function loadHistory(sessionId: string): Promise<HistoryLoadResult> {
   // Dual-read (issue #256, Option A): the signed-in user's own `sub` namespace
   // (where browser harness chats now persist) AND the shared SHARED_ACTOR_ID
   // namespace (where webhook/ClaudeCode/AguiAgent runs persist), so a
@@ -495,10 +552,10 @@ export async function loadHistory(sessionId: string): Promise<Message[]> {
   // the same turn has already landed in persisted memory (see active-run-merge.ts).
   try {
     const active = await fetchActiveRun(sessionId);
-    return mergeActiveRunSnapshot(msgs, active);
+    return { messages: mergeActiveRunSnapshot(msgs, active), activeRunStreaming: isActiveRunStreaming(active) };
   } catch (e) {
     // Log and ignore – history load should succeed even if ActiveRun fetch fails
     console.error('Failed to fetch ActiveRun for session', sessionId, e);
   }
-  return msgs;
+  return { messages: msgs, activeRunStreaming: false };
 }

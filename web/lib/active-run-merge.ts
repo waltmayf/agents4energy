@@ -13,6 +13,19 @@ export interface ActiveRunSnapshot {
  * permanently stuck in-flight bubble. */
 const ACTIVE_RUN_STALE_MS = 60_000;
 
+/**
+ * True when `active` represents a genuinely in-flight turn: status is
+ * 'streaming' and it was touched recently enough not to be a crashed browser's
+ * abandoned row (see ACTIVE_RUN_STALE_MS). Shared by `mergeActiveRunSnapshot`
+ * (whether to show the in-flight bubble) and `HarnessAgent`/`ClaudeCodeAgent`'s
+ * `refreshHistory()` (whether to show the chat as "responding" — issue #451).
+ */
+export function isActiveRunStreaming(active: ActiveRunSnapshot | null): boolean {
+  if (!active || active.status !== 'streaming') return false;
+  const updatedAtMs = active.updatedAt ? new Date(active.updatedAt).getTime() : NaN;
+  return Number.isFinite(updatedAtMs) && Date.now() - updatedAtMs <= ACTIVE_RUN_STALE_MS;
+}
+
 /** Plain text of an AG-UI message (user/assistant turns are simple text). */
 function messageText(m: Message): string {
   if (typeof m.content === 'string') return m.content;
@@ -54,16 +67,19 @@ function sameTurnText(a: string, b: string): boolean {
  * content instead of id closes that window regardless of timing.
  */
 export function mergeActiveRunSnapshot(msgs: Message[], active: ActiveRunSnapshot | null): Message[] {
-  if (!active || active.status !== 'streaming' || !active.messageId) return msgs;
+  if (!isActiveRunStreaming(active) || !active?.messageId) return msgs;
 
   const text = active.accumulatedText?.trim();
   if (!text) return msgs;
 
-  const updatedAtMs = active.updatedAt ? new Date(active.updatedAt).getTime() : NaN;
-  if (!Number.isFinite(updatedAtMs) || Date.now() - updatedAtMs > ACTIVE_RUN_STALE_MS) return msgs;
-
   const alreadyPersisted = msgs.some((m) => m.role === 'assistant' && sameTurnText(text, messageText(m)));
   if (alreadyPersisted) return msgs;
 
-  return [...msgs, { id: active.messageId, role: 'assistant', content: active.accumulatedText } as Message];
+  // `timestamp` isn't part of the AG-UI Message schema; attached via cast the
+  // same way converse-to-agui.ts does, so the "most recent message" timestamp
+  // UI (issue #451) has something to show for an in-flight turn too.
+  return [
+    ...msgs,
+    { id: active.messageId, role: 'assistant', content: active.accumulatedText, timestamp: active.updatedAt } as Message,
+  ];
 }
