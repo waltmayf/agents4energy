@@ -143,7 +143,7 @@ the issue/PR, not escalated.
 End your turn with a fenced ` ```monitor ` block (see the `MONITOR HANDOFF`
 instructions appended to every run, and
 [`docs/monitor-loop.md`](../../../../../docs/monitor-loop.md)) instead of
-polling in-session. Pick the shape that fits what you're waiting on:
+polling in-session. **The monitor block must be the **last** thing you output in your final message; any additional text after it will cause the handoff to be ignored.** Pick the shape that fits what you're waiting on:
 
 - **Workers are running** → condition poll, waking as soon as they're done:
   ```monitor

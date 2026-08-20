@@ -440,7 +440,7 @@ function runClaudeCode({ prompt, workDir, repo, issueNumber, systemAppend, githu
   // fixed duration) instead of busy-waiting in-session for a deploy/CI run/
   // other long job to finish.
   appendParts.push(
-    'MONITOR HANDOFF: if you are waiting on an external async condition (a deploy, a CI run, a long job) rather than doing work yourself, end your final message with a fenced ```monitor``` block instead of busy-waiting in-session. Two shapes:',
+    'MONITOR HANDOFF: if you are waiting on an external async condition (a deploy, a CI run, a long job) rather than doing work yourself, end your final message with a fenced ```monitor``` block instead of busy-waiting in-session. **The monitor block must be the last thing you output; any additional content after it will be ignored.** Two shapes:',
     '1. Condition poll — wake as soon as a check passes:',
     '```monitor',
     '{"intervalSeconds": 120, "maxIterations": 20, "checkCommand": "bash -c \\"gh run list --repo owner/name --branch main --limit 1 --json status --jq \'.[0].status\' | grep -q completed\\"", "followUpPrompt": "The deploy finished — verify it succeeded and comment the result."}',
