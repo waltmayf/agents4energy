@@ -108,8 +108,10 @@ let activeJobs = 0;
 const runningJobs = new Map();
 
 // Cause reported (via SendTaskFailure) when a run is cancelled. The SFN Catch
-// turns this into a PostFailureComment; deliberately omits the raw "@" mention
-// so the superseded-run comment can never re-trigger the webhook.
+// routes the 'ClaudeCodeRuntimeCancelled' error code to PostCancelledComment
+// (issue #452 — a neutral "superseded" comment, not agent-error); deliberately
+// omits the raw "@" mention so the superseded-run comment can never re-trigger
+// the webhook.
 const SUPERSEDED_CAUSE =
   'Cancelled: superseded by a newer agentcore-claude comment on the same issue.';
 

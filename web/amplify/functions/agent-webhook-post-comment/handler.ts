@@ -41,7 +41,12 @@ interface PostCommentInput {
   // a poll timed out. So this stage posts the "monitoring stopped" comment
   // for the audit trail but deliberately does NOT touch agent-working/
   // agent-error — the run is still in flight.
-  stage: 'initial' | 'final' | 'awaiting_input' | 'monitor_stopped' | 'monitor_expired';
+  // 'cancelled' (issue #452): reached via agentWebhookStack's RouteFailure
+  // when the run was cancelled because a newer @agentcore-claude comment on
+  // the same issue superseded it (issue #182's last-write-wins control
+  // plane) — a recommended pattern, not a failure. Posts neutral wording and
+  // clears agent-working WITHOUT adding agent-error.
+  stage: 'initial' | 'final' | 'awaiting_input' | 'monitor_stopped' | 'monitor_expired' | 'cancelled';
   // Step Functions execution ARN ($$.Execution.Id), passed by the initial
   // stage so the initial comment can link to the AWS console execution page
   // (issue #399). Optional so an omission just skips the link.
@@ -362,6 +367,33 @@ export const handler = async (input: PostCommentInput): Promise<PostCommentOutpu
     } else {
       if (!input.issueKey) throw new Error('issueKey required for jira source');
       await postJiraComment(input.issueKey, body);
+    }
+    return {};
+  }
+
+  if (input.stage === 'cancelled') {
+    // Neutral wording (issue #452) — this is a superseded/last-write-wins
+    // cancel, not a failure, so no "Agent failed" language. responseText
+    // carries server.js's SUPERSEDED_CAUSE ("Cancelled: superseded by a
+    // newer agentcore-claude comment on the same issue."), already neutral.
+    const body = sanitizeHarmony(input.responseText || 'Cancelled — superseded by a newer comment on this issue.');
+    const durationLine = buildRunDurationLine(input.executionStartTime, Date.now(), 'Run cancelled after');
+    const finalBody = durationLine ? `${durationLine}\n\n____\n\n${body}` : body;
+    if (input.source === 'github') {
+      if (!input.repo || input.issueNumber === undefined) throw new Error('repo/issueNumber required for github source');
+      const { token } = await postGithubComment(input.repo, input.issueNumber, finalBody);
+      // Clear agent-working like a normal completion, but never add
+      // agent-error — being superseded is expected, not a failure.
+      if (input.trigger === 'label' || input.trigger === 'comment') {
+        try {
+          await removeLabel(input.repo, input.issueNumber, token, WORKING_LABEL);
+        } catch (err) {
+          console.warn(`Could not remove ${WORKING_LABEL} label: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+    } else {
+      if (!input.issueKey) throw new Error('issueKey required for jira source');
+      await postJiraComment(input.issueKey, finalBody);
     }
     return {};
   }

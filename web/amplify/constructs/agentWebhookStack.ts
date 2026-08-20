@@ -326,11 +326,45 @@ export class AgentWebhookStack extends Construct {
       resultPath: sfn.JsonPath.DISCARD,
     });
 
-    // Git-auth prep and BOTH agent branches route their failures to the same
-    // failure-comment state (which adds agent-error for label runs).
-    prepareGitAuth.addCatch(postFailureComment, { resultPath: '$.error' });
-    invokeHarness.addCatch(postFailureComment, { resultPath: '$.error' });
-    invokeClaude.addCatch(postFailureComment, { resultPath: '$.error' });
+    // Reached only when the Claude Code runtime's cancel handler resolved the
+    // paused callback task with SendTaskFailure({ error: 'ClaudeCodeRuntimeCancelled' })
+    // (see server.js's SUPERSEDED_CAUSE) — i.e. a newer @agentcore-claude comment
+    // on the same issue superseded this run (issue #182's "last-write-wins"
+    // control plane). This is a recommended pattern, not a failure (issue
+    // #452): unlike postFailureComment, it does NOT set isError (so no
+    // agent-error label is added) and uses neutral "cancelled" wording rather
+    // than "Agent failed after N".
+    const postCancelledComment = new tasks.LambdaInvoke(this, 'PostCancelledComment', {
+      lambdaFunction: props.postCommentLambda,
+      payload: sfn.TaskInput.fromObject({
+        runId: sfn.JsonPath.stringAt('$.runId'),
+        source: sfn.JsonPath.stringAt('$.source'),
+        stage: 'cancelled',
+        trigger: sfn.JsonPath.stringAt('$.trigger'),
+        repo: sfn.JsonPath.stringAt('$.repo'),
+        issueNumber: sfn.JsonPath.numberAt('$.issueNumber'),
+        issueKey: sfn.JsonPath.stringAt('$.issueKey'),
+        executionStartTime: sfn.JsonPath.stringAt('$$.Execution.StartTime'),
+        responseText: sfn.JsonPath.stringAt('$.error.Cause'),
+      }),
+      payloadResponseOnly: true,
+      resultPath: sfn.JsonPath.DISCARD,
+    });
+
+    // Route a Catch to the neutral "cancelled" comment when the error code
+    // marks it as a supersede-cancel; everything else (real failures, the
+    // harness/git-auth branches, which have no cancel mechanism and so never
+    // set this error code) keeps going through the agent-error path.
+    const routeFailure = new sfn.Choice(this, 'RouteFailure')
+      .when(sfn.Condition.stringEquals('$.error.Error', 'ClaudeCodeRuntimeCancelled'), postCancelledComment)
+      .otherwise(postFailureComment);
+
+    // Git-auth prep and BOTH agent branches route their failures through
+    // RouteFailure, which adds agent-error for label runs UNLESS the run was
+    // cancelled because it was superseded.
+    prepareGitAuth.addCatch(routeFailure, { resultPath: '$.error' });
+    invokeHarness.addCatch(routeFailure, { resultPath: '$.error' });
+    invokeClaude.addCatch(routeFailure, { resultPath: '$.error' });
 
     // The native harness has no way to end a turn "awaiting input" (issue #185
     // is Claude-Code-only), so it always converges on PostFinalComment.
