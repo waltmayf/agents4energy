@@ -19,7 +19,11 @@ export const agentWebhookMonitorCheck = defineFunction({
   environment: {
     // ARN of the ClaudeCode AgentCore Runtime — populated in backend.ts.
     CLAUDE_CODE_RUNTIME_ARN: '',
-    GITHUB_APP_ID: '',
-    GITHUB_APP_PRIVATE_KEY_SECRET_ARN: '',
+    // Deploy-time inputs read directly from process.env at synth (same pattern
+    // as agent-webhook-invoke-claude/resource.ts and mint-github-token/resource.ts)
+    // — used to mint a fresh installation token before running checkCommand so a
+    // long wait between waves doesn't leave ~/.git-credentials stale (issue #467).
+    GITHUB_APP_ID: process.env.GITHUB_APP_ID ?? '',
+    GITHUB_APP_PRIVATE_KEY_SECRET_ARN: process.env.GITHUB_APP_PRIVATE_KEY_SECRET_ARN ?? '',
   },
 });

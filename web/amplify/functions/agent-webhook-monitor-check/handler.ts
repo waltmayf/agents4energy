@@ -80,7 +80,7 @@ async function refreshGitCredentials(sessionId: string): Promise<void> {
   // Write fresh credentials.
   const command = [
     'git config --global credential.helper store',
-    `printf "https://x-access-token:%s@github.com\n" ${JSON.stringify(token)} > "$HOME/.git-credentials"`,
+    `printf 'https://x-access-token:%s@github.com\\n' ${JSON.stringify(token)} > "$HOME/.git-credentials"`,
     'chmod 600 "$HOME/.git-credentials"',
   ].join('\n');
   await execInRuntimeSession({ sessionId, command, timeoutSeconds: 30 });
