@@ -49,6 +49,24 @@ function idFor(base: string, suffix: string | number): string {
 }
 
 /**
+ * Attach the stored event's timestamp to a message via cast — `timestamp`
+ * isn't part of the AG-UI Message schema, same pattern as the `error` field
+ * tool-result messages already smuggle through below. Read by the "most
+ * recent message" timestamp UI (issue #451); a missing/null timestamp is
+ * left off rather than defaulting to "now", so the UI can tell a genuinely
+ * unknown time apart from a fresh one.
+ */
+function withTimestamp<T extends Message>(msg: T, timestamp: string | null | undefined): T {
+  if (timestamp) (msg as unknown as { timestamp?: string }).timestamp = timestamp;
+  return msg;
+}
+
+/** Read the `timestamp` a Message may carry (see withTimestamp) — undefined if never set. */
+export function messageTimestamp(m: Message): string | undefined {
+  return (m as unknown as { timestamp?: string }).timestamp;
+}
+
+/**
  * Split a text block into inline <reasoning>…</reasoning> segments and the
  * remaining answer text. gpt-oss-120b emits chain-of-thought this way instead
  * of as a separate reasoningContent block. Handles multiple/unclosed tags.
@@ -126,19 +144,25 @@ function reconstructLeakedBuiltinTool(
   const base = ev.eventId || `msg-${index}`;
   const toolCallId = idFor(base, 'builtin-tool');
   return [
-    {
-      id: base,
-      role: 'assistant',
-      toolCalls: [
-        { id: toolCallId, type: 'function', function: { name: toolMatch[1], arguments: '{}' } },
-      ],
-    } as unknown as Message,
-    {
-      id: idFor(next.eventId || `msg-${index + 1}`, 'toolresult'),
-      role: 'tool',
-      toolCallId,
-      content: next.text!.trim(),
-    } as Message,
+    withTimestamp(
+      {
+        id: base,
+        role: 'assistant',
+        toolCalls: [
+          { id: toolCallId, type: 'function', function: { name: toolMatch[1], arguments: '{}' } },
+        ],
+      } as unknown as Message,
+      ev.timestamp,
+    ),
+    withTimestamp(
+      {
+        id: idFor(next.eventId || `msg-${index + 1}`, 'toolresult'),
+        role: 'tool',
+        toolCallId,
+        content: next.text!.trim(),
+      } as Message,
+      next.timestamp,
+    ),
   ];
 }
 
@@ -152,7 +176,7 @@ export function eventToMessages(ev: StoredEvent, index: number): Message[] {
   if (!blocks) {
     const text = ev.text?.trim() ?? '';
     if (!text) return [];
-    return [{ id: base, role, content: text } as Message];
+    return [withTimestamp({ id: base, role, content: text } as Message, ev.timestamp)];
   }
 
   const out: Message[] = [];
@@ -235,7 +259,8 @@ export function eventToMessages(ev: StoredEvent, index: number): Message[] {
     out.push(msg as unknown as Message);
   }
 
-  return out;
+  // Every message above came from this one stored event, so they all share its timestamp.
+  return out.map((m) => withTimestamp(m, ev.timestamp));
 }
 
 /** How close two same-content events' timestamps must be to be treated as one re-persisted turn. */

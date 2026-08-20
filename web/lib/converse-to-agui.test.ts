@@ -1,6 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { dedupeStoredEvents, eventToMessages, eventsToAguiMessages, type StoredEvent } from './converse-to-agui.ts';
+import {
+  dedupeStoredEvents,
+  eventToMessages,
+  eventsToAguiMessages,
+  messageTimestamp,
+  type StoredEvent,
+} from './converse-to-agui.ts';
 
 /** Build a StoredEvent whose contentJson is a Converse ContentBlock[]. */
 function stored(role: string, blocks: unknown[], eventId = 'e1'): StoredEvent {
@@ -14,6 +20,28 @@ test('plain text falls back to a single message when no contentJson', () => {
 
 test('empty text with no blocks produces no messages', () => {
   assert.deepEqual(eventToMessages({ role: 'assistant', text: '   ' }, 0), []);
+});
+
+// Issue #451: the "most recent message" timestamp UI reads this field off
+// every message — verify it's actually attached, for both the plain-text
+// fallback path and the structured contentJson path.
+test('a stored event timestamp is attached to the plain-text fallback message', () => {
+  const msgs = eventToMessages({ role: 'user', text: 'hello', timestamp: '2026-08-20T12:00:00.000Z' }, 0);
+  assert.equal(msgs.length, 1);
+  assert.equal(messageTimestamp(msgs[0]), '2026-08-20T12:00:00.000Z');
+});
+
+test('a stored event timestamp is attached to a structured-content message', () => {
+  const ev = stored('assistant', [{ text: 'the answer is 42' }]);
+  ev.timestamp = '2026-08-20T12:05:00.000Z';
+  const msgs = eventToMessages(ev, 0);
+  assert.equal(msgs.length, 1);
+  assert.equal(messageTimestamp(msgs[0]), '2026-08-20T12:05:00.000Z');
+});
+
+test('a missing timestamp is left unset rather than defaulting to something', () => {
+  const msgs = eventToMessages({ role: 'user', text: 'hello' }, 0);
+  assert.equal(messageTimestamp(msgs[0]), undefined);
 });
 
 test('assistant text block becomes one assistant message', () => {

@@ -11,6 +11,7 @@ import { Observable, type Subscriber } from 'rxjs';
 
 import outputs from '../amplify_outputs.json';
 import { makeClient, messageText, loadHistory, fetchCallerIdentity } from './harness-agent';
+import { clearActiveRun } from './active-run';
 import { parseInvokeResponseText } from './claude-code-invoke-response';
 import { chunkForSmoothScroll, SCROLL_CHUNK_DELAY_MS } from './smooth-scroll-chunk';
 import { buildRunErrorMessageEvents } from './harness-run-error';
@@ -155,21 +156,44 @@ export class ClaudeCodeAgent extends AbstractAgent {
     });
   }
 
+  /**
+   * True once refreshHistory() has set isRunning itself from ActiveRun
+   * evidence, rather than a local run() — see HarnessAgent.remoteRunActive.
+   */
+  private remoteRunActive = false;
+
   /** Stop button wiring — see HarnessAgent.abortRun() for details. */
   abortRun(): void {
+    if (this.remoteRunActive) {
+      this.remoteRunActive = false;
+      this.isRunning = false;
+      const sessionId = this.threadId;
+      if (sessionId) void clearActiveRun(sessionId).catch(() => {});
+      this.setMessages([...this.messages]);
+      return;
+    }
     void this.detachActiveRun();
   }
 
   /** Same poll-friendly history refresh as HarnessAgent — see harness-agent.ts for details. */
   async refreshHistory(): Promise<number> {
-    if (this.isRunning) return this.messages.length;
     const sessionId = this.threadId;
     if (!sessionId) return this.messages.length;
+    if (this.isRunning && !this.remoteRunActive) return this.messages.length;
 
-    const history = await loadHistory(sessionId);
-    if (!this.isRunning && history.length > this.messages.length) {
+    const { messages: history, activeRunStreaming } = await loadHistory(sessionId);
+    if (this.isRunning && !this.remoteRunActive) return this.messages.length;
+
+    if (history.length > this.messages.length) {
       this.setMessages(history);
     }
+
+    if (activeRunStreaming !== this.remoteRunActive) {
+      this.remoteRunActive = activeRunStreaming;
+      this.isRunning = activeRunStreaming;
+      this.setMessages([...this.messages]);
+    }
+
     return this.messages.length;
   }
 
@@ -184,7 +208,7 @@ export class ClaudeCodeAgent extends AbstractAgent {
       (async () => {
         subscriber.next({ type: EventType.RUN_STARTED, threadId: sessionId, runId } as BaseEvent);
         try {
-          const messages = await loadHistory(sessionId);
+          const { messages } = await loadHistory(sessionId);
           if (cancelled) return;
           subscriber.next({ type: EventType.MESSAGES_SNAPSHOT, messages } as BaseEvent);
           subscriber.next({ type: EventType.RUN_FINISHED, threadId: sessionId, runId } as BaseEvent);
