@@ -127,6 +127,48 @@ export const agentConfigSchema = a.schema({
     // Written back by slice 1 (#413); must be added to the external IdP's redirect URIs.
     oauthCallbackUrl: a.string(),
 
+    // --- Outbound Dynamic Client Registration (RFC 7591), issue #449. ---
+    // When true and oauthClientId is still empty, the sync-oauth-credential-provider
+    // stream handler self-registers this app as an OAuth client against the AS's
+    // DCR endpoint (provider-first ordering: create a placeholder CustomOauth2
+    // provider to obtain AgentCore's callbackUrl, POST /register with that
+    // redirect_uri, store the issued client_secret, then Update the provider with
+    // the real client_id). Idempotent: a row that already has oauthClientId is
+    // skipped. Absent/null is treated as false.
+    oauthDynamicRegistration: a.boolean(),
+    // Explicit RFC 7591 registration endpoint. When unset, it is resolved from
+    // the OIDC discovery document at oauthDiscoveryUrl (`registration_endpoint`).
+    oauthRegistrationEndpoint: a.string(),
+    // Optional `client_name` sent in the registration request (falls back to the
+    // McpServer row's own name).
+    oauthClientName: a.string(),
+    // Optional RFC 7591 `software_statement` (a signed JWT) sent with the
+    // registration request. Not itself a secret (it's a signed assertion).
+    oauthSoftwareStatement: a.string(),
+    // RFC 7592 bookkeeping — the AS returns a per-client management URI and a
+    // registration access token so the registration can later be read, updated,
+    // or deleted. oauthRegistrationClientUri drives the best-effort DELETE on row
+    // removal; the access token lives in Secrets Manager (see the *Arn field).
+    oauthRegistrationClientUri: a.string(),
+    // Visible error state: set to the DCR failure reason when self-registration
+    // fails, so the operator sees why rather than a silently half-created provider.
+    oauthError: a.string(),
+    // Secrets Manager ARN of an optional RFC 7591 `initial_access_token` (Bearer)
+    // required by some authorization servers to authorize registration. The secret
+    // value itself never lives in this row — same secret-ARN posture as
+    // oauthClientSecretArn (field-level auth strips it from guest reads).
+    oauthInitialAccessTokenArn: a.string().authorization((allow) => [
+      allow.authenticated().to(['read', 'create', 'update', 'delete']),
+      allow.owner(),
+    ]),
+    // Secrets Manager ARN holding the RFC 7592 registration access token issued at
+    // registration, used to update/delete the dynamic registration later. Written
+    // back by the DCR handler; same secret-ARN posture as oauthClientSecretArn.
+    oauthRegistrationAccessTokenArn: a.string().authorization((allow) => [
+      allow.authenticated().to(['read', 'create', 'update', 'delete']),
+      allow.owner(),
+    ]),
+
     enabled: a.boolean().required().default(true),
     agents: a.hasMany('AgentMcpServer', 'mcpServerId'),
     credentials: a.hasMany('McpServerCredential', 'mcpServerId'),

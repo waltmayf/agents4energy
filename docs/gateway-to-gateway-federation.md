@@ -135,6 +135,54 @@ Cedar-gated by their B groups with no further prompts (until the vaulted token e
 
 ---
 
+## Let the app self-register — Dynamic Client Registration (RFC 7591)
+
+Steps 2–3 above assume an operator has already obtained a `client_id`/`client_secret` from
+the third party and pasted them into the row + a Secrets Manager secret. When the external
+authorization server supports **Dynamic Client Registration** ([RFC 7591](https://datatracker.ietf.org/doc/html/rfc7591))
+— e.g. an Auth0-backed gateway (see [`docs/gateway-auth0-dcr.md`](gateway-auth0-dcr.md)),
+WorkOS/`mcp.shop`, or any OIDC AS that advertises a `registration_endpoint` — the app can
+**self-register** and that manual step disappears. It stays fully stream-driven and requires
+**no redeploy** (issue #449).
+
+**How to turn it on.** On the `McpServer` row set `oauthDynamicRegistration = true` (and
+`oauthDiscoveryUrl` to the AS's `.well-known/openid-configuration`), and leave `oauthClientId`
+empty. Optionally set `oauthRegistrationEndpoint` (to skip discovery), `oauthClientName`,
+`oauthSoftwareStatement`, and `oauthInitialAccessTokenArn` (a Secrets Manager ARN, under the
+`mcp-oauth-client-secret/` prefix, holding `{ "initialAccessToken": "…" }` for ASes that
+require a Bearer token to register). The `sync-oauth-credential-provider` stream handler then
+runs the **provider-first + Update** flow automatically:
+
+1. Ensures a placeholder client-secret secret exists and **creates the `CustomOauth2`
+   credential provider with a placeholder `client_id`** — solely to obtain AgentCore's
+   per-provider `oauthCallbackUrl` (the chicken-and-egg breaker: the AS needs a redirect URI
+   at registration time, and that URI is AgentCore's callback, which only exists once the
+   provider does).
+2. Resolves the `registration_endpoint` from discovery (or the explicit field).
+3. `POST`s the RFC 7591 registration with `redirect_uris=[callbackUrl]`,
+   `grant_types=["authorization_code"]`, the requested scopes, and the optional
+   `initial_access_token`/`software_statement`.
+4. Stores the issued `client_secret` in Secrets Manager as `{ "clientSecret": "…" }` and
+   writes `oauthClientId` / `oauthClientSecretArn` (plus the RFC 7592 bookkeeping fields
+   `oauthRegistrationClientUri` / `oauthRegistrationAccessTokenArn`) back onto the row.
+5. `UpdateOauth2CredentialProvider` swaps the placeholder `client_id` for the real one.
+
+From there the row is indistinguishable from a manually-configured one: `oauthProviderArn` is
+set, `register-mcp-target-stream` attaches the gateway target (step 3.2 above), and per-user
+consent (step 4) proceeds unchanged. The flow is **idempotent** — a row that already has
+`oauthClientId` is skipped, and a retried stream batch reuses the existing provider. On
+failure the row is left with a visible `oauthError` string (not a half-created provider — the
+placeholder is cleaned up). On row deletion the handler does a best-effort RFC 7592 `DELETE`
+of the dynamic registration (never blocking deletion on it).
+
+> **You still complete step 3.1 only if the AS requires it.** DCR registers AgentCore's
+> callback URL as a redirect URI for you; no manual copy-paste into the AS is needed.
+
+See also [`docs/gateway-auth0-dcr.md`](gateway-auth0-dcr.md) for the **inbound** side —
+configuring *our* gateway to trust DCR clients via Auth0.
+
+---
+
 ## Google Drive example (`GoogleOauth2` vendor)
 
 The same outbound-3LO machinery federates to non-Cognito IdPs. For Google-protected MCP

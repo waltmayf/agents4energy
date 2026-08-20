@@ -104,6 +104,15 @@ type McpServer = {
   oauthReturnUrl?: string | null;
   oauthProviderArn?: string | null;
   oauthCallbackUrl?: string | null;
+  // Outbound Dynamic Client Registration (RFC 7591), issue #449. When true and
+  // oauthClientId is still empty, the sync-oauth-credential-provider handler
+  // self-registers this app as an OAuth client against the AS's DCR endpoint,
+  // then writes the issued oauthClientId back onto the row. oauthError surfaces
+  // the failure reason (cleared by re-saving to retrigger); oauthRegistrationClientUri
+  // is the RFC 7592 management handle when the AS returns one.
+  oauthDynamicRegistration?: boolean | null;
+  oauthError?: string | null;
+  oauthRegistrationClientUri?: string | null;
 };
 
 type AgentRecord = {
@@ -152,6 +161,9 @@ function toMcpServer(s: any): McpServer {
     oauthReturnUrl: s.oauthReturnUrl ?? null,
     oauthProviderArn: s.oauthProviderArn ?? null,
     oauthCallbackUrl: s.oauthCallbackUrl ?? null,
+    oauthDynamicRegistration: s.oauthDynamicRegistration ?? null,
+    oauthError: s.oauthError ?? null,
+    oauthRegistrationClientUri: s.oauthRegistrationClientUri ?? null,
   };
 }
 
@@ -317,6 +329,15 @@ type McpServerForm = {
   // Comma/space/newline-separated in the form; split into an array on save.
   oauthScopes: string;
   oauthReturnUrl: string;
+  // Outbound Dynamic Client Registration (RFC 7591), issue #449 — CUSTOM vendor
+  // only. When on, the client ID + secret are not entered by the operator: the
+  // backend self-registers against the AS's DCR endpoint and writes them back.
+  oauthDynamicRegistration: boolean;
+  oauthClientName: string;
+  // Optional RFC 7591 registration endpoint override (else resolved from discovery).
+  oauthRegistrationEndpoint: string;
+  // Optional Secrets Manager ARN of an RFC 7591 initial_access_token (write-only ARN).
+  oauthInitialAccessTokenArn: string;
 };
 
 function serverToForm(s: McpServer): McpServerForm {
@@ -334,6 +355,11 @@ function serverToForm(s: McpServer): McpServerForm {
     oauthClientSecretArn: '',
     oauthScopes: (s.oauthScopes ?? []).join(', '),
     oauthReturnUrl: s.oauthReturnUrl ?? '',
+    oauthDynamicRegistration: s.oauthDynamicRegistration ?? false,
+    oauthClientName: '',
+    oauthRegistrationEndpoint: '',
+    // Write-only ARN — never rendered back.
+    oauthInitialAccessTokenArn: '',
   };
 }
 
@@ -351,6 +377,10 @@ function emptyServerForm(): McpServerForm {
     oauthClientSecretArn: '',
     oauthScopes: '',
     oauthReturnUrl: '',
+    oauthDynamicRegistration: false,
+    oauthClientName: '',
+    oauthRegistrationEndpoint: '',
+    oauthInitialAccessTokenArn: '',
   };
 }
 
@@ -977,32 +1007,102 @@ function McpServerEditPanel({
                 </label>
               )}
 
-              <label className="text-sm font-medium block">
-                Client ID
-                <Input
-                  className="mt-1 font-mono text-xs"
-                  placeholder="OAuth2 client ID registered with the IdP"
-                  value={form.oauthClientId}
-                  onChange={(e) => setField('oauthClientId', e.target.value)}
-                  data-testid="input-outbound-client-id"
-                />
-              </label>
+              {/* Dynamic Client Registration (RFC 7591), issue #449 — CUSTOM vendor only.
+                  When on, the client ID + secret are self-registered by the backend, so
+                  the operator doesn't enter them. */}
+              {form.oauthVendor === 'CUSTOM' && (
+                <div className="rounded-lg border px-3 py-2.5 space-y-2">
+                  <label className="flex items-start gap-2 text-sm font-medium">
+                    <input
+                      type="checkbox"
+                      className="mt-0.5 size-4 shrink-0 rounded border-input accent-primary"
+                      checked={form.oauthDynamicRegistration}
+                      onChange={(e) => setField('oauthDynamicRegistration', e.target.checked)}
+                      data-testid="checkbox-oauth-dcr"
+                    />
+                    <span>
+                      Register client dynamically (DCR)
+                      <span className="text-xs font-normal text-muted-foreground mt-0.5 block">
+                        RFC 7591 — the app self-registers at the authorization server&apos;s
+                        registration endpoint (resolved from the discovery URL) and stores the
+                        issued client ID + secret automatically. Requires the AS to support DCR.
+                      </span>
+                    </span>
+                  </label>
 
-              <label className="text-sm font-medium block">
-                Client secret
-                <Input
-                  type="password"
-                  className="mt-1 font-mono text-xs"
-                  placeholder={server?.oauthClientSecretArn ? '•••••••• (secret configured — leave blank to keep)' : 'Secrets Manager ARN holding the client secret'}
-                  value={form.oauthClientSecretArn}
-                  onChange={(e) => setField('oauthClientSecretArn', e.target.value)}
-                  data-testid="input-oauth-client-secret"
-                  autoComplete="off"
-                />
-                <span className="text-xs font-normal text-muted-foreground mt-0.5 block">
-                  Write-only — paste the Secrets Manager ARN whose value is <span className="font-mono">{'{ "clientSecret": "…" }'}</span>. The existing value is never shown.
-                </span>
-              </label>
+                  {form.oauthDynamicRegistration && (
+                    <div className="space-y-2 pl-6">
+                      <label className="text-sm font-medium block">
+                        Client name <span className="font-normal text-muted-foreground">(optional)</span>
+                        <Input
+                          className="mt-1 text-xs"
+                          placeholder="Falls back to this server's name"
+                          value={form.oauthClientName}
+                          onChange={(e) => setField('oauthClientName', e.target.value)}
+                          data-testid="input-oauth-client-name"
+                        />
+                      </label>
+                      <label className="text-sm font-medium block">
+                        Registration endpoint <span className="font-normal text-muted-foreground">(optional)</span>
+                        <Input
+                          className="mt-1 font-mono text-xs"
+                          placeholder="Defaults to registration_endpoint from discovery"
+                          value={form.oauthRegistrationEndpoint}
+                          onChange={(e) => setField('oauthRegistrationEndpoint', e.target.value)}
+                          data-testid="input-oauth-registration-endpoint"
+                        />
+                      </label>
+                      <label className="text-sm font-medium block">
+                        Initial access token ARN <span className="font-normal text-muted-foreground">(optional)</span>
+                        <Input
+                          className="mt-1 font-mono text-xs"
+                          placeholder="Secrets Manager ARN (only if the AS requires one to register)"
+                          value={form.oauthInitialAccessTokenArn}
+                          onChange={(e) => setField('oauthInitialAccessTokenArn', e.target.value)}
+                          data-testid="input-oauth-initial-access-token"
+                          autoComplete="off"
+                        />
+                        <span className="text-xs font-normal text-muted-foreground mt-0.5 block">
+                          Write-only — paste the Secrets Manager ARN whose value is <span className="font-mono">{'{ "initialAccessToken": "…" }'}</span>.
+                        </span>
+                      </label>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Client ID + secret are entered manually only when NOT using DCR
+                  (DCR self-registers both and writes them back). */}
+              {!(form.oauthVendor === 'CUSTOM' && form.oauthDynamicRegistration) && (
+                <>
+                  <label className="text-sm font-medium block">
+                    Client ID
+                    <Input
+                      className="mt-1 font-mono text-xs"
+                      placeholder="OAuth2 client ID registered with the IdP"
+                      value={form.oauthClientId}
+                      onChange={(e) => setField('oauthClientId', e.target.value)}
+                      data-testid="input-outbound-client-id"
+                    />
+                  </label>
+
+                  <label className="text-sm font-medium block">
+                    Client secret
+                    <Input
+                      type="password"
+                      className="mt-1 font-mono text-xs"
+                      placeholder={server?.oauthClientSecretArn ? '•••••••• (secret configured — leave blank to keep)' : 'Secrets Manager ARN holding the client secret'}
+                      value={form.oauthClientSecretArn}
+                      onChange={(e) => setField('oauthClientSecretArn', e.target.value)}
+                      data-testid="input-oauth-client-secret"
+                      autoComplete="off"
+                    />
+                    <span className="text-xs font-normal text-muted-foreground mt-0.5 block">
+                      Write-only — paste the Secrets Manager ARN whose value is <span className="font-mono">{'{ "clientSecret": "…" }'}</span>. The existing value is never shown.
+                    </span>
+                  </label>
+                </>
+              )}
 
               <label className="text-sm font-medium block">
                 Scopes
@@ -1031,6 +1131,36 @@ function McpServerEditPanel({
                   Where AgentCore redirects after consent — point at this app&apos;s <span className="font-mono">/oauth/agentcore-callback</span>.
                 </span>
               </label>
+
+              {/* DCR self-registration status — post-save read-back (issue #449). */}
+              {form.oauthVendor === 'CUSTOM' && form.oauthDynamicRegistration && (
+                <div className="rounded-lg border px-3 py-2.5 space-y-1.5" data-testid="dcr-status-readback">
+                  <p className="text-xs font-medium text-foreground">Dynamic registration</p>
+                  {server?.oauthError ? (
+                    <p className="text-xs text-destructive break-words" data-testid="dcr-error">
+                      Registration failed: {server.oauthError}
+                      <span className="text-muted-foreground block mt-0.5">Fix the config above and save again to retry.</span>
+                    </p>
+                  ) : server?.oauthClientId ? (
+                    <>
+                      <div className="flex items-center gap-2">
+                        <code className="flex-1 min-w-0 truncate rounded bg-muted px-2 py-1 text-xs font-mono" title={server.oauthClientId}>
+                          {server.oauthClientId}
+                        </code>
+                        <CopyButton value={server.oauthClientId} />
+                      </div>
+                      <p className="text-xs text-muted-foreground">
+                        Client self-registered at the authorization server. The client secret was stored automatically.
+                      </p>
+                    </>
+                  ) : (
+                    <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                      <ClockIcon className="size-3.5 shrink-0" />
+                      Pending — save and wait for the backend to register the client, then reopen this server.
+                    </p>
+                  )}
+                </div>
+              )}
 
               {/* Issued callback URL — post-save read-back (design decision: unknown until the provider exists) */}
               <div className="rounded-lg border px-3 py-2.5 space-y-1.5" data-testid="callback-url-readback">
@@ -1950,14 +2080,22 @@ export default function AgentsPage() {
     const headers = form.headers
       .filter((h) => h.key.trim())
       .map((h) => ({ key: h.key.trim(), value: h.value }));
-    const oauthClientId = form.oauthClientId.trim() || undefined;
+    // Outbound Dynamic Client Registration (RFC 7591), issue #449 — CUSTOM vendor
+    // only. In DCR mode the operator does NOT supply a client ID/secret: the
+    // sync-oauth-credential-provider handler triggers on
+    // `oauthDynamicRegistration && !oauthClientId && !oauthError`, self-registers,
+    // and writes the client ID + secret back. So keep oauthClientId empty (omit —
+    // never null it, which would wipe a written-back value on an unrelated re-save)
+    // and don't send a client secret.
+    const isOauth = form.outboundAuthType === 'OAUTH_3LO';
+    const isDcr = isOauth && form.oauthVendor === 'CUSTOM' && form.oauthDynamicRegistration;
+    const oauthClientId = isDcr ? undefined : (form.oauthClientId.trim() || undefined);
 
     // Outbound auth (3LO), epic #412 slice 7 (#419). `undefined` omits a field
     // from the mutation (preserving any existing value) rather than nulling it
     // — the default DynamoDB resolver REMOVEs attributes set to null (#387),
     // which matters for the write-only secret: a blank input must keep the
     // previously-provisioned oauthClientSecretArn, not clear it.
-    const isOauth = form.outboundAuthType === 'OAUTH_3LO';
     const outboundFields: {
       outboundAuthType: OutboundAuthType;
       oauthVendor?: OauthVendor;
@@ -1965,15 +2103,33 @@ export default function AgentsPage() {
       oauthClientSecretArn?: string;
       oauthScopes?: string[];
       oauthReturnUrl?: string;
+      oauthDynamicRegistration?: boolean;
+      oauthClientName?: string;
+      oauthRegistrationEndpoint?: string;
+      oauthInitialAccessTokenArn?: string;
+      oauthError?: string | null;
     } = {
       outboundAuthType: form.outboundAuthType,
       oauthVendor: isOauth ? form.oauthVendor : undefined,
       oauthDiscoveryUrl: isOauth && form.oauthVendor === 'CUSTOM' ? (form.oauthDiscoveryUrl.trim() || undefined) : undefined,
       oauthScopes: isOauth ? parseScopes(form.oauthScopes) : undefined,
       oauthReturnUrl: isOauth ? (form.oauthReturnUrl.trim() || undefined) : undefined,
+      // Persist the DCR flag (true/false) for CUSTOM OAuth servers; omit otherwise.
+      oauthDynamicRegistration: isOauth && form.oauthVendor === 'CUSTOM' ? form.oauthDynamicRegistration : undefined,
     };
-    if (isOauth && form.oauthClientSecretArn.trim()) {
+    // A manually-entered client secret only applies when NOT self-registering.
+    if (isOauth && !isDcr && form.oauthClientSecretArn.trim()) {
       outboundFields.oauthClientSecretArn = form.oauthClientSecretArn.trim();
+    }
+    if (isDcr) {
+      outboundFields.oauthClientName = form.oauthClientName.trim() || undefined;
+      outboundFields.oauthRegistrationEndpoint = form.oauthRegistrationEndpoint.trim() || undefined;
+      if (form.oauthInitialAccessTokenArn.trim()) {
+        outboundFields.oauthInitialAccessTokenArn = form.oauthInitialAccessTokenArn.trim();
+      }
+      // Clear any prior failure so the stream handler re-triggers registration
+      // (its guard skips rows that still carry an oauthError). Null REMOVEs it.
+      outboundFields.oauthError = null;
     }
 
     // Read-back fields (written by the backend, not the client) to preserve in

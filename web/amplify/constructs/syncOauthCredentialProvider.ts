@@ -53,6 +53,10 @@ export class SyncOauthCredentialProvider extends Construct {
       timeout: Duration.seconds(60),
       environment: {
         MCP_SERVER_TABLE_NAME: props.mcpServerTable.tableName,
+        // The naming-convention prefix under which the DCR path (#449) creates
+        // the client-secret + RFC 7592 registration-token secrets it manages.
+        // Must match the resource scope of the secretsmanager grants below.
+        SECRET_NAME_PREFIX: MCP_OAUTH_CLIENT_SECRET_NAME_PREFIX,
       },
       // NodejsFunction excludes @aws-sdk/* from the bundle by default on Node
       // 18+ runtimes, relying on the (older) SDK baked into the Lambda
@@ -60,7 +64,7 @@ export class SyncOauthCredentialProvider extends Construct {
       // reason as RegisterMcpTargetOnMcpServer / SyncCedarPolicies bundle this
       // client explicitly). Bundle it so the handler gets the version pinned
       // in package.json.
-      bundling: { nodeModules: ['@aws-sdk/client-bedrock-agentcore-control'] },
+      bundling: { nodeModules: ['@aws-sdk/client-bedrock-agentcore-control', '@aws-sdk/client-secrets-manager'] },
     });
 
     // Create/Update/Delete/GetOauth2CredentialProvider identify the provider
@@ -72,13 +76,36 @@ export class SyncOauthCredentialProvider extends Construct {
       resources: ['*'],
     }));
 
+    // CreateOauth2CredentialProvider provisions the provider *inside* the
+    // account's default token vault, and the control-plane checks
+    // CreateTokenVault/GetTokenVault on that vault even when it already exists
+    // (it's created idempotently on first use). Without these the very first
+    // provider create in a fresh account/sandbox fails with
+    // "not authorized to perform: bedrock-agentcore:CreateTokenVault on
+    // token-vault/default" — a gap that only surfaces at runtime, not at synth
+    // (caught deploying #449 into a clean sandbox). Scope to the default vault.
+    fn.addToRolePolicy(new PolicyStatement({
+      actions: ['bedrock-agentcore:CreateTokenVault', 'bedrock-agentcore:GetTokenVault'],
+      resources: [
+        `arn:aws:bedrock-agentcore:${Stack.of(this).region}:${Stack.of(this).account}:token-vault/default*`,
+      ],
+    }));
+
     // CreateOauth2CredentialProvider/UpdateOauth2CredentialProvider read an
     // EXTERNAL client secret using the caller's own credentials, so this
     // handler's role needs read access to whichever secret an McpServer row
     // points at via oauthClientSecretArn — scoped to the naming convention
-    // above rather than every secret in the account.
+    // above rather than every secret in the account. The Dynamic Client
+    // Registration path (#449) additionally creates and writes the client-secret
+    // and RFC 7592 registration-token secrets it manages, all under the same
+    // prefix, so it needs Create/Put/Tag as well as Get.
     fn.addToRolePolicy(new PolicyStatement({
-      actions: ['secretsmanager:GetSecretValue'],
+      actions: [
+        'secretsmanager:GetSecretValue',
+        'secretsmanager:CreateSecret',
+        'secretsmanager:PutSecretValue',
+        'secretsmanager:TagResource',
+      ],
       resources: [
         `arn:aws:secretsmanager:${Stack.of(this).region}:${Stack.of(this).account}:secret:${MCP_OAUTH_CLIENT_SECRET_NAME_PREFIX}*`,
       ],
