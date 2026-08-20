@@ -48,6 +48,23 @@ The synthetic message uses `messageId` as its own id, so a subsequent reload tha
 
 Any error fetching the `ActiveRun` row is caught and logged — history loading always falls back to the persisted list.
 
+## Consumer: mirroring into the "responding" state (issue #451)
+
+`refreshHistory()` (`web/lib/harness-agent.ts` / `web/lib/claude-code-agent.ts`) also reads `loadHistory()`'s `activeRunStreaming` flag (computed via `isActiveRunStreaming()`, exported from `active-run-merge.ts`) and mirrors it into `this.isRunning`. This is what makes a turn arriving purely through the poll — a webhook run, another browser tab, or this tab after a reload mid-stream — show the same "responding" state (and Stop button, via `CopilotChat`'s `isRunning`-driven composer) that a turn streamed by this tab's own `run()` already showed.
+
+A private `remoteRunActive` flag on each agent instance distinguishes the two ways `isRunning` can become `true`:
+
+- **A genuine local `run()`** — `isRunning` is set by `AbstractAgent.runAgent()` itself; `refreshHistory()` must never touch `messages`/`isRunning` while this is happening (that guard predates #451 and is unchanged).
+- **`refreshHistory()`'s own ActiveRun-driven guess** (`remoteRunActive = true`) — there is no local stream, so `refreshHistory()` keeps polling (rather than early-returning) specifically to notice when the remote turn ends and flip `isRunning` back to `false`.
+
+`abortRun()` checks `remoteRunActive` first: if set, there's no local Observable to detach, so the only actionable "stop" is clearing the `ActiveRun` row and flipping this view back to idle immediately (rather than waiting up to `ACTIVE_RUN_STALE_MS` for it to go stale on its own). This cannot reach into whatever tab or runtime is actually producing the turn — no backend endpoint exists for a genuine remote cancel — so the underlying job keeps running; it only stops *this view* from showing it as in-flight.
+
+## "Most recent message" timestamp
+
+Every message `converse-to-agui.ts` builds from a stored event carries a `timestamp` field (the event's own ISO timestamp), and the synthetic in-flight message `mergeActiveRunSnapshot()` appends carries the `ActiveRun` row's `updatedAt`. `timestamp` isn't part of the AG-UI `Message` schema — it's attached via a cast, the same pattern the `error` field on tool-result messages already uses — and read back with `messageTimestamp()` (also in `converse-to-agui.ts`).
+
+`web/app/(with-auth)/chat/last-message-timestamp.tsx` renders this for the transcript's actual last message, always visible above the composer (not just on hover), so a quiet chat still shows *when* the last activity happened. `web/app/(with-auth)/chat/use-last-message-timestamp.ts` subscribes directly to the active agent instance (`agent.subscribe({ onMessagesChanged })`, the same pattern `use-awaiting-input.ts` uses) and falls back to the current time when the last message has no `timestamp` yet — i.e. it's still being built by a live local stream — so the label keeps advancing with each delta until the persisted copy (with a real timestamp) eventually replaces it.
+
 ## Staleness guard
 
 A browser tab that crashes or loses network mid-stream never reaches the `clearActiveRun()` call, leaving a `status: 'streaming'` row with no one left to clean it up. `loadHistory()` guards against this by ignoring any `ActiveRun` row whose `updatedAt` is more than 60 seconds old (or missing/unparseable) — preventing a permanently stuck in-flight bubble for other viewers.

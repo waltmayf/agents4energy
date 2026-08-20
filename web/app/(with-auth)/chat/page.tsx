@@ -13,6 +13,7 @@ import { ToolCallRenderer } from './tool-call-renderer';
 import { UserMessageMarkdown } from './user-message-renderer';
 import { AwaitingInputBanner } from './awaiting-input-banner';
 import { McpElicitationBanner } from './mcp-elicitation-banner';
+import { LastMessageTimestamp } from './last-message-timestamp';
 import { ChatComposerInput } from './chat-composer-input';
 import { AgentPickerProvider, type AgentPickerContextValue } from './agent-picker-context';
 import { SessionSidebar } from './session-sidebar';
@@ -95,6 +96,7 @@ function ChatView({
         <div className="flex flex-col h-full min-h-0">
           <AwaitingInputBanner agent={activeAgent} />
           <McpElicitationBanner agent={activeAgent} />
+          <LastMessageTimestamp agent={activeAgent} />
           <div className="flex-1 min-h-0">
             <CopilotChat
               agentId="default"

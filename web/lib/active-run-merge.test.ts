@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mergeActiveRunSnapshot, type ActiveRunSnapshot } from './active-run-merge.ts';
+import { isActiveRunStreaming, mergeActiveRunSnapshot, type ActiveRunSnapshot } from './active-run-merge.ts';
 import type { Message } from '@ag-ui/client';
 
 function assistantMsg(id: string, content: string): Message {
@@ -85,4 +85,41 @@ test('ignores a snapshot with empty accumulatedText', () => {
     updatedAt: new Date().toISOString(),
   };
   assert.deepEqual(mergeActiveRunSnapshot(msgs, active), msgs);
+});
+
+// Issue #451: refreshHistory() uses isActiveRunStreaming() to mirror ActiveRun's
+// status into the chat's "responding" state (isRunning) while polling.
+test('isActiveRunStreaming: true for a fresh streaming row', () => {
+  assert.equal(
+    isActiveRunStreaming({ status: 'streaming', updatedAt: new Date().toISOString() }),
+    true,
+  );
+});
+
+test('isActiveRunStreaming: false when there is no row', () => {
+  assert.equal(isActiveRunStreaming(null), false);
+});
+
+test('isActiveRunStreaming: false once status is no longer streaming', () => {
+  assert.equal(isActiveRunStreaming({ status: 'done', updatedAt: new Date().toISOString() }), false);
+});
+
+test('isActiveRunStreaming: false for a stale row (crashed browser, #451/#242)', () => {
+  assert.equal(
+    isActiveRunStreaming({ status: 'streaming', updatedAt: new Date(Date.now() - 120_000).toISOString() }),
+    false,
+  );
+});
+
+test("the synthetic in-flight message carries the ActiveRun row's updatedAt as its timestamp", () => {
+  const updatedAt = new Date().toISOString();
+  const active: ActiveRunSnapshot = {
+    status: 'streaming',
+    accumulatedText: 'still thinking...',
+    messageId: 'client-uuid-1',
+    updatedAt,
+  };
+  const result = mergeActiveRunSnapshot([], active);
+  assert.equal(result.length, 1);
+  assert.equal((result[0] as unknown as { timestamp?: string }).timestamp, updatedAt);
 });
