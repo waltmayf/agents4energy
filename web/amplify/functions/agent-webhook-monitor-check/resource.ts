@@ -19,5 +19,7 @@ export const agentWebhookMonitorCheck = defineFunction({
   environment: {
     // ARN of the ClaudeCode AgentCore Runtime — populated in backend.ts.
     CLAUDE_CODE_RUNTIME_ARN: '',
+    GITHUB_APP_ID: '',
+    GITHUB_APP_PRIVATE_KEY_SECRET_ARN: '',
   },
 });
