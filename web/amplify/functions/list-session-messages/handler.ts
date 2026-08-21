@@ -15,6 +15,12 @@ interface ListSessionMessagesArgs {
   sessionId: string;
   actorId: string;
   nextToken?: string | null;
+  /**
+   * Optional maximum number of most recent events to return. If omitted,
+   * the full transcript is returned. This bounds the payload for orchestrator
+   * progress peeks.
+   */
+  limit?: number | null;
 }
 
 interface ListSessionMessagesEvent {
@@ -125,7 +131,7 @@ async function fetchSessionSummary(
 export const handler = async (
   event: ListSessionMessagesEvent,
 ): Promise<ListSessionMessagesResult> => {
-  const { sessionId, actorId, nextToken } = event.arguments;
+  const { sessionId, actorId, nextToken, limit } = event.arguments;
   assertActorAuthorized(event, actorId);
 
   // Fetch summary and raw events in parallel.
@@ -180,8 +186,16 @@ export const handler = async (
     }
   }
 
+  // Apply optional limit to bound the number of events returned.
+  const limitedEvents = (() => {
+    if (typeof limit === 'number' && limit > 0 && events.length > limit) {
+      return events.slice(-limit);
+    }
+    return events;
+  })();
+
   return {
-    events,
+    events: limitedEvents,
     nextToken: eventsOutput.nextToken ?? null,
     summary: summaryResult?.summary ?? null,
     summaryTimestamp: summaryResult?.summaryTimestamp ?? null,
