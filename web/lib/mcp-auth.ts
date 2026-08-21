@@ -236,6 +236,15 @@ export async function authenticateViaPkce(opts: {
   oauthClientId: string;
   /** Existing credential ID to overwrite (delete then create). */
   existingCredentialId?: string;
+  /**
+   * Authorization server audience (e.g. an Auth0 API identifier). Required by
+   * audience-aware ASs to issue a JWT instead of an opaque token — see
+   * docs/gateway-auth0-dcr.md's "audience gap" note. Omitting it preserves the
+   * pre-#470 behavior exactly.
+   */
+  audience?: string;
+  /** Extra scopes to request alongside "openid". */
+  scopes?: string[];
 }): Promise<McpCredential> {
   const redirectUri = `${window.location.origin}/oauth/callback`;
 
@@ -252,10 +261,12 @@ export async function authenticateViaPkce(opts: {
   authUrl.searchParams.set('response_type', 'code');
   authUrl.searchParams.set('client_id', opts.oauthClientId);
   authUrl.searchParams.set('redirect_uri', redirectUri);
-  authUrl.searchParams.set('scope', 'openid');
+  const scope = ['openid', ...(opts.scopes ?? [])].join(' ');
+  authUrl.searchParams.set('scope', scope);
   authUrl.searchParams.set('code_challenge', challenge);
   authUrl.searchParams.set('code_challenge_method', 'S256');
   authUrl.searchParams.set('state', state);
+  if (opts.audience) authUrl.searchParams.set('audience', opts.audience);
 
   // 4. Open popup and wait for the code.
   const popup = openAuthPopup(authUrl.toString());

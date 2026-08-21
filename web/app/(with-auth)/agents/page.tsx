@@ -49,7 +49,7 @@ import {
   revokeCredential,
   isExpiredOrExpiringSoon,
 } from '@/lib/mcp-auth';
-import { listMcpToolsForServer } from '@/lib/list-mcp-tools';
+import { listMcpToolsForServer, isMcpAuthError } from '@/lib/list-mcp-tools';
 import { useCurrentUser } from '@/lib/use-current-user';
 import { safeListMcpServers } from '@/lib/mcp-server-safe-list';
 import { useOutboundAuthStatus, type OutboundAuthStatus } from '@/lib/outbound-oauth-status';
@@ -87,6 +87,11 @@ type McpServer = {
   enabled: boolean;
   headers: McpServerHeader[];
   oauthClientId?: string | null;
+  // Audience for the browser PKCE flow's /authorize request (issue #470) —
+  // required by audience-aware authorization servers (e.g. Auth0) to issue a
+  // gateway-valid JWT instead of an opaque token. Unrelated to the OAUTH_3LO
+  // outbound fields below.
+  oauthAudience?: string | null;
   // Set once the server is registered as a gateway target (auto-registered by
   // the register-mcp-target-stream Lambda shortly after creation, #338).
   // Gateway routing is mandatory, so a server without this can't be assigned
@@ -152,6 +157,7 @@ function toMcpServer(s: any): McpServer {
       (h) => ({ key: h.key ?? '', value: h.value ?? '' }),
     ),
     oauthClientId: s.oauthClientId ?? null,
+    oauthAudience: s.oauthAudience ?? null,
     gatewayTargetId: s.gatewayTargetId ?? null,
     outboundAuthType: (s.outboundAuthType ?? null) as OutboundAuthType | null,
     oauthVendor: (s.oauthVendor ?? null) as OauthVendor | null,
@@ -318,6 +324,7 @@ type McpServerForm = {
   enabled: boolean;
   headers: McpServerHeader[];
   oauthClientId: string;
+  oauthAudience: string;
   // Outbound auth (3LO), epic #412 slice 7 (#419).
   outboundAuthType: OutboundAuthType;
   oauthVendor: OauthVendor;
@@ -348,6 +355,7 @@ function serverToForm(s: McpServer): McpServerForm {
     enabled: s.enabled,
     headers: s.headers.map((h) => ({ ...h })),
     oauthClientId: s.oauthClientId ?? '',
+    oauthAudience: s.oauthAudience ?? '',
     outboundAuthType: (s.outboundAuthType ?? 'NONE') as OutboundAuthType,
     oauthVendor: (s.oauthVendor ?? 'GOOGLE') as OauthVendor,
     oauthDiscoveryUrl: s.oauthDiscoveryUrl ?? '',
@@ -371,6 +379,7 @@ function emptyServerForm(): McpServerForm {
     enabled: true,
     headers: [],
     oauthClientId: '',
+    oauthAudience: '',
     outboundAuthType: 'NONE',
     oauthVendor: 'GOOGLE',
     oauthDiscoveryUrl: '',
@@ -442,25 +451,59 @@ function McpToolsDialog({
   const [loading, setLoading] = useState(false);
   const [tools, setTools] = useState<McpToolItem[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [authenticating, setAuthenticating] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (!open || !server) return;
+  const runList = useCallback(async (s: McpServer) => {
     setLoading(true);
     setTools([]);
     setError(null);
+    try {
+      const result = await listMcpToolsForServer(s);
+      setTools(result.tools);
+      setError(result.error);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
-    (async () => {
-      try {
-        const result = await listMcpToolsForServer(server);
-        setTools(result.tools);
-        setError(result.error);
-      } catch (err: unknown) {
-        setError(err instanceof Error ? err.message : String(err));
-      } finally {
-        setLoading(false);
-      }
-    })();
+  useEffect(() => {
+    if (!open || !server) return;
+    setAuthError(null);
+    void runList(server);
   }, [open, server?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Issue #470: a listing that fails with an auth error (401/403/invalid_token/
+  // insufficient_scope) and has an oauthClientId configured can be retried
+  // right here — run the browser PKCE popup (with this server's oauthAudience
+  // + oauthScopes so an audience-aware AS like Auth0 issues a gateway-valid
+  // JWT, not an opaque token), store the credential, then re-list. Must be
+  // triggered by this click, not auto-run on open, or the popup gets blocked.
+  const canAuthenticate = !!server?.oauthClientId && !!error && isMcpAuthError(error);
+
+  async function handleAuthenticateAndRetry() {
+    if (!server?.oauthClientId) return;
+    setAuthenticating(true);
+    setAuthError(null);
+    try {
+      const existing = await fetchCredential(server.id).catch(() => null);
+      await authenticateViaPkce({
+        mcpServerId: server.id,
+        mcpServerUrl: server.url,
+        oauthClientId: server.oauthClientId.trim(),
+        audience: server.oauthAudience?.trim() || undefined,
+        scopes: server.oauthScopes ?? undefined,
+        existingCredentialId: existing?.id,
+      });
+      await runList(server);
+    } catch (err: unknown) {
+      setAuthError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setAuthenticating(false);
+    }
+  }
 
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
@@ -478,7 +521,24 @@ function McpToolsDialog({
             </div>
           )}
           {!loading && error && (
-            <p className="text-sm text-destructive bg-destructive/10 rounded-lg px-3 py-2">{error}</p>
+            <div className="space-y-2">
+              <p className="text-sm text-destructive bg-destructive/10 rounded-lg px-3 py-2">{error}</p>
+              {canAuthenticate && (
+                <Button
+                  type="button"
+                  size="sm"
+                  onClick={handleAuthenticateAndRetry}
+                  disabled={authenticating}
+                  data-testid="authenticate-and-list-tools-button"
+                >
+                  {authenticating ? <Spinner className="mr-1.5" /> : <KeyRoundIcon />}
+                  Authenticate & list tools
+                </Button>
+              )}
+              {authError && (
+                <p className="text-xs text-destructive">{authError}</p>
+              )}
+            </div>
           )}
           {!loading && !error && tools.length === 0 && (
             <p className="text-sm text-muted-foreground py-4 text-center">No tools found.</p>
@@ -757,6 +817,8 @@ function McpServerEditPanel({
         mcpServerId: server.id,
         mcpServerUrl: form.url || server.url,
         oauthClientId: form.oauthClientId.trim(),
+        audience: form.oauthAudience.trim() || undefined,
+        scopes: server.oauthScopes ?? undefined,
         existingCredentialId: credential?.id,
       });
       setCredential(cred);
@@ -875,6 +937,21 @@ function McpServerEditPanel({
               />
               <span className="text-xs font-normal text-muted-foreground mt-0.5 block">
                 When set, users authenticate via a browser popup (OAuth2 PKCE) before making MCP calls.
+              </span>
+            </label>
+            <label className="text-sm font-medium">
+              OAuth2 audience
+              <Input
+                className="mt-1 font-mono text-xs"
+                placeholder="e.g. the gateway's API identifier (optional)"
+                value={form.oauthAudience}
+                onChange={(e) => setField('oauthAudience', e.target.value)}
+                data-testid="input-mcp-oauth-audience"
+              />
+              <span className="text-xs font-normal text-muted-foreground mt-0.5 block">
+                Sent as <span className="font-mono">audience</span> in the PKCE authorize request. Required by
+                audience-aware authorization servers (e.g. Auth0) to issue a gateway-valid JWT instead of an
+                opaque token — see docs/gateway-auth0-dcr.md.
               </span>
             </label>
 
@@ -2090,6 +2167,7 @@ export default function AgentsPage() {
     const isOauth = form.outboundAuthType === 'OAUTH_3LO';
     const isDcr = isOauth && form.oauthVendor === 'CUSTOM' && form.oauthDynamicRegistration;
     const oauthClientId = isDcr ? undefined : (form.oauthClientId.trim() || undefined);
+    const oauthAudience = form.oauthAudience.trim() || undefined;
 
     // Outbound auth (3LO), epic #412 slice 7 (#419). `undefined` omits a field
     // from the mutation (preserving any existing value) rather than nulling it
@@ -2151,13 +2229,14 @@ export default function AgentsPage() {
         enabled: form.enabled,
         headers,
         oauthClientId,
+        oauthAudience,
         ...outboundFields,
       });
       if (updateRes.errors?.length) throw new Error(updateRes.errors.map((e) => e.message).join('; '));
 
       dispatch({
         type: 'upsertMcpServer',
-        server: toMcpServer({ id, name: form.name, url: form.url, description: form.description || null, enabled: form.enabled, headers, oauthClientId: oauthClientId ?? null, ...outboundFields, ...readBacks }),
+        server: toMcpServer({ id, name: form.name, url: form.url, description: form.description || null, enabled: form.enabled, headers, oauthClientId: oauthClientId ?? null, oauthAudience: oauthAudience ?? null, ...outboundFields, ...readBacks }),
       });
     } else {
       const createRes = await amplifyClient.models.McpServer.create({
@@ -2167,6 +2246,7 @@ export default function AgentsPage() {
         enabled: form.enabled,
         headers,
         oauthClientId,
+        oauthAudience,
         ...outboundFields,
       });
       if (createRes.errors?.length) throw new Error(createRes.errors.map((e) => e.message).join('; '));
@@ -2174,7 +2254,7 @@ export default function AgentsPage() {
       const newId = createRes.data!.id;
       dispatch({
         type: 'upsertMcpServer',
-        server: toMcpServer({ id: newId, name: form.name, url: form.url, description: form.description || null, enabled: form.enabled, headers, oauthClientId: oauthClientId ?? null, ...outboundFields }),
+        server: toMcpServer({ id: newId, name: form.name, url: form.url, description: form.description || null, enabled: form.enabled, headers, oauthClientId: oauthClientId ?? null, oauthAudience: oauthAudience ?? null, ...outboundFields }),
       });
       setSelectedMcpId(newId);
     }
@@ -2219,6 +2299,8 @@ export default function AgentsPage() {
         mcpServerId: s.id,
         mcpServerUrl: s.url,
         oauthClientId: s.oauthClientId.trim(),
+        audience: s.oauthAudience?.trim() || undefined,
+        scopes: s.oauthScopes ?? undefined,
         existingCredentialId: mcpCredentials[s.id]?.id,
       });
       setMcpCredentials((prev) => ({ ...prev, [s.id]: cred }));

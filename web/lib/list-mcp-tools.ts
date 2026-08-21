@@ -52,3 +52,12 @@ export async function listMcpToolsForServer(server: {
     error: result?.error ?? null,
   };
 }
+
+// Matches the shapes list-mcp-tools/handler.ts's error strings take for an
+// auth failure: an HTTP 401/403 status line, or an OAuth2/RFC 6750 error code
+// (invalid_token / insufficient_scope) embedded in the response body it
+// forwards verbatim. Used to decide whether "Authenticate & list tools" (the
+// browser PKCE retry, issue #470) should be offered instead of a bare error.
+export function isMcpAuthError(error: string): boolean {
+  return /\b(401|403)\b|invalid_token|insufficient_scope|unauthorized/i.test(error);
+}
