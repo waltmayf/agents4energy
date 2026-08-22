@@ -3,6 +3,10 @@ import { useDefaultRenderTool } from '@copilotkit/react-core/v2';
 import { useState } from 'react';
 import { ChevronRightIcon, WrenchIcon, Loader2Icon } from 'lucide-react';
 import { Document, Scalar, visit } from 'yaml';
+import { decodeToolResultContent, type ToolResultPart } from '@/lib/tool-result-content';
+import { MAX_HTML_BYTES, MAX_SPEC_BYTES, jsonByteSize, parseComponentSpec } from '@/lib/component-spec';
+import { renderComponentSpec } from './tool-widgets/registry';
+import { SandboxedHtml } from './tool-widgets/sandboxed-html';
 
 /**
  * Registers a wildcard (`name: "*"`) tool-call renderer for the chat.
@@ -78,14 +82,57 @@ function ToolCallCard({
               <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                 Result
               </div>
-              <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded bg-background px-2 py-1 text-xs">
-                {formatAsYaml(result)}
-              </pre>
+              <ToolResultView result={result} />
             </div>
           )}
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * Renders a tool result. #473's translators JSON-encode structured content
+ * (UI blocks) behind a sentinel envelope; `decodeToolResultContent` returns
+ * null for plain text/JSON, in which case this falls through to the original
+ * unchanged YAML card.
+ */
+function ToolResultView({ result }: { result: string }) {
+  const parts = decodeToolResultContent(result);
+  if (!parts) return <YamlBlock value={result} />;
+  return (
+    <div className="space-y-2">
+      {parts.map((part, i) => (
+        <ToolResultPartView key={i} part={part} />
+      ))}
+    </div>
+  );
+}
+
+function ToolResultPartView({ part }: { part: ToolResultPart }) {
+  if (part.kind === 'text') return <YamlBlock value={part.text} />;
+
+  if (part.mimeType === 'text/html' && typeof part.html === 'string') {
+    if (part.html.length > MAX_HTML_BYTES) return <YamlBlock value={part} />;
+    return <SandboxedHtml html={part.html} />;
+  }
+
+  if (part.spec !== undefined) {
+    if (jsonByteSize(part.spec) <= MAX_SPEC_BYTES) {
+      const spec = parseComponentSpec(part.spec);
+      if (spec) return renderComponentSpec(spec);
+    }
+  }
+
+  // Unknown mimeType/spec shape, or oversized — fall back to a YAML dump of the raw block.
+  return <YamlBlock value={part} />;
+}
+
+function YamlBlock({ value }: { value: unknown }) {
+  return (
+    <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded bg-background px-2 py-1 text-xs">
+      {formatAsYaml(value)}
+    </pre>
   );
 }
 
