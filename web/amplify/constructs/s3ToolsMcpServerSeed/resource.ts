@@ -18,6 +18,8 @@ export interface S3ToolsMcpServerSeedProps {
   gatewayEndpoint: string;
   /** AppSync GraphQL API id — scopes the handler's appsync:GraphQL grant to this API only. */
   graphqlApiId: string;
+  /** The s3-tools gateway target's id — written onto the seeded McpServer's gatewayTargetId field. */
+  gatewayTargetId: string;
 }
 
 /**
@@ -67,6 +69,7 @@ export class S3ToolsMcpServerSeed extends Construct {
         GraphqlUrl: props.graphqlUrl,
         GraphqlRegion: props.graphqlRegion,
         GatewayEndpoint: props.gatewayEndpoint,
+        GatewayTargetId: props.gatewayTargetId,
       },
     });
   }

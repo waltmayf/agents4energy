@@ -891,6 +891,7 @@ if (AGENTCORE_GATEWAY_ID) {
       graphqlRegion: AGENTCORE_REGION,
       graphqlApiId: backend.data.resources.cfnResources.cfnGraphqlApi.attrApiId,
       gatewayEndpoint: AGENTCORE_GATEWAY_ENDPOINT,
+      gatewayTargetId: s3ToolsGatewayTarget.targetId,
     });
   }
 }
