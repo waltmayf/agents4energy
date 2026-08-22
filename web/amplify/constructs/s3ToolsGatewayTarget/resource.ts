@@ -30,6 +30,9 @@ export interface S3ToolsGatewayTargetProps {
  * existing targets by name before creating.
  */
 export class S3ToolsGatewayTarget extends Construct {
+  /** The AgentCore gateway target id (custom resource's PhysicalResourceId) — feed into S3ToolsMcpServerSeed. */
+  public readonly targetId: string;
+
   constructor(scope: Construct, id: string, props: S3ToolsGatewayTargetProps) {
     super(scope, id);
 
@@ -78,7 +81,7 @@ export class S3ToolsGatewayTarget extends Construct {
       onEventHandler: fn,
     });
 
-    new CustomResource(this, 'Resource', {
+    const resource = new CustomResource(this, 'Resource', {
       serviceToken: provider.serviceToken,
       properties: {
         GatewayIdentifier: props.gatewayIdentifier,
@@ -86,5 +89,7 @@ export class S3ToolsGatewayTarget extends Construct {
         LambdaArn: props.lambdaArn,
       },
     });
+
+    this.targetId = resource.ref;
   }
 }
