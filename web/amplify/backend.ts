@@ -1125,6 +1125,11 @@ if (GITHUB_APP_PRIVATE_KEY_SECRET_ARN) {
     actions: ['secretsmanager:GetSecretValue'],
     resources: [GITHUB_APP_PRIVATE_KEY_SECRET_ARN],
   }));
+  // Grant monitor-check lambda access to the GitHub App private key secret for token minting.
+  webhookMonitorCheckLambda.addToRolePolicy(new PolicyStatement({
+    actions: ['secretsmanager:GetSecretValue'],
+    resources: [GITHUB_APP_PRIVATE_KEY_SECRET_ARN],
+  }));
 }
 if (JIRA_API_TOKEN_SECRET_ARN) {
   webhookPostCommentLambda.addToRolePolicy(new PolicyStatement({
