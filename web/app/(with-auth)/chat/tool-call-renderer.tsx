@@ -3,8 +3,9 @@ import { useDefaultRenderTool } from '@copilotkit/react-core/v2';
 import { useState } from 'react';
 import { ChevronRightIcon, WrenchIcon, Loader2Icon } from 'lucide-react';
 import { Document, Scalar, visit } from 'yaml';
+import { widgetRegistry } from './WidgetRegistry';
 
-/**
+ /**
  * Registers a wildcard (`name: "*"`) tool-call renderer for the chat.
  *
  * Without a registered renderer, CopilotKit's `renderToolCall` returns null, so
@@ -78,9 +79,37 @@ function ToolCallCard({
               <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                 Result
               </div>
-              <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded bg-background px-2 py-1 text-xs">
-                {formatAsYaml(result)}
-              </pre>
+              {/* Render based on decoded payload */}
+              {(() => {
+                try {
+                  const parsed = JSON.parse(result as string);
+                  // HTML block – render sandboxed iframe
+                  if (parsed.mimeType === 'text/html' && typeof parsed.html === 'string') {
+                    // Sandbox without allow-same-origin or allow-scripts for safety.
+                    return (
+                      <iframe
+                        sandbox=""
+                        srcDoc={parsed.html}
+                        className="w-full h-64 border"
+                        title="Tool result HTML"
+                      />
+                    );
+                  }
+                  // Component spec – render via registry
+                  if (parsed.spec && typeof parsed.spec.type === 'string') {
+                    const Component = widgetRegistry[parsed.spec.type];
+                    if (Component) {
+                      return <Component spec={parsed.spec} />;
+                    }
+                  }
+                } catch {}
+                // Fallback: YAML pretty‑print
+                return (
+                  <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded bg-background px-2 py-1 text-xs">
+                    {formatAsYaml(result)}
+                  </pre>
+                );
+              })()}
             </div>
           )}
         </div>
