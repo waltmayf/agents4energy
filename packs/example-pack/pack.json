@@ -1,0 +1,26 @@
+{
+  "id": "example-pack",
+  "name": "Example Pack",
+  "description": "A minimal example pack used for documentation and testing.",
+  "agent": {
+    "name": "Example Agent",
+    "slug": "example-agent",
+    "description": "Agent bundled in the example pack.",
+    "systemPromptFile": "system-prompt.md",
+    "modelId": "anthropic.claude-3-5-sonnet-20240620-v1:0",
+    "enabled": true
+  },
+  "mcpServers": [
+    {
+      "name": "Example MCP Server",
+      "url": "https://example.com/api",
+      "description": "Demo MCP endpoint.",
+      "serverType": "mcp",
+      "headers": [{ "key": "Authorization", "value": "Bearer token" }],
+      "enabled": true
+    }
+  ],
+  "groupGrants": [
+    { "group": "admin", "toolName": "*", "effect": "ALLOW" }
+  ]
+}
