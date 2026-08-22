@@ -9,6 +9,8 @@ as a target and injects each user's vaulted token when it calls out (including t
 deploy-twice "gateway calls another gateway" flow) — see
 [docs/gateway-to-gateway-federation.md](gateway-to-gateway-federation.md).
 
+Once an MCP server is reachable, [docs/use-case-packs.md](use-case-packs.md) covers bundling it with an agent + system prompt into a single deployable manifest (a "pack").
+
 ---
 
 ## Protocol requirements
