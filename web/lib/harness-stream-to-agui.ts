@@ -1,5 +1,12 @@
 import { EventType, type BaseEvent } from '@ag-ui/client';
 import { MCP_ELICITATION_EVENT_NAME, elicitationFriendlyMessage, parseMcpElicitation } from './mcp-elicitation.ts';
+import {
+  encodeToolResultParts,
+  hasStructuredPart,
+  toToolResultPart,
+  type RawToolResultItem,
+  type ToolResultPart,
+} from './tool-result-content.ts';
 
 /**
  * Translates the AgentCore Harness's live Bedrock Converse event stream into
@@ -52,8 +59,8 @@ export interface HarnessStreamState {
   textStarted: boolean;
   /** contentBlockIndex → toolCallId for open toolUse blocks. */
   toolBlocks: Map<number, string>;
-  /** contentBlockIndex → accumulating toolResult, keyed by toolCallId. */
-  resultBlocks: Map<number, { toolCallId: string; parts: string[] }>;
+  /** contentBlockIndex → accumulating toolResult raw items, keyed by toolCallId. */
+  resultBlocks: Map<number, { toolCallId: string; rawItems: RawToolResultItem[] }>;
 }
 
 export function createHarnessStreamState(): HarnessStreamState {
@@ -129,7 +136,7 @@ export function translateHarnessStreamEvent(
     } else if (start?.toolResult) {
       state.resultBlocks.set(idx, {
         toolCallId: start.toolResult.toolUseId ?? genId(),
-        parts: [],
+        rawItems: [],
       });
     }
     return out;
@@ -165,7 +172,7 @@ export function translateHarnessStreamEvent(
     } else if (Array.isArray(delta?.toolResult)) {
       const block = state.resultBlocks.get(idx);
       if (block) {
-        for (const part of delta.toolResult) block.parts.push(resultPartText(part));
+        for (const part of delta.toolResult) block.rawItems.push(part);
       }
     }
     // reasoningContent deltas are intentionally ignored live for now.
@@ -182,7 +189,10 @@ export function translateHarnessStreamEvent(
     }
     const result = state.resultBlocks.get(idx);
     if (result) {
-      const joined = result.parts.join('');
+      // Legacy flattened text — kept for elicitation detection (the -32042
+      // JSON-RPC error always arrives as a plain text item) and as the
+      // fallback content when no UI block is present.
+      const joined = result.rawItems.map(resultPartText).join('');
       // MCP elicitation (epic #412 slice 4): the gateway can return a -32042
       // JSON-RPC error instead of a normal tool result when 3LO consent is
       // needed. Emit it as a CUSTOM event the chat UI can render an
@@ -192,11 +202,23 @@ export function translateHarnessStreamEvent(
       if (elicitation) {
         out.push({ type: EventType.CUSTOM, name: MCP_ELICITATION_EVENT_NAME, value: elicitation } as BaseEvent);
       }
+      // A UI block (a JSON item shaped `{ mimeType, spec?, html? }`) is
+      // preserved via the shared structured envelope so the renderer (#475)
+      // can decode it; plain text/JSON results keep the legacy flattened
+      // string exactly, so existing tool cards render unchanged.
+      const parts: ToolResultPart[] = result.rawItems
+        .map(toToolResultPart)
+        .filter((p): p is ToolResultPart => p !== null);
+      const content = elicitation
+        ? elicitationFriendlyMessage(elicitation)
+        : hasStructuredPart(parts)
+          ? encodeToolResultParts(parts)
+          : joined;
       out.push({
         type: EventType.TOOL_CALL_RESULT,
         messageId: genId(),
         toolCallId: result.toolCallId,
-        content: elicitation ? elicitationFriendlyMessage(elicitation) : joined,
+        content,
         role: 'tool',
       } as BaseEvent);
       state.resultBlocks.delete(idx);
