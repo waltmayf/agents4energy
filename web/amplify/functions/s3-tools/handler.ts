@@ -9,6 +9,7 @@ import {
 } from '@aws-sdk/client-s3';
 import { resolveS3Path, resolveS3Prefix, S3FsPathError } from '../../../lib/s3-fs-path';
 import { applyDiff, DiffFormatError, DiffApplyError } from '../../../lib/s3-fs-diff';
+import { COMPONENT_SPEC_MIME, type TableSpec } from '../../../lib/component-spec';
 
 const BUCKET_NAME = process.env.BUCKET_NAME!;
 const REGION = process.env.AWS_REGION ?? 'us-east-1';
@@ -142,7 +143,24 @@ async function handleListFiles(event: ToolEvent): Promise<unknown> {
     continuationToken = res.IsTruncated ? res.NextContinuationToken : undefined;
   } while (continuationToken);
 
-  return { path: path ?? '/', entries };
+  // Sort directories first, then alphabetically, so the rendered table reads
+  // like a familiar file browser rather than S3's arbitrary listing order.
+  entries.sort((a, b) => {
+    if (a.type !== b.type) return a.type === 'directory' ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
+
+  const tableSpec: TableSpec = {
+    type: 'table',
+    title: `Files in ${path ?? '/'}`,
+    columns: ['Name', 'Type', 'Size (bytes)'],
+    rows: entries.map((e) => [e.name, e.type, e.type === 'file' ? e.size : '']),
+  };
+
+  // `entries` stays alongside the widget spec so the model keeps a plain,
+  // easy-to-reason-about shape for follow-up turns — only the frontend's
+  // AG-UI translators pick out `mimeType`/`spec` for rendering (#475).
+  return { path: path ?? '/', entries, mimeType: COMPONENT_SPEC_MIME, spec: tableSpec };
 }
 
 export const handler = async (event: ToolEvent, context: Context): Promise<unknown> => {
