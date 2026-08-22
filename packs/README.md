@@ -22,9 +22,9 @@ The manifest must conform to the JSON Schema exported as `packManifestSchema` in
 | `description` | Optional free‑form description. | — |
 | `agent` | Agent configuration. | `Agent` table rows (`name`, `slug`, `description`, `systemPromptText`/`systemPromptFile`, `modelId`, `enabled`). |
 | `agent.systemPromptText` | Inline system prompt. Takes precedence over `systemPromptFile`. | `Agent.systemPromptText` |
-| `agent.systemPromptFile` | Path (relative to the pack folder) to a markdown file containing the system prompt. | `Agent.systemPromptS3Key` will be populated at runtime from the file content. |
+| `agent.systemPromptFile` | Path (relative to the pack folder) to a markdown file containing the system prompt. | Read from disk by `deploy-pack.ts` and written inline to `Agent.systemPromptText` (no S3 upload in v1). |
 | `mcpServers` | Array of MCP server definitions. | `McpServer` table rows (fields listed in the schema). |
-| `groupGrants` | Optional per‑group tool grants. | `GroupToolGrant` rows (`group`, `toolName`, `effect`). |
+| `groupGrants` | Optional per‑group tool grants (`group`, `toolName`, `effect`). Not scoped to a specific `mcpServer` in the manifest — `deploy-pack.ts` applies each grant to every `McpServer` in the same pack. | `GroupToolGrant` rows (`group`, `mcpServerId`, `toolName`, `effect`). |
 
 ### Example manifest (see `packs/example-pack/pack.json`)
 
@@ -61,4 +61,15 @@ The optional `system-prompt.md` file lives alongside `pack.json` and contains th
 
 ---
 
-When a pack is applied, the CLI or automation scripts will read the manifest, create or update the corresponding `Agent`, `McpServer`, and `GroupToolGrant` rows, and upload any referenced markdown files to S3 as needed.
+## Deploying a pack
+
+`scripts/deploy-pack.ts` (via the `scripts/deploy-pack.sh <pack-id>` wrapper) reads a pack's manifest and idempotently provisions it against the deployed backend over authenticated GraphQL — no redeploy needed for URL/gateway MCP tools:
+
+```bash
+./scripts/deploy-pack.sh example-pack            # apply
+./scripts/deploy-pack.sh example-pack --dry-run  # print planned mutations only
+```
+
+It find-or-creates/updates the `Agent` (matched by `slug`), each `McpServer` (matched by `name`), the `AgentMcpServer` joins, and any `GroupToolGrant` rows — safe to re-run.
+
+**Packs are additive only.** Deleting an entry from `pack.json` and re-running `deploy-pack.sh` does **not** delete the previously-created row — teardown/deletion is out of scope while the project is in the `development` phase (see `PROJECT_PHASE` in `CLAUDE.md`). Remove rows manually via `scripts/graphql.sh` if needed.
