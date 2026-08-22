@@ -1,0 +1,24 @@
+{
+  "id": "s3-filesystem-explorer",
+  "name": "S3 Filesystem Explorer",
+  "description": "Agent wired to the already-deployed S3 filesystem gateway target (ApplyDiff/ListFiles/ReadFile/DeleteFile, issue #240) — a real, working pack rather than a stub.",
+  "agent": {
+    "name": "S3 Filesystem Explorer",
+    "slug": "s3-filesystem-explorer",
+    "description": "Reads, writes, and deletes files in the demo S3 bucket via the AgentCore Gateway's S3 filesystem tools.",
+    "systemPromptFile": "system-prompt.md",
+    "enabled": true
+  },
+  "mcpServers": [
+    {
+      "name": "S3 Filesystem Tools",
+      "url": "https://default-default-gateway-web-main-r7mcr35dot.gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp",
+      "description": "AgentCore Gateway exposing the ApplyDiff/ListFiles/ReadFile/DeleteFile S3 filesystem tools (issue #240).",
+      "serverType": "agentcore",
+      "enabled": true
+    }
+  ],
+  "groupGrants": [
+    { "group": "reservoir-eng", "toolName": "*", "effect": "ALLOW" }
+  ]
+}

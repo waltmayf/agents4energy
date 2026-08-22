@@ -1,5 +1,7 @@
 # Packs Folder Convention
 
+> For the fuller walkthrough (authoring steps, the three-table mapping, a worked example, and the Lambda-backed-tools limitation), see [`docs/use-case-packs.md`](../docs/use-case-packs.md).
+
 This repository defines **use‑case packs** that bundle an Agent, its MCP servers (tools), and optional group‑tool grants. A pack lives in its own folder under `packs/` and follows this layout:
 
 ```
