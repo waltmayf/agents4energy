@@ -77,6 +77,14 @@ The MCP server **must** meet all of the following for the OAuth flow to work:
 
 5. The authorization server must issue tokens with the `openid` scope.
 
+6. **Audience-aware authorization servers** (e.g. Auth0) issue an **opaque**
+   token — not a JWT — for a token request that omits `audience`. A gateway's
+   `CUSTOM_JWT` authorizer can only validate a JWT, so it rejects the opaque
+   token outright (issue #470; see the "audience gap" note in
+   [docs/gateway-auth0-dcr.md](gateway-auth0-dcr.md)). If your AS is
+   audience-aware, set **OAuth2 audience** on the `McpServer` record to the
+   gateway's API identifier — see `oauthAudience` below.
+
 ### Dispatcher Gateway — current configuration
 
 | Property | Value |
@@ -111,6 +119,30 @@ Once a server record has an **OAuth2 client ID** set, the **Your credentials** s
 ### Revoking / re-authenticating
 
 Click **Revoke** to delete your stored token. Then click **Authenticate** to run the flow again (e.g. after a token expires or you need to switch accounts).
+
+### `oauthAudience` (issue #470)
+
+Optional field on `McpServer`, shown next to **OAuth2 client ID**. When set, it
+is sent as `audience=<value>` in the `/authorize` request (alongside
+`scope=openid <oauthScopes>`), which is what makes an audience-aware AS like
+Auth0 issue a gateway-valid JWT instead of an opaque token. Leaving it blank
+preserves the previous behavior exactly — needed for authorization servers
+(like Cognito) that don't use the `audience` parameter at all.
+
+### Deterministic "Authenticate & list tools" retry
+
+Clicking **List tools** on a server that requires auth but has no valid
+stored credential yet no longer just shows the raw error. If the response is
+an auth failure (HTTP 401/403, or an `invalid_token` / `insufficient_scope`
+OAuth2 error) **and** the server has an `oauthClientId` configured, an
+**Authenticate & list tools** button appears in the same dialog. Clicking it
+runs the PKCE popup described above (with that server's `oauthClientId` +
+`oauthAudience` + `oauthScopes`), saves the resulting `McpServerCredential`,
+and immediately retries the listing — entirely in the browser, via the same
+`listMcpTools` Lambda used for static-header servers. This does **not**
+involve the agent, chat, or the outbound-3LO vault path described in
+[docs/gateway-to-gateway-federation.md](gateway-to-gateway-federation.md); it
+only reads/writes the current user's own `McpServerCredential` row.
 
 ---
 

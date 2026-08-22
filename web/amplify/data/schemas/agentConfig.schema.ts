@@ -98,6 +98,12 @@ export const agentConfigSchema = a.schema({
     //   the AgentCore Identity OAuth2 credential provider (paired with
     //   oauthClientSecretArn).
     oauthClientId: a.string(),
+    // Audience for the PKCE (direct-browser) flow's /authorize request, e.g. an
+    // Auth0 API identifier. Without this, an audience-aware authorization server
+    // (Auth0) issues an opaque token that a CUSTOM_JWT gateway authorizer rejects
+    // — see docs/gateway-auth0-dcr.md's "audience gap" note (issue #470). Unused
+    // by the OAUTH_3LO outbound flow, which has its own vendor-specific plumbing.
+    oauthAudience: a.string(),
 
     // --- Outbound auth (3LO), epic #412. See McpServerOutboundAuthType/McpServerOauthVendor above. ---
     // Amplify enum refs don't support .default(); absent/null is treated as NONE by all readers.

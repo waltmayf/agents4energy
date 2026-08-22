@@ -116,6 +116,31 @@ test.describe('MCP server create / edit', () => {
     await expect(page.getByTestId('input-mcp-name')).toBeVisible();
     await expect(page.getByTestId('input-mcp-url')).toBeVisible();
     await expect(page.getByTestId('input-mcp-oauth-client-id')).toBeVisible();
+    await expect(page.getByTestId('input-mcp-oauth-audience')).toBeVisible();
+  });
+
+  // Issue #470: oauthAudience is a plain optional string field on McpServer,
+  // saved/reloaded the same way as oauthClientId.
+  test('oauthAudience round-trips through save and reload', async ({ page }) => {
+    const name = e2eServerName('Audience Test');
+    await page.getByTestId('input-mcp-name').fill(name);
+    await page.getByTestId('input-mcp-url').fill('https://audience-test.invalid/mcp');
+    await page.getByTestId('input-mcp-oauth-client-id').fill('test-client-id-456');
+    await page.getByTestId('input-mcp-oauth-audience').fill('https://gateway.example/mcp');
+    await page.getByTestId('save-mcp-server-button').click();
+
+    await expect(page.getByTestId('delete-mcp-server-button')).toBeVisible({ timeout: 10_000 });
+    const row = page.locator('[data-testid^="mcp-server-row-"]').filter({ hasText: name });
+    await expect(row).toBeVisible({ timeout: 10_000 });
+    const testId = (await row.getAttribute('data-testid')) ?? '';
+    const id = testId.replace('mcp-server-row-', '');
+    if (id) createdServerIds.push(id);
+
+    // Reload and reselect — the saved value should come back from the API.
+    await page.reload();
+    await page.getByTestId('tab-mcp-servers').click();
+    await page.getByTestId(`mcp-server-row-${id}`).click();
+    await expect(page.getByTestId('input-mcp-oauth-audience')).toHaveValue('https://gateway.example/mcp');
   });
 
   test('shows error when name is missing', async ({ page }) => {
