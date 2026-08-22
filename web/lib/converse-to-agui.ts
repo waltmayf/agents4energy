@@ -1,5 +1,11 @@
 import type { Message, ToolCall } from '@ag-ui/client';
 import { elicitationFriendlyMessage, parseMcpElicitation } from './mcp-elicitation.ts';
+import {
+  encodeToolResultParts,
+  hasStructuredPart,
+  toToolResultPart,
+  type ToolResultPart,
+} from './tool-result-content.ts';
 
 /**
  * Maps stored Bedrock Converse content into AG-UI `Message[]` for a
@@ -216,14 +222,19 @@ export function eventToMessages(ev: StoredEvent, index: number): Message[] {
     } else if (block?.toolResult) {
       // Tool results become their own `tool` messages, linked by toolCallId.
       const tr = block.toolResult;
-      const resultText = Array.isArray(tr.content)
-        ? tr.content
-            .map((c: ContentBlock) =>
-              typeof c?.text === 'string' ? c.text : c?.json != null ? JSON.stringify(c.json) : '',
-            )
+      const parts: ToolResultPart[] = Array.isArray(tr.content)
+        ? tr.content.map(toToolResultPart).filter((p): p is ToolResultPart => p !== null)
+        : [];
+      // A UI block (a JSON content item shaped `{ mimeType, spec?, html? }`)
+      // is preserved via the shared structured envelope so the renderer
+      // (#475) can decode it; plain text/JSON results keep today's flattened
+      // string exactly, so existing tool cards render unchanged.
+      const resultText = hasStructuredPart(parts)
+        ? encodeToolResultParts(parts)
+        : parts
+            .map((p) => (p.kind === 'text' ? p.text : ''))
             .filter(Boolean)
-            .join('\n')
-        : '';
+            .join('\n');
       // MCP elicitation (epic #412 slice 4): if this stored tool result is a
       // -32042 consent-required error, show the friendly stand-in instead of
       // the raw JSON-RPC payload on reload too — the live "Authenticate"

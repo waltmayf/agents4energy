@@ -7,6 +7,7 @@ import {
   messageTimestamp,
   type StoredEvent,
 } from './converse-to-agui.ts';
+import { decodeToolResultContent } from './tool-result-content.ts';
 
 /** Build a StoredEvent whose contentJson is a Converse ContentBlock[]. */
 function stored(role: string, blocks: unknown[], eventId = 'e1'): StoredEvent {
@@ -126,6 +127,46 @@ test('toolResult content supports json parts and joins multiple parts', () => {
   );
   const toolMsg = msgs.find((m) => m.role === 'tool') as { content: string };
   assert.equal(toolMsg.content, 'line1\n{"ok":true}');
+});
+
+test('toolResult with a UI block (mimeType-tagged json) survives as a decodable structured envelope', () => {
+  const msgs = eventToMessages(
+    stored('user', [
+      {
+        toolResult: {
+          toolUseId: 't1',
+          content: [{ json: { mimeType: 'application/vnd.agents4energy.ui+json', spec: { widget: 'gauge', value: 42 } } }],
+        },
+      },
+    ]),
+    0,
+  );
+  const toolMsg = msgs.find((m) => m.role === 'tool') as { content: string };
+  const decoded = decodeToolResultContent(toolMsg.content);
+  assert.ok(decoded, 'expected a decodable structured envelope');
+  assert.deepEqual(decoded, [
+    { kind: 'ui', mimeType: 'application/vnd.agents4energy.ui+json', spec: { widget: 'gauge', value: 42 } },
+  ]);
+});
+
+test('toolResult mixing text and a UI block preserves both parts in order', () => {
+  const msgs = eventToMessages(
+    stored('user', [
+      {
+        toolResult: {
+          toolUseId: 't1',
+          content: [{ text: 'here is the chart' }, { json: { mimeType: 'text/html', html: '<div>hi</div>' } }],
+        },
+      },
+    ]),
+    0,
+  );
+  const toolMsg = msgs.find((m) => m.role === 'tool') as { content: string };
+  const decoded = decodeToolResultContent(toolMsg.content);
+  assert.deepEqual(decoded, [
+    { kind: 'text', text: 'here is the chart' },
+    { kind: 'ui', mimeType: 'text/html', html: '<div>hi</div>' },
+  ]);
 });
 
 test('error toolResult sets the error field', () => {

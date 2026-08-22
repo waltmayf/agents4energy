@@ -7,6 +7,7 @@ import {
   finalizeHarnessStream,
   type HarnessStreamEvent,
 } from './harness-stream-to-agui.ts';
+import { decodeToolResultContent } from './tool-result-content.ts';
 
 /**
  * Run a full harness stream through the translator with a deterministic id
@@ -115,6 +116,28 @@ test('toolResult block emits a TOOL_CALL_RESULT linked by toolCallId', () => {
   assert.equal(result.toolCallId, 't1');
   assert.equal(result.role, 'tool');
   assert.equal(result.content, 'sunny{"temp":75}');
+});
+
+test('toolResult with a UI block (mimeType-tagged json) survives as a decodable structured envelope', () => {
+  const evs = run([
+    { messageStart: { role: 'user' } },
+    {
+      contentBlockStart: { contentBlockIndex: 0, start: { toolResult: { toolUseId: 't1', status: 'success' } } },
+    },
+    {
+      contentBlockDelta: {
+        contentBlockIndex: 0,
+        delta: { toolResult: [{ json: { mimeType: 'application/vnd.agents4energy.ui+json', spec: { widget: 'gauge', value: 42 } } }] },
+      },
+    },
+    { contentBlockStop: { contentBlockIndex: 0 } },
+  ]);
+  assert.deepEqual(types(evs), [EventType.TOOL_CALL_RESULT]);
+  const result = evs[0] as unknown as { content: string };
+  const decoded = decodeToolResultContent(result.content);
+  assert.deepEqual(decoded, [
+    { kind: 'ui', mimeType: 'application/vnd.agents4energy.ui+json', spec: { widget: 'gauge', value: 42 } },
+  ]);
 });
 
 test('interleaved tool-use blocks are attributed by contentBlockIndex', () => {
