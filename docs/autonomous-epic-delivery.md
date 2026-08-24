@@ -87,6 +87,17 @@ sleep between waves.
 
 ### The orchestrator
 
+**It dispatches; it never implements.** The orchestrator's own tool calls
+should only ever be reads (issues, PRs, code) plus writes to GitHub
+metadata (comments, labels, checklists) — the actual feature code, tests,
+and docs a slice needs are always a **worker's** output, never the
+orchestrator's own `Edit`/`Write` calls. This has gone wrong once already
+(the orchestrator started implementing an epic in its own session and had
+to be corrected twice — see
+[`docs/retro-ai-dlc-nx-plugin-delivery.md`](./retro-ai-dlc-nx-plugin-delivery.md)),
+which is why the orchestrator prompt now opens with an explicit self-check
+before any edit/build/deploy tool call.
+
 **Responsibilities**
 
 - Read the backlog: work epics in dependency order, finishing an epic's child
@@ -102,8 +113,17 @@ sleep between waves.
 - On wake: review each resulting PR, merge the green ones, re-dispatch any run
   that finished empty-handed (it hit the ceiling — slice it smaller), and leave
   `needs-review` issues alone.
-- Repeat until the backlog is drained or only human-blocked issues remain, then
-  post a final summary and finish.
+- Repeat until the backlog is drained or only human-blocked issues remain.
+- **Before stopping, reconcile the issue tree** — don't just stop once epic
+  PRs are merged. Re-verify each child issue's actual state (a PR can close
+  its parent epic instead of the child it resolved, leaving the child open),
+  close any that already landed but weren't auto-closed, tick the
+  roadmap/epic checklist, and post a final summary — autonomously, without
+  being asked. See
+  ["When to stop"](../web/amplify/agentcore/ClaudeCode/prompts/orchestrator.md#when-to-stop-roadmap-done-means-the-issue-tree-is-reconciled-not-just-epics-merged)
+  in the orchestrator prompt for the exact steps; a prior run skipped this
+  and left 22 child issues open after every epic had merged (see
+  [`docs/retro-ai-dlc-nx-plugin-delivery.md`](./retro-ai-dlc-nx-plugin-delivery.md)).
 
 **Bias to action.** The orchestrator and workers should take reasonable
 decisions autonomously and **document them on the issue/PR** rather than
@@ -155,6 +175,25 @@ Each worker is a single `@agentcore-claude` dispatch against one issue. It:
    its recommendation in a comment, leaves the PR as a draft, and ends. (The
    runtime already detects an ask-for-input final message and surfaces it — see
    `docs/claude-code-agentcore-runtime.md`.)
+
+### Deploy phasing for multi-epic roadmaps
+
+Deploy is where real runs have actually failed — credential-TTL expiry
+(~1h; #467), the worker's ~3h ceiling (#166), and infra flakes. Driving a
+**roadmap** of several epics through its own per-epic deploy + e2e + sandbox
+teardown is slow and deploy-fragile; a prior roadmap run did exactly that
+and produced two multi-hour runs (one ~3h, one ~10h) with nothing durable.
+The orchestrator instead defaults to **build-then-deploy-once**: land every
+epic to a green build/typecheck/synth/unit bar first (no AWS credentials,
+no 3h risk), then dispatch a single consolidated deploy + e2e pass at the
+end. It also commits and pushes after every concrete step, and scopes each
+dispatch to fit inside the credential TTL and worker ceiling — the narrow
+"one concrete step, commit, push, stop" shape that actually converges in
+practice. See
+["Deploy phasing for multi-epic roadmaps"](../web/amplify/agentcore/ClaudeCode/prompts/orchestrator.md#deploy-phasing-for-multi-epic-roadmaps)
+in the orchestrator prompt for the exact guidance, and
+[`docs/retro-ai-dlc-nx-plugin-delivery.md`](./retro-ai-dlc-nx-plugin-delivery.md)
+for the delivery this was drawn from.
 
 ### Starting an orchestrator run
 
@@ -606,4 +645,5 @@ running this loop on a real, high-stakes epic.
 - [`docs/claude-code-agentcore-runtime.md`](./claude-code-agentcore-runtime.md) — the `@agentcore-claude` worker/orchestrator runtime
 - [`docs/webhook-stepfunction-integration.md`](./webhook-stepfunction-integration.md) — how a comment dispatches a run
 - [`docs/waiting-for-remote-agents.md`](./waiting-for-remote-agents.md) — the `agent-working` done-signal and wait/review scripts
+- [`docs/retro-ai-dlc-nx-plugin-delivery.md`](./retro-ai-dlc-nx-plugin-delivery.md) — the nx-plugin-for-aws#34 delivery retro that motivated the dispatch-only role assertion, roadmap reconciliation, and deploy-phasing guidance above
 - [`CLAUDE.md`](../CLAUDE.md) — the dispatch/wait/merge conventions the in-repo agent follows
