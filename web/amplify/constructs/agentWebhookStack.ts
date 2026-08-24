@@ -413,6 +413,7 @@ export class AgentWebhookStack extends Construct {
       lambdaFunction: props.monitorCheckLambda,
       payload: sfn.TaskInput.fromObject({
         runId: sfn.JsonPath.stringAt('$.runId'),
+        repo: sfn.JsonPath.stringAt('$.repo'),
         spec: sfn.JsonPath.objectAt('$.monitor.spec'),
         iteration: sfn.JsonPath.numberAt('$.monitor.iteration'),
         logGroupName: sfn.JsonPath.stringAt('$.initialComment.logGroupName'),

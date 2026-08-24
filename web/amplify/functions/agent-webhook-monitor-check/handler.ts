@@ -19,6 +19,7 @@ interface MonitorSpec {
 
 interface MonitorCheckInput {
   runId: string;
+  repo: string | null;
   spec: MonitorSpec;
   iteration: number;
   logGroupName?: string;
@@ -67,31 +68,43 @@ async function execInRuntimeSession(opts: { sessionId: string; command: string; 
   return { exitCode: exitCode ?? -1, stdout, stderr };
 }
 
-// Refresh the git credentials stored in ~/.git-credentials for the runtime session.
-async function refreshGitCredentials(sessionId: string): Promise<void> {
-  // Determine the repo URL from the checked‑out workspace.
-  const repoInfo = await execInRuntimeSession({ sessionId, command: 'git config --get remote.origin.url', timeoutSeconds: 10 });
-  const repoUrl = repoInfo.stdout.trim();
-  const match = repoUrl.match(/^https:\/\/github\.com\/(.+?)\.git$/);
-  if (!match) return; // cannot determine repo, skip refresh
-  const repo = match[1];
-  if (!GITHUB_APP_ID || !GITHUB_APP_PRIVATE_KEY_SECRET_ARN) return;
-  const { token } = await mintInstallationToken(repo, GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY_SECRET_ARN);
-  // Write fresh credentials.
-  const command = [
-    'git config --global credential.helper store',
-    `printf 'https://x-access-token:%s@github.com\\n' ${JSON.stringify(token)} > "$HOME/.git-credentials"`,
-    'chmod 600 "$HOME/.git-credentials"',
-  ].join('\n');
-  await execInRuntimeSession({ sessionId, command, timeoutSeconds: 30 });
+// Re-mints a fresh (seconds-old) GitHub App installation token and rewrites
+// the runtime session's ~/.git-credentials before the check command runs —
+// the monitor-loop analog of agent-webhook-invoke-claude's mintFreshGithubToken
+// (issue #444/#445). Without this, a checkCommand that pushes (or the agent's
+// own follow-up push after a passing check) fails with a stale-token 401 once
+// the ~1h token minted at PostInitialComment has expired mid-wait (issue #467).
+//
+// Best-effort: if repo/env isn't available or minting fails, log and continue
+// — the checkCommand still runs against whatever credentials are already in
+// the session, same as before this fix, rather than failing the whole check.
+async function refreshGitCredentials(
+  sessionId: string,
+  repo: string | null,
+  log: (msg: string) => void,
+): Promise<void> {
+  if (!repo || !GITHUB_APP_ID || !GITHUB_APP_PRIVATE_KEY_SECRET_ARN) return;
+  try {
+    const { token } = await mintInstallationToken(repo, GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY_SECRET_ARN);
+    const command = [
+      'git config --global credential.helper store',
+      `printf 'https://x-access-token:%s@github.com\\n' ${JSON.stringify(token)} > "$HOME/.git-credentials"`,
+      'chmod 600 "$HOME/.git-credentials"',
+    ].join('\n');
+    await execInRuntimeSession({ sessionId, command, timeoutSeconds: 30 });
+  } catch (err) {
+    log(`failed to refresh git credentials before monitor check; continuing with existing credentials: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 export const handler = async (input: MonitorCheckInput): Promise<MonitorCheckOutput> => {
-  const { runId, spec, iteration, logGroupName, logStreamName } = input;
+  const { runId, repo, spec, iteration, logGroupName, logStreamName } = input;
   await log(logGroupName, logStreamName, `[${runId}] monitor check iteration ${iteration} running: ${spec.checkCommand}`);
 
-  // Refresh git credentials before executing the user‑provided check command.
-  await refreshGitCredentials(runId);
+  // Refresh git credentials before executing the user-provided check command.
+  await refreshGitCredentials(runId, repo, (msg) => {
+    void log(logGroupName, logStreamName, `[${runId}] ${msg}`);
+  });
 
   const result = await execInRuntimeSession({ sessionId: runId, command: spec.checkCommand, timeoutSeconds: 90 });
   const conditionMet = result.exitCode === 0;
