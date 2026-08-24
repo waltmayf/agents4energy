@@ -11,6 +11,7 @@ import {
 import { BedrockAgentCoreClient, InvokeAgentRuntimeCommand } from '@aws-sdk/client-bedrock-agentcore';
 import { verifyGithubSignature, verifyJiraSharedSecret, extractPromptAfterMention, parseMention } from '../_shared/webhookVerify';
 import { execName, sharedNamePrefix } from '../../../lib/exec-name';
+import { hasRunningExecution } from './hasRunningExecution';
 
 const REGION = process.env.AWS_REGION ?? 'us-east-1';
 // GitHub HMAC secret value, injected directly by Amplify's secret() (issue
@@ -140,30 +141,6 @@ async function cancelRuntimeJob(runId: string, log: (msg: string) => void): Prom
     log(`cancelRuntimeJob failed for runId=${runId}: ${err instanceof Error ? err.message : String(err)}`);
     return false;
   }
-}
-
-// Self-supersession guard (issue #494): a plain existence check — no
-// cancellation — for whether a RUNNING execution already matches this exact
-// name prefix. Used only by the own-App mention branch below; cancelPriorRuns
-// has its own (separate) ListExecutions pass because it also needs each
-// match's executionArn to cancel it.
-async function hasRunningExecution(namePrefix: string): Promise<boolean> {
-  if (!STATE_MACHINE_ARN) return false;
-  let nextToken: string | undefined;
-  try {
-    do {
-      const resp = await sfn.send(new ListExecutionsCommand({
-        stateMachineArn: STATE_MACHINE_ARN,
-        statusFilter: 'RUNNING',
-        nextToken,
-      }));
-      if ((resp.executions ?? []).some((exec) => exec.name?.startsWith(namePrefix))) return true;
-      nextToken = resp.nextToken;
-    } while (nextToken);
-  } catch {
-    return false;
-  }
-  return false;
 }
 
 // Control plane of issue #182: before starting a new run, find every prior
@@ -403,7 +380,7 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
     // intentionally also means the orchestrator can't use a mention to
     // supersede a still-RUNNING child worker; re-dispatching a *stalled*
     // (no longer running) worker is unaffected.
-    if (isOwnApp && await hasRunningExecution(sharedNamePrefix(namePrefixBase))) {
+    if (isOwnApp && await hasRunningExecution(sfn, STATE_MACHINE_ARN, sharedNamePrefix(namePrefixBase))) {
       console.log(`[receiver] skipped own-App mention on issue #${payload.issue.number}: a RUNNING execution already matches this prefix (self-supersession guard, #494)`);
       return json(200, { skipped: 'own-App mention on an issue with an already-running execution (self-supersession guard)' });
     }
