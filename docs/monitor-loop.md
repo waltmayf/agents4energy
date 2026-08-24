@@ -182,17 +182,36 @@ Key properties:
 - **Cancellation still works.** A monitor execution is `RUNNING` (paused in
   `Wait` or at the check task), so a superseding `@agentcore-claude` comment's
   last-write-wins `StopExecution` (issue #182) reaches and cancels it.
+- **`RunMonitorCheck` re-mints a fresh git credential before every check
+  (issue #467).** The token in `~/.git-credentials` is minted once at
+  `PostInitialComment` (~1h TTL) and only injected at turn start
+  ([`agent-webhook-invoke-agent/handler.ts`](../web/amplify/functions/agent-webhook-invoke-agent/handler.ts)).
+  A monitor loop can sit in `MonitorWait` for hours, so by the time a
+  `checkCommand` (or the agent's own follow-up push after a passing check)
+  runs, that stored token can be long expired — pushes fail with a 401 that
+  looks like a stale-workspace problem but isn't. `RunMonitorCheck`
+  ([`agent-webhook-monitor-check/handler.ts`](../web/amplify/functions/agent-webhook-monitor-check/handler.ts))
+  now mints a fresh (seconds-old) installation token via the shared
+  `mintInstallationToken` helper (same helper and env —`GITHUB_APP_ID` /
+  `GITHUB_APP_PRIVATE_KEY_SECRET_ARN`— as `agent-webhook-invoke-claude`'s
+  per-wave refresh added for #444/#445) and overwrites `~/.git-credentials` in
+  the runtime session *before* running `checkCommand`, using `repo` threaded
+  straight from the state machine payload (`$.repo`) rather than parsing it
+  out of `git config` in the runtime. This is best-effort: if `repo` or the
+  GitHub App env isn't configured on a branch, or minting fails, it logs and
+  falls through to whatever credential is already on disk — same behavior as
+  before this fix — rather than failing the check.
 - **`checkCommand` execs have `git`'s credential store but not `gh`'s own auth.**
   `githubToken`/`GH_TOKEN` is wired into the environment of the `claude` CLI
   process `server.js` spawns for the agent's own turn, but `RunMonitorCheck`'s
   `InvokeAgentRuntimeCommand` exec gets a fresh environment without it
   (confirmed end-to-end: a `gh api ...` check failed asking for `gh auth
-  login`). The **git** credential store `setupWorkspace()` seeds at clone time
-  (`~/.git-credentials`) *is* still on disk and works fine for plain
-  `git`/HTTPS operations (`git ls-remote https://github.com/...` succeeds) —
-  it's specifically the `gh` CLI's own auth config that's missing. So a
-  `checkCommand` that needs the GitHub API should use `curl` (unauthenticated
-  for public repos; rate-limited without a token) or plain `git`, not `gh`.
+  login`). The **git** credential store (refreshed as described above) works
+  fine for plain `git`/HTTPS operations (`git ls-remote
+  https://github.com/...` succeeds) — it's specifically the `gh` CLI's own
+  auth config that's missing. So a `checkCommand` that needs the GitHub API
+  should use `curl` (unauthenticated for public repos; rate-limited without a
+  token) or plain `git`, not `gh`.
   For the standard orchestrator "are the workers done?" condition — no
   **other** open issue carries `agent-working` — use
   [`scripts/agents-done-check.sh`](../scripts/agents-done-check.sh) (issue
