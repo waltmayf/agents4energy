@@ -179,9 +179,18 @@ Key properties:
   errors (an exec hiccup, not a non-zero exit), its `Catch` routes to
   `IncrementIteration` — the tick is treated as "not yet met" and the loop
   continues, costing one interval rather than stamping `agent-error`.
-- **Cancellation still works.** A monitor execution is `RUNNING` (paused in
-  `Wait` or at the check task), so a superseding `@agentcore-claude` comment's
-  last-write-wins `StopExecution` (issue #182) reaches and cancels it.
+- **Cancellation still works — but only from a human sender (issue #494).** A
+  monitor execution is `RUNNING` (paused in `Wait` or at the check task), so a
+  superseding `@agentcore-claude` comment's last-write-wins `StopExecution`
+  (issue #182) reaches and cancels it — for an OWNER/MEMBER/COLLABORATOR
+  human commenter. The receiver's own-App self-supersession guard means the
+  orchestrator's own status/progress comments on this same epic issue (which
+  can quote an `@agentcore-claude` mention while reporting a dispatch)
+  **cannot** cancel this monitor execution: an own-App mention is skipped
+  outright when a `RUNNING` execution already matches the issue's name
+  prefix, since that running execution is the orchestrator itself. See
+  `docs/webhook-stepfunction-integration.md`'s "Self-supersession guard"
+  section.
 - **`checkCommand` execs have `git`'s credential store but not `gh`'s own auth.**
   `githubToken`/`GH_TOKEN` is wired into the environment of the `claude` CLI
   process `server.js` spawns for the agent's own turn, but `RunMonitorCheck`'s
