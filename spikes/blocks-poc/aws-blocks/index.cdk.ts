@@ -4,10 +4,17 @@ import { Hosting, BlocksStack, BlocksPresets } from '@aws-blocks/blocks/cdk';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { getStackName } from '@aws-blocks/blocks/scripts';
+import { addAgentCoreSynthExperimentStack } from './agentcore-synth-experiment.cdk';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const app = new cdk.App();
+
+// Spike #514, criterion 5 only — gated so it never runs during normal
+// `npm run dev` / `npm run sandbox` use of this scaffold.
+if (process.env.AGENTCORE_SYNTH_EXPERIMENT === '1') {
+  addAgentCoreSynthExperimentStack(app);
+}
 
 const sandboxMode = app.node.tryGetContext('sandboxMode') === 'true';
 const projectRoot = app.node.tryGetContext('projectRoot') || process.cwd();
