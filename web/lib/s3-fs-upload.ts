@@ -7,7 +7,7 @@
 // in-session auto-upload — goes through the same path resolution.
 
 import { PutObjectCommand, CopyObjectCommand, type S3Client } from '@aws-sdk/client-s3';
-import { resolveS3Path, resolveS3Prefix } from './s3-fs-path';
+import { resolveS3Path, resolveS3Prefix } from './s3-fs-path.ts';
 
 export const ARTIFACTS_SUBPREFIX = 'artifacts';
 
