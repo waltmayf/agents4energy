@@ -87,7 +87,7 @@ test('auth: unauthenticated access is rejected', async () => {
   await authApi.setAuthState({ action: 'signOut' });
 
   await assert.rejects(
-    () => api.listTodos(),
+    () => api.listAgents(),
     (err: any) => err.message.includes('Authentication') || err.message.includes('Session') || err.message.includes('401'),
   );
 
@@ -99,90 +99,29 @@ test('auth: unauthenticated access is rejected', async () => {
   });
 });
 
-// ─── CRUD ─────────────────────────────────────────────────────────────────────
+// ─── CRUD (Agent + McpServer — criterion 2: typed RPC, no codegen) ───────────
 
-test('todos: create with priority', async () => {
-  const todo = await api.createTodo('Buy milk', 1);
-  assert.strictEqual(todo.title, 'Buy milk');
-  assert.strictEqual(todo.priority, 1);
-  assert.strictEqual(todo.completed, false);
-  assert.strictEqual(todo.version, 1);
-  assert.ok(todo.todoId);
+test('agents: create', async () => {
+  const agent = await api.createAgent({ name: 'Ops Agent', slug: 'ops-agent' });
+  assert.strictEqual(agent.name, 'Ops Agent');
+  assert.strictEqual(agent.slug, 'ops-agent');
+  assert.strictEqual(agent.enabled, true);
+  assert.ok(agent.id);
 });
 
-test('todos: list (only own)', async () => {
-  const list = await api.listTodos();
+test('agents: list', async () => {
+  const list = await api.listAgents();
   assert.ok(list.length >= 1);
-  assert.ok(list.every(t => t.userId === 'testuser@example.com'));
+  assert.ok(list.some(a => a.slug === 'ops-agent'));
 });
 
-test('todos: list sorted by priority (secondary index)', async () => {
-  // Create todos with different priorities
-  await api.createTodo('Low priority task', 3);
-  await api.createTodo('High priority task', 1);
-
-  const sorted = await api.listTodos('priority');
-  assert.ok(sorted.length >= 2);
-  // Priority 1 (high) should come before priority 3 (low)
-  const priorities = sorted.map(t => t.priority);
-  for (let i = 1; i < priorities.length; i++) {
-    assert.ok(priorities[i] >= priorities[i - 1], 'Should be sorted by priority ascending');
-  }
+test('agents: get by id', async () => {
+  const created = await api.createAgent({ name: 'Second Agent', slug: 'second-agent' });
+  const fetched = await api.getAgent(created.id);
+  assert.strictEqual(fetched?.slug, 'second-agent');
 });
 
-test('todos: list sorted by title (secondary index)', async () => {
-  const sorted = await api.listTodos('title');
-  assert.ok(sorted.length >= 2);
-  const titles = sorted.map(t => t.title);
-  for (let i = 1; i < titles.length; i++) {
-    assert.ok(titles[i] >= titles[i - 1], 'Should be sorted by title ascending');
-  }
+test('mcpServers: list (fromExisting table, empty in local mock)', async () => {
+  const list = await api.listMcpServers();
+  assert.ok(Array.isArray(list));
 });
-
-test('todos: toggle completion', async () => {
-  const [todo] = await api.listTodos();
-  await api.toggleTodo(todo.todoId);
-
-  const updated = (await api.listTodos()).find(t => t.todoId === todo.todoId);
-  assert.strictEqual(updated?.completed, !todo.completed);
-  assert.strictEqual(updated?.version, todo.version + 1);
-});
-
-test('todos: delete', async () => {
-  const before = await api.listTodos();
-  const target = before[0];
-  await api.deleteTodo(target.todoId);
-
-  const after = await api.listTodos();
-  assert.ok(!after.some(t => t.todoId === target.todoId));
-});
-
-// ─── Conditional writes (optimistic locking) ──────────────────────────────────
-
-test('todos: concurrent toggle → conflict → retry succeeds', async () => {
-  // Create a fresh todo
-  const todo = await api.createTodo('Conflict test');
-
-  // Simulate a concurrent write by toggling twice "simultaneously"
-  // First toggle succeeds (version 1 → 2)
-  await api.toggleTodo(todo.todoId);
-
-  // Read current state
-  const current = (await api.listTodos()).find(t => t.todoId === todo.todoId);
-  assert.strictEqual(current?.version, 2);
-
-  // Toggle again — should succeed because we're reading fresh version
-  await api.toggleTodo(todo.todoId);
-  const final = (await api.listTodos()).find(t => t.todoId === todo.todoId);
-  assert.strictEqual(final?.version, 3);
-  assert.strictEqual(final?.completed, todo.completed); // toggled twice = back to original
-
-  // Cleanup
-  await api.deleteTodo(todo.todoId);
-});
-
-// ─── Realtime ─────────────────────────────────────────────────────────────────
-// Note: Realtime subscription tests require the middleware to be loaded,
-// which happens automatically when the dev server regenerates client.js.
-// For a manual test: run `npm run dev`, open two browser tabs, and create
-// a todo in one — it should appear in the other immediately.
