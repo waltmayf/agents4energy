@@ -19,6 +19,7 @@ import { s3Tools } from './functions/s3-tools/resource';
 import { agentWorkspace } from './storage/resource';
 import { Policy, PolicyStatement, ServicePrincipal } from 'aws-cdk-lib/aws-iam';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
+import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import { Function as LambdaFunction, Runtime } from 'aws-cdk-lib/aws-lambda';
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
 import { Fn, Stack, CfnOutput, Duration } from 'aws-cdk-lib';
@@ -49,6 +50,7 @@ import { GraphTraverseMcpServerSeed } from './constructs/graphTraverseMcpServerS
 import { GraphIngestLineage } from './constructs/graphIngestLineage';
 import { AthenaPySparkWorkgroup } from './constructs/athenaPySparkWorkgroup/resource';
 import { DataLakeSeed } from './constructs/dataLakeSeed/resource';
+import { RealTimeParallelCluster } from './constructs/realTimeParallelCluster/resource';
 
 import { StringParameter } from 'aws-cdk-lib/aws-ssm';
 
@@ -1103,6 +1105,54 @@ new StringParameter(athenaPySparkStack, 'SsmStorageBucketName', {
   stringValue: backend.agentWorkspace.resources.bucket.bucketName,
   simpleName: false,
 });
+
+// ============================================================================
+// HPC CLUSTER (issue #503, epic #498 slice 5) — AWS PCS + Slurm + FSx-Lustre
+// real-time cluster the CFD tools (slice 6) submit jobs to. No dependency on
+// any other slice, but the PCS login node + FSx-Lustre run 24/7 once
+// deployed, so this stays behind a CDK context flag (`-c enableHpc=true`)
+// that defaults OFF — a normal deploy (and `pnpm test:synth`) never pays for
+// it. Own stack, not agentStack: a future CFD-tools stack (slice 6) will
+// depend on this stack's outputs, and nothing here needs anything agentStack
+// owns.
+// ============================================================================
+
+const enableHpcContext = backend.stack.node.tryGetContext('enableHpc');
+const enableHpc = enableHpcContext === true || enableHpcContext === 'true';
+
+if (enableHpc) {
+  const hpcStack = backend.createStack('hpc-cluster');
+
+  // Dedicated VPC, built declaratively (no ec2.Vpc.fromLookup — that issues an
+  // AWS API call at synth time, which would break the credential-free
+  // `pnpm test:synth` gate). Public-subnet-only + natGateways: 0 so this
+  // construct doesn't add its own NAT gateway cost on top of the PCS/FSx cost
+  // the issue already calls out.
+  const hpcVpc = new ec2.Vpc(hpcStack, 'HpcVpc', {
+    maxAzs: 2,
+    natGateways: 0,
+    subnetConfiguration: [
+      { name: 'public', subnetType: ec2.SubnetType.PUBLIC, cidrMask: 24 },
+    ],
+  });
+
+  const parallelCluster = new RealTimeParallelCluster(hpcStack, 'ParallelCluster', {
+    vpc: hpcVpc,
+  });
+
+  const hpcSsmBasePath = `/agentcore/${Stack.of(hpcStack).stackName}/hpc`;
+  const putHpcParam = (id: string, suffix: string, value: string) => {
+    if (!value) return;
+    new StringParameter(hpcStack, id, {
+      parameterName: `${hpcSsmBasePath}/${suffix}`,
+      stringValue: value,
+      simpleName: false,
+    });
+  };
+  putHpcParam('SsmHpcClusterId', 'cluster_id', parallelCluster.clusterId);
+  putHpcParam('SsmHpcLoginNodeNameTag', 'login_node_name_tag', parallelCluster.loginNodeNameTag);
+  putHpcParam('SsmHpcCfdSimulationsPrefix', 'cfd_simulations_prefix', parallelCluster.cfdSimulationsPrefix);
+}
 
 // ============================================================================
 // INVOKE-AGENT Lambda — sub-agent dispatcher via AgentCore harness
