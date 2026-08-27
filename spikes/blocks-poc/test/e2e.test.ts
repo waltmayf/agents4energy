@@ -15,6 +15,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert';
+import { readFile } from 'node:fs/promises';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { setTimeout } from 'node:timers/promises';
 import { installCookieJar, isServerRunning } from '@aws-blocks/blocks/utils';
@@ -73,8 +74,23 @@ test('auth: starts signed out', async () => {
 });
 
 test('auth: sign up creates account and signs in', async () => {
-  const state = await authApi.setAuthState({
+  // AuthCognito (unlike AuthBasic) always requires code confirmation, mirroring
+  // real Cognito's autoVerify — the mock writes the issued code to
+  // .bb-data/<fullId>/last-code.json for tests to read (see bb-auth-cognito docs).
+  await authApi.setAuthState({
     action: 'signUp',
+    username: 'testuser@example.com',
+    password: 'TestPass123!',
+  });
+  const { code } = JSON.parse(await readFile('.bb-data/blocks-poc-auth/last-code.json', 'utf8'));
+  await authApi.setAuthState({
+    action: 'confirmSignUp',
+    username: 'testuser@example.com',
+    code,
+  });
+  // Confirmation alone doesn't auto sign-in (no COMPLETE_AUTO_SIGN_IN step here) — sign in explicitly.
+  const state = await authApi.setAuthState({
+    action: 'signIn',
     username: 'testuser@example.com',
     password: 'TestPass123!',
   });
