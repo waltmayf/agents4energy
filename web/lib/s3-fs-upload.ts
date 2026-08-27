@@ -7,7 +7,13 @@
 // in-session auto-upload — goes through the same path resolution.
 
 import { PutObjectCommand, CopyObjectCommand, type S3Client } from '@aws-sdk/client-s3';
-import { resolveS3Path, resolveS3Prefix } from './s3-fs-path.ts';
+// Subpath import (package.json "imports"), not a relative './s3-fs-path'
+// specifier: this file is reachable from both the Amplify backend program
+// (via s3-tools/handler.ts — extensionless import required, tsc TS5097
+// otherwise) and directly by node --test (via s3-fs-upload.test.ts —
+// extension required, ERR_MODULE_NOT_FOUND otherwise). No single relative
+// specifier satisfies both; the "#lib/*" map resolves under both.
+import { resolveS3Path, resolveS3Prefix } from '#lib/s3-fs-path';
 
 export const ARTIFACTS_SUBPREFIX = 'artifacts';
 
