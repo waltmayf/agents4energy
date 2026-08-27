@@ -12,13 +12,19 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
+import { rewriteArtifactHref } from "@/lib/artifacts-preprocessing";
 import { cjk } from "@streamdown/cjk";
 import { code } from "@streamdown/code";
 import { math } from "@streamdown/math";
 import { mermaid } from "@streamdown/mermaid";
 import type { UIMessage } from "ai";
 import { ChevronLeftIcon, ChevronRightIcon } from "lucide-react";
-import type { ComponentProps, HTMLAttributes, ReactElement } from "react";
+import type {
+  ComponentProps,
+  HTMLAttributes,
+  IframeHTMLAttributes,
+  ReactElement,
+} from "react";
 import {
   createContext,
   memo,
@@ -324,14 +330,59 @@ export type MessageResponseProps = ComponentProps<typeof Streamdown>;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const streamdownPlugins = { cjk, code, math, mermaid } as any;
 
+// Streamdown's default sanitize schema (github's, via rehype-sanitize) drops
+// `<iframe>` entirely, so a raw `<iframe src="/artifacts/<rel>">` an agent
+// emits in its own markdown (issue #502 — e.g. the PySpark analytics pack,
+// #501) would otherwise just vanish. `allowedTags` below re-admits `iframe`
+// with only a `src`/`title` attribute pair, and `ArtifactIframe` is the only
+// thing ever rendered for it — so this isn't "arbitrary iframes allowed in
+// markdown", it's "this one attribute, rewritten and validated below, or
+// nothing".
+const messageResponseAllowedTags = { iframe: ["src", "title"] };
+
+/**
+ * Renders `<iframe src="/artifacts/<rel>">` markdown as a live artifact
+ * preview backed by the `/file` route's presigned-URL rendering.
+ *
+ * `rewriteArtifactHref` only ever turns a `/artifacts/<rel>` src into our own
+ * `/file?s3Key=files/artifacts/<rel>` route (and returns null for anything
+ * else, including an attacker-supplied absolute URL) — the destination is
+ * always this app's own trusted, same-origin page, never third-party
+ * content. That's why this iframe can carry `allow-same-origin` alongside
+ * `allow-scripts` where SandboxedHtml (tool-widgets/sandboxed-html.tsx)
+ * deliberately can't: `/file` needs a real signed-in session (via Amplify
+ * Storage) to presign the S3 object, which an opaque `allow-scripts`-only
+ * origin wouldn't have access to, and there's no attacker-controlled script
+ * here to protect that session from — only our own first-party route.
+ */
+function ArtifactIframe({ src }: IframeHTMLAttributes<HTMLIFrameElement>) {
+  const href = typeof src === "string" ? rewriteArtifactHref(src) : null;
+  if (!href) return null;
+  return (
+    <iframe
+      src={href}
+      title="Artifact preview"
+      sandbox="allow-scripts allow-same-origin"
+      className="h-96 w-full rounded border"
+    />
+  );
+}
+
 export const MessageResponse = memo(
-  ({ className, ...props }: MessageResponseProps) => (
+  ({ className, allowedTags, components, ...props }: MessageResponseProps) => (
     <Streamdown
       className={cn(
         "size-full [&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
         className
       )}
       plugins={streamdownPlugins}
+      allowedTags={{ ...messageResponseAllowedTags, ...allowedTags }}
+      components={
+        {
+          ...components,
+          iframe: components?.iframe ?? ArtifactIframe,
+        } as MessageResponseProps["components"]
+      }
       {...props}
     />
   ),
