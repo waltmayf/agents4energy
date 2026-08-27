@@ -581,6 +581,33 @@ if (AGENTCORE_AGUI_RUNTIME_ARN) {
   });
 }
 
+// Grant the same authenticated-principal roles the read/write/delete access
+// to the agentWorkspace bucket's files/ prefix that storage/resource.ts's
+// `allow.authenticated.to(['read', 'write', 'delete'])` rule (#373) already
+// grants — but that Amplify-generated grant only attaches to the Identity
+// Pool's default authenticatedUserIamRole. Same group-role gap as the
+// harness grant above (#360): a signed-in user who belongs to a Cognito
+// group (e.g. reservoir-eng, per the e2e test user) assumes that group's IAM
+// role instead, which never received the storage grant — so every browser
+// upload/list/delete on the Files page (#372) failed with AccessDenied for
+// any grouped user (caught by the /file route e2e smoke test, #502). Mirrors
+// the s3ToolsLambda grant shape below (grantRead + explicit
+// PutObject/DeleteObject + prefix-conditioned ListBucket).
+new Policy(agentStack, 'AgentWorkspaceStorageAuthPolicy', {
+  roles: authenticatedPrincipalRoles,
+  statements: [
+    new PolicyStatement({
+      actions: ['s3:GetObject', 's3:PutObject', 's3:DeleteObject'],
+      resources: [`${backend.agentWorkspace.resources.bucket.bucketArn}/files/*`],
+    }),
+    new PolicyStatement({
+      actions: ['s3:ListBucket'],
+      resources: [backend.agentWorkspace.resources.bucket.bucketArn],
+      conditions: { StringLike: { 's3:prefix': ['files/*'] } },
+    }),
+  ],
+});
+
 // ============================================================================
 // BASIC AUTH CONFIGURATION
 // ============================================================================

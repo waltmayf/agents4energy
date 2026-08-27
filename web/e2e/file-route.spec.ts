@@ -29,6 +29,7 @@ test.describe('/file route', () => {
 
     await page.goto('files');
     await expect(page.getByRole('button', { name: 'Sign in' })).not.toBeVisible({ timeout: 15_000 });
+    await expect(page.locator('[data-testid="file-input"]')).toBeAttached({ timeout: 15_000 });
 
     await page.evaluate(
       ({ relativePath, base64 }) => {
