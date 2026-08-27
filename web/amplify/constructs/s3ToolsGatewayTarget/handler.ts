@@ -79,6 +79,35 @@ const toolDefinitions = (): ToolDefinition[] => [
       required: ['path'],
     },
   },
+  {
+    name: 'UploadFile',
+    description:
+      'Upload a file to a destination path under the shared "files/" root. Provide exactly one of '
+      + '"sourcePath" (copy an existing files/ path, e.g. to move generated output into place) or "content" '
+      + '(write inline text or base64-encoded bytes).',
+    inputSchema: {
+      type: SchemaType.OBJECT,
+      properties: {
+        destPath: {
+          ...PATH_PROPERTY,
+          description: `Destination ${PATH_PROPERTY.description}`,
+        },
+        sourcePath: {
+          ...PATH_PROPERTY,
+          description: `An existing source ${PATH_PROPERTY.description} to copy from. Mutually exclusive with "content".`,
+        },
+        content: {
+          type: SchemaType.STRING,
+          description: 'Inline file content to write to destPath. Mutually exclusive with "sourcePath".',
+        },
+        encoding: {
+          type: SchemaType.STRING,
+          description: 'Encoding of "content": "utf-8" (default) for text, or "base64" for binary data.',
+        },
+      },
+      required: ['destPath'],
+    },
+  },
 ];
 
 function buildTargetConfiguration(lambdaArn: string): TargetConfiguration {
