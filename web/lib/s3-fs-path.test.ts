@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { resolveS3Path, resolveS3Prefix, S3FsPathError } from './s3-fs-path.ts';
+import { resolveFileRouteKey, resolveS3Path, resolveS3Prefix, S3FsPathError } from './s3-fs-path.ts';
 
 test('absolute path resolves under the files/ root', () => {
   const key = resolveS3Path('/docs/production/gas_lift.md');
@@ -70,4 +70,34 @@ test('relative prefix resolves under files/ with trailing slash', () => {
 
 test('prefix listing rejects traversal', () => {
   assert.throws(() => resolveS3Prefix('../escape'), S3FsPathError);
+});
+
+// -- resolveFileRouteKey (frontend /file route scoping) ----------------------
+
+test('accepts a well-formed key under files/', () => {
+  assert.equal(
+    resolveFileRouteKey('files/artifacts/plots/foo.png'),
+    'files/artifacts/plots/foo.png',
+  );
+});
+
+test('rejects a key outside the files/ prefix', () => {
+  assert.throws(() => resolveFileRouteKey('other-bucket-prefix/secret.txt'), S3FsPathError);
+});
+
+test('rejects a key that is only the bare root prefix', () => {
+  assert.throws(() => resolveFileRouteKey('files/'), S3FsPathError);
+  assert.throws(() => resolveFileRouteKey('files'), S3FsPathError);
+});
+
+test('rejects traversal that would escape the files/ root', () => {
+  assert.throws(() => resolveFileRouteKey('files/artifacts/../../secret.txt'), S3FsPathError);
+});
+
+test('rejects a key that normalizes to a different key (e.g. redundant slashes)', () => {
+  assert.throws(() => resolveFileRouteKey('files//artifacts/foo.png'), S3FsPathError);
+});
+
+test('rejects empty input', () => {
+  assert.throws(() => resolveFileRouteKey(''), S3FsPathError);
 });

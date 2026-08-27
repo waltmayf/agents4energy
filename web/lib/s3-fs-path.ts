@@ -53,3 +53,24 @@ export function resolveS3Prefix(rawPath: string | undefined | null): string {
   const segments = normalizeSegments(rawPath);
   return segments.length ? `${ROOT_PREFIX}/${segments.join('/')}/` : `${ROOT_PREFIX}/`;
 }
+
+/**
+ * Validate a full S3 object key (already including the `files/` root, e.g.
+ * as passed via the `/file?s3Key=...` query param — see
+ * web/app/(with-auth)/file/page.tsx) so that page can't be used to presign
+ * arbitrary bucket keys. Rejects anything outside the `files/` prefix and any
+ * traversal within it; returns the key unchanged when valid.
+ */
+export function resolveFileRouteKey(rawKey: string): string {
+  if (!rawKey || typeof rawKey !== 'string' || !rawKey.startsWith(`${ROOT_PREFIX}/`)) {
+    throw new S3FsPathError(`s3Key must be under the "${ROOT_PREFIX}/" prefix: "${rawKey}"`);
+  }
+  // Re-resolve the part after the root prefix through the same traversal-safe
+  // logic as resolveS3Path, then require it to land back on the exact key the
+  // caller supplied (catches any residual "..", "//", etc.).
+  const resolved = resolveS3Path(rawKey.slice(ROOT_PREFIX.length + 1));
+  if (resolved !== rawKey) {
+    throw new S3FsPathError(`Invalid s3Key: "${rawKey}"`);
+  }
+  return resolved;
+}
