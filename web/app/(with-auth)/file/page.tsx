@@ -73,11 +73,7 @@ function FileContent() {
       }
     }
 
-    if (rawS3Key) {
-      load();
-    } else {
-      setState({ status: 'error', message: 'Missing s3Key query parameter' });
-    }
+    load();
 
     return () => {
       cancelled = true;
