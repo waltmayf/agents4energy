@@ -47,6 +47,8 @@ import { S3ToolsMcpServerSeed } from './constructs/s3ToolsMcpServerSeed/resource
 import { GraphTraverseGatewayTarget } from './constructs/graphTraverseGatewayTarget/resource';
 import { GraphTraverseMcpServerSeed } from './constructs/graphTraverseMcpServerSeed/resource';
 import { GraphIngestLineage } from './constructs/graphIngestLineage';
+import { AthenaPySparkWorkgroup } from './constructs/athenaPySparkWorkgroup/resource';
+import { DataLakeSeed } from './constructs/dataLakeSeed/resource';
 
 import { StringParameter } from 'aws-cdk-lib/aws-ssm';
 
@@ -1014,6 +1016,66 @@ if (AGENTCORE_GATEWAY_ID) {
     graphqlRegion: AGENTCORE_REGION,
   });
 }
+
+// ============================================================================
+// ATHENA PYSPARK WORKGROUP + DATA LAKE SEED (issue #500, epic #498 slice 2) —
+// the Athena-for-Spark (PySpark) workgroup + Spark execution role the
+// analytics agent's PySpark tool (Slice 3) will target, plus a small seeded
+// Glue database with sample tables so there's something to query out of the
+// box. Own sink stack, per AGENTS.md's synth-gate note (and the issue's
+// explicit ask): Slice 3 adds a gateway target here that will need both the
+// agent stack's gateway id/arn AND (like graph-traverse) potentially the data
+// stack — creating that dependency shape now, in a dedicated stack, avoids a
+// data -> function -> data cycle later instead of having to migrate these
+// resources out of agentStack under time pressure.
+// ============================================================================
+const athenaPySparkStack = backend.createStack('athena-pyspark');
+
+const athenaPySparkWorkGroupName = toGatewayResourceName(
+  'athena-pyspark',
+  backendNamespace ?? '',
+  backendName ?? '',
+).slice(0, 128);
+
+// Glue database names are conventionally lowercase snake_case — Spark SQL
+// treats hyphens as the minus operator in unquoted identifiers, so this uses
+// its own sanitizer rather than toGatewayResourceName's alnum+hyphen scheme.
+const toGlueDatabaseName = (...segments: string[]) =>
+  segments
+    .filter(Boolean)
+    .join('_')
+    .toLowerCase()
+    .replace(/[^a-z0-9_]/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_|_$/g, '')
+    .slice(0, 255);
+
+const dataLakeDatabaseName = toGlueDatabaseName('analytics', backendNamespace ?? '', backendName ?? '') || 'analytics';
+
+const athenaPySparkWorkgroup = new AthenaPySparkWorkgroup(athenaPySparkStack, 'AthenaPySparkWorkgroup', {
+  workGroupName: athenaPySparkWorkGroupName,
+  bucket: backend.agentWorkspace.resources.bucket,
+});
+
+new DataLakeSeed(athenaPySparkStack, 'DataLakeSeed', {
+  bucket: backend.agentWorkspace.resources.bucket,
+  databaseName: dataLakeDatabaseName,
+  dataLakePrefix: 'data-lake',
+});
+
+// Publish for Slice 3 (and any external consumer) via SSM, matching the
+// Memory ARN / Gateway ID pattern above (`ssmBasePath`, ~L476) — avoids a
+// cross-stack CFN export cycle between this stack and agentStack.
+new StringParameter(athenaPySparkStack, 'SsmAthenaPySparkWorkgroupName', {
+  parameterName: `${ssmBasePath}/athena_pyspark_workgroup_name`,
+  stringValue: athenaPySparkWorkgroup.workGroupName,
+  simpleName: false,
+});
+new StringParameter(athenaPySparkStack, 'SsmStorageBucketName', {
+  parameterName: `${ssmBasePath}/storage_bucket_name`,
+  stringValue: backend.agentWorkspace.resources.bucket.bucketName,
+  simpleName: false,
+});
 
 // ============================================================================
 // INVOKE-AGENT Lambda — sub-agent dispatcher via AgentCore harness
