@@ -11,6 +11,9 @@ the two companion docs go deeper:
 - [`docs/cedar-enforce-demo.md`](./cedar-enforce-demo.md) — a captured, live
   DENY → ALLOW transcript, plus the two bugs (#325) that had to be fixed before
   `ENFORCE` mode worked at all.
+- [`docs/gateway-oauth-local-clients.md`](./gateway-oauth-local-clients.md) —
+  connecting a local MCP client (Claude Code) to the gateway over OIDC, and
+  using groups as subscription tiers to gate tools for external customers.
 
 ## The identity model
 

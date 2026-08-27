@@ -2,6 +2,11 @@
 
 This document describes what an MCP server must support to work with this system, and the requirements for OAuth2-protected servers.
 
+> Connecting a **local MCP client** (e.g. Claude Code on your laptop) to the
+> AgentCore gateway over this same OIDC flow — and gating tools by a user's
+> subscription tier — is covered in
+> [`docs/gateway-oauth-local-clients.md`](./gateway-oauth-local-clients.md).
+
 ---
 
 ## Protocol requirements
