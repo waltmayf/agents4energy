@@ -4,6 +4,7 @@ import {
   BedrockAgentCoreControlClient,
   CreateGatewayTargetCommand,
   UpdateGatewayTargetCommand,
+  DeleteGatewayTargetCommand,
   CredentialProviderType,
   OAuthGrantType,
   type CredentialProviderConfiguration,
@@ -159,6 +160,28 @@ function outboundAuthUnchanged(oldItem: McpServerRecord | undefined, item: McpSe
 
 export const handler: DynamoDBStreamHandler = async (event) => {
   for (const record of event.Records) {
+    // A deleted McpServer row's gateway target would otherwise be orphaned
+    // forever (AgentCore has no TTL/GC for targets) — every e2e run and every
+    // manual delete silently ate into the shared gateway's 100-target quota
+    // until a real deploy's CreateGatewayTarget started failing (#524).
+    if (record.eventName === 'REMOVE') {
+      const oldImage = record.dynamodb?.OldImage;
+      if (!oldImage) continue;
+      const removed = unmarshall(oldImage as unknown as Record<string, AttributeValue>) as McpServerRecord;
+      if (!removed.gatewayTargetId) continue;
+      try {
+        await controlClient.send(
+          new DeleteGatewayTargetCommand({
+            gatewayIdentifier: GATEWAY_ID,
+            targetId: removed.gatewayTargetId,
+          }),
+        );
+      } catch (err) {
+        if ((err as { name?: string }).name !== 'ResourceNotFoundException') throw err;
+      }
+      continue;
+    }
+
     if (record.eventName !== 'INSERT' && record.eventName !== 'MODIFY') continue;
     const newImage = record.dynamodb?.NewImage;
     if (!newImage) continue;
