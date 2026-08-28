@@ -5,16 +5,21 @@
 // whether a pumping schedule (stages[]) was supplied — steady-state
 // `simpleFoam` when it wasn't, transient `pimpleFoam` when it was.
 //
-// Scope reduction vs. the reference: the reference's synthetic-fallback and
-// real-OpenFOAM-run branches both feed a Python `calculate_metrics.py`
-// script that isn't part of this repo (it's assumed baked onto the OpenFOAM
-// AMI). Rather than porting a VTK/CSV field-parsing pipeline this slice
-// doesn't have inputs to test against, this generator always writes
-// `metrics.json` itself (in bash, from the same input parameters) at the end
-// of the script — whether or not OpenFOAM actually ran — using the same
-// heuristic risk/optimization formulas regardless of solver path. A
-// follow-up slice (#505) can replace this with real VTK-derived metrics once
-// there's a live cluster to validate against.
+// Metrics (issue #527): when OpenFOAM is present the script runs the real
+// field-extraction pipeline — after the solver + `reconstructPar` it runs
+// `foamToVTK` and then `scripts/calculate_metrics.py` (ported verbatim from
+// genai-demos, vendored at `web/amplify/functions/cfd-tools/scripts/` and
+// shipped to `s3://<HPC_BUCKET>/scripts/calculate_metrics.py`). That script
+// reads the solved `alpha.proppant`/`U`/`p` fields and writes
+// `results/metrics.json` with screen-out risk, placement efficiency,
+// fracture-geometry score and predicted max treating pressure — its output
+// schema matches `handler.ts`'s `CfdMetricsJson` parser. The bash heuristic
+// `metricsJsonHeredoc` (computed from input params only) is now the fallback:
+// used when OpenFOAM isn't installed, when the specific solver binary this
+// run needs (`simpleFoam`/`pimpleFoam`) isn't on PATH (e.g. an AMI whose
+// OpenFOAM build didn't compile that solver — see issue about
+// pimpleFoam missing from the AMI), or if `calculate_metrics.py` fails, so
+// `GetCfdResults` always returns something.
 
 import type { TreatmentPlan, PumpingScheduleStage } from './cfd-types';
 
@@ -168,6 +173,10 @@ export function buildCfdSlurmScript(plan: TreatmentPlan, jobName: string, hpcBuc
     : `SIMPLE\n{\n    nNonOrthogonalCorrectors 1;\n    consistent      yes;\n\n    residualControl\n    {\n        p               1e-05;\n        U               1e-05;\n        "alpha.*"       1e-05;\n    }\n}\n\nrelaxationFactors\n{\n    fields\n    {\n        p               0.3;\n    }\n    equations\n    {\n        U               0.7;\n        "alpha.*"       0.7;\n    }\n}`;
   const ddtScheme = transient ? 'Euler' : 'steadyState';
   const solverBin = transient ? 'pimpleFoam' : 'simpleFoam';
+  // Transient runs need every timestep reconstructed so calculate_metrics.py can
+  // build a time series; steady only needs the converged (latest) field.
+  const reconstructArgs = transient ? '' : ' -latestTime';
+  const metricsTransientFlag = transient ? ' \\\n    --transient' : '';
 
   return `#!/bin/bash
 #SBATCH --job-name=${jobName}
@@ -188,12 +197,21 @@ RESULTS_DIR="\${WORK_DIR}/results"
 mkdir -p \${WORK_DIR}/0 \${WORK_DIR}/constant \${WORK_DIR}/system \${RESULTS_DIR}
 cd \${WORK_DIR}
 
+HAVE_SOLVER=false
 if [ -f /opt/openfoam/etc/bashrc ]; then
-  echo "OpenFOAM found, running ${transient ? 'transient pimpleFoam' : 'steady simpleFoam'} simulation..."
   source /opt/openfoam/etc/bashrc
   export PATH=/opt/aws/pcs/scheduler/slurm-25.05/bin:/opt/amazon/openmpi5/bin:\${PATH}
   export LD_LIBRARY_PATH=/opt/amazon/openmpi5/lib64:\${LD_LIBRARY_PATH:-}
   export HOME=\${WORK_DIR}
+  if command -v ${solverBin} > /dev/null 2>&1; then
+    HAVE_SOLVER=true
+  else
+    echo "WARNING: OpenFOAM is installed but ${solverBin} is not on PATH -- this AMI was built without the ${transient ? 'transient' : 'steady'} solver. Skipping solver, writing heuristic metrics only..."
+  fi
+fi
+
+if [ "\${HAVE_SOLVER}" = true ]; then
+  echo "OpenFOAM found, running ${transient ? 'transient pimpleFoam' : 'steady simpleFoam'} simulation..."
 
   cat > \${WORK_DIR}/system/blockMeshDict << 'BLOCKMESH_EOF'
 FoamFile { version 2.0; format ascii; class dictionary; object blockMeshDict; }
@@ -394,12 +412,33 @@ DECOMPOSE_EOF
   run_step blockMesh blockMesh
   run_step decomposePar decomposePar -force
   run_step ${solverBin} mpirun --allow-run-as-root -np \${NPROCS} ${solverBin} -parallel
-  run_step reconstructPar reconstructPar -latestTime
-else
-  echo "OpenFOAM not installed -- skipping solver, writing heuristic metrics only..."
-fi
+  run_step reconstructPar reconstructPar${reconstructArgs}
+  run_step foamToVTK foamToVTK
 
+  # Field-extracted metrics: read the solved alpha.proppant / U / p fields and
+  # derive screen-out risk, placement efficiency, fracture-geometry score and
+  # predicted max treating pressure. Prefer the version shipped to S3
+  # (scripts/calculate_metrics.py, deployed from the repo) so metric changes
+  # take effect without rebuilding the AMI; fall back to the AMI-baked copy.
+  echo "Running calculate_metrics.py on solved fields..."
+  METRICS_SCRIPT="/tmp/calculate_metrics_\${SLURM_JOB_ID}.py"
+  aws s3 cp s3://\${HPC_BUCKET}/scripts/calculate_metrics.py \${METRICS_SCRIPT} 2>/dev/null \\
+    || METRICS_SCRIPT="/opt/scripts/calculate_metrics.py"
+  if python3 \${METRICS_SCRIPT} \\
+    --work-dir \${WORK_DIR} \\
+    --injection-rate ${plan.injectionRate} \\
+    --proppant-concentration ${plan.proppantConcentration} \\
+    --fluid-viscosity ${plan.fluidViscosity}${metricsTransientFlag} > \${WORK_DIR}/calculate_metrics.log 2>&1; then
+    echo "Field-extracted metrics written to \${RESULTS_DIR}/metrics.json"
+  else
+    echo "WARNING: calculate_metrics.py failed (see calculate_metrics.log) -- writing heuristic metrics as fallback"
+    cp \${WORK_DIR}/calculate_metrics.log \${RESULTS_DIR}/ 2>/dev/null || true
 ${metricsJsonHeredoc(plan, geometry)}
+  fi
+else
+  echo "No usable OpenFOAM solver -- writing heuristic metrics only..."
+${metricsJsonHeredoc(plan, geometry)}
+fi
 
 cp -r \${WORK_DIR}/*.log \${RESULTS_DIR}/ 2>/dev/null || true
 
