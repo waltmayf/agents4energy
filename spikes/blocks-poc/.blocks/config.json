@@ -1,3 +1,6 @@
 {
-  "stackId": "blocks-poc-afc11e"
+  "stackId": "blocks-poc-afc11e",
+  "telemetry": {
+    "projectId": "c5b0875c-b3c9-4406-87bf-aea66621367f"
+  }
 }
