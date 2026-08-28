@@ -9,6 +9,7 @@ import {
 } from '@aws-sdk/client-s3';
 import { resolveS3Path, resolveS3Prefix, S3FsPathError } from '../../../lib/s3-fs-path';
 import { applyDiff, DiffFormatError, DiffApplyError } from '../../../lib/s3-fs-diff';
+import { uploadObjectBytes, copyObjectWithinFs } from '../../../lib/s3-fs-upload';
 import { COMPONENT_SPEC_MIME, type TableSpec } from '../../../lib/component-spec';
 
 const BUCKET_NAME = process.env.BUCKET_NAME!;
@@ -34,6 +35,10 @@ interface ToolEvent {
   path?: string;
   diff?: string;
   recursive?: boolean;
+  destPath?: string;
+  sourcePath?: string;
+  content?: string;
+  encoding?: 'utf-8' | 'base64';
   [key: string]: unknown;
 }
 
@@ -94,6 +99,27 @@ async function handleReadFile(event: ToolEvent): Promise<unknown> {
 
   const content = await head.Body!.transformToString('utf-8');
   return { path, content };
+}
+
+async function handleUploadFile(event: ToolEvent): Promise<unknown> {
+  const { destPath, sourcePath, content, encoding } = event;
+  if (!destPath) throw new Error('destPath is required');
+  if (sourcePath && content !== undefined) {
+    throw new Error('Provide exactly one of sourcePath or content, not both');
+  }
+  if (!sourcePath && content === undefined) {
+    throw new Error('Provide exactly one of sourcePath or content');
+  }
+
+  if (sourcePath) {
+    const { key } = await copyObjectWithinFs({ s3, bucket: BUCKET_NAME, sourcePath, destPath });
+    return { path: key, copiedFrom: sourcePath };
+  }
+
+  const { key, bytesWritten } = await uploadObjectBytes({
+    s3, bucket: BUCKET_NAME, destPath, content: content!, encoding,
+  });
+  return { path: key, bytesWritten };
 }
 
 async function handleDeleteFile(event: ToolEvent): Promise<unknown> {
@@ -176,6 +202,8 @@ export const handler = async (event: ToolEvent, context: Context): Promise<unkno
         return await handleReadFile(event);
       case 'DeleteFile':
         return await handleDeleteFile(event);
+      case 'UploadFile':
+        return await handleUploadFile(event);
       default:
         throw new Error(`Unknown tool: "${toolName}"`);
     }

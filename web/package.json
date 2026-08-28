@@ -80,5 +80,8 @@
     "tailwindcss": "^4",
     "tsx": "^4.22.4",
     "typescript": "^5.9.3"
+  },
+  "imports": {
+    "#lib/*": "./lib/*.ts"
   }
 }
