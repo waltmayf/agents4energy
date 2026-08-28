@@ -105,3 +105,30 @@ This pack wires an agent to the S3 filesystem tools already provisioned by `web/
 `ListFiles` also doubles as the generative-UI worked example: it returns a JSON component-spec block alongside its plain data, so the chat renderer shows a table widget instead of a YAML dump. See [`docs/mcp-generative-ui.md`](mcp-generative-ui.md) for the structured-content contract a tool uses to do this, the supported widget types, and how to add a new one.
 
 Deployed and verified against the `web-main` sandbox by calling the `invokeAgent` GraphQL mutation with `agentSlug: "s3-filesystem-explorer"` — see the PR for the exact request/response transcript.
+
+## Current packs
+
+| Pack (`<pack-id>`) | Agent slug | Tool servers | What it does |
+|---|---|---|---|
+| `example-pack` | — | — | Minimal, non-functional placeholder-URL manifest — a schema reference, not a deployable agent. |
+| `s3-filesystem-explorer` | `s3-filesystem-explorer` | S3 Filesystem Tools | Reads/writes the shared agent filesystem (see [`docs/agent-filesystem.md`](agent-filesystem.md)) — the worked example above. |
+| `data-lake-analytics` | `data-lake-analytics` | Athena PySpark Tools, S3 Filesystem Tools | Runs ad-hoc PySpark queries against a data lake, saves plots/artifacts under `files/artifacts/`. See [`docs/analytics-agent.md`](analytics-agent.md). |
+| `hpc-fracing-operations` | `hpc-fracing-operations` | CFD Simulation Tools, S3 Filesystem Tools, Athena PySpark Tools (optional) | Submits hydraulic-fracturing treatment plans to a PCS/Slurm/FSx CFD pipeline and returns tiered screen-out-risk recommendations with financial justification. See [`docs/hpc-fracing-agent.md`](hpc-fracing-agent.md); the `CFD Simulation Tools` server is only reachable when the backend is deployed with the `enableHpc` CDK context flag on. |
+
+### Sandbox-specific gateway URLs — a caveat that applies to every AgentCore-Gateway-backed pack
+
+Both `data-lake-analytics` and `hpc-fracing-operations` (like `s3-filesystem-explorer` before
+them) commit an `mcpServers[].url` that points at the AgentCore Gateway endpoint of the
+sandbox they were authored against, plus (for some entries) a `gatewayTargetId`. Both fields
+are **sandbox-specific** — see step 3 under "Authoring a pack" above and each pack's own
+`README.md` (where present) for the exact refresh procedure: pull the current
+`custom.agentcore_gateway_endpoint` out of `web/amplify_outputs.json` for `url`, and
+`aws bedrock-agentcore-control list-gateway-targets --gateway-identifier <gateway-id>` for
+`gatewayTargetId`, before running `deploy-pack.sh` against any sandbox other than the one the
+pack was committed from. A stale or omitted `gatewayTargetId` isn't harmless — `deploy-pack.ts`
+overwrites an existing `McpServer` row's `gatewayTargetId` with whatever the manifest
+specifies (including clearing it to `null` if the field is omitted), which can null out a
+working row. In practice the seed constructs that own these `McpServer` rows
+(`athenaPySparkMcpServerSeed`, `cfdToolsMcpServerSeed`, `s3ToolsMcpServerSeed`) re-correct
+`url`/`gatewayTargetId` on their own next deploy even if a pack's `deploy-pack.sh` run created
+or clobbered the row first — but there's a window where the tool is unreachable in between.
