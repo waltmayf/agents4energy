@@ -1170,16 +1170,22 @@ if (AGENTCORE_GATEWAY_ID) {
     resources: [athenaPySparkWorkgroup.executionRole.roleArn],
   }));
 
+  // The Lambda only reads (GetPySparkResults' stdout/stderr/result fetch and
+  // artifacts listing) — the actual artifact writes happen under the Spark
+  // execution role inside the session, not this Lambda (see design-doc risk #5).
   athenaPySparkLambda.addToRolePolicy(new PolicyStatement({
-    actions: ['s3:GetObject', 's3:PutObject', 's3:ListBucket'],
+    actions: ['s3:GetObject', 's3:ListBucket'],
     resources: [
       backend.agentWorkspace.resources.bucket.bucketArn,
       `${backend.agentWorkspace.resources.bucket.bucketArn}/*`,
     ],
   }));
 
-  // GetCalculationExecution result output (StdOut/StdErr/Result) lands under
-  // the workgroup's athena-results/ output location, distinct from files/.
+  // Read-only Glue Data Catalog access — the handler itself never calls Glue
+  // (all catalog queries run inside the Athena session under the Spark
+  // execution role, which already has this in Slice 2), but StartSession's
+  // synchronous validation of the target workgroup/session touches the
+  // catalog on the calling identity too; kept minimal and read-only.
   athenaPySparkLambda.addToRolePolicy(new PolicyStatement({
     actions: ['glue:GetDatabase', 'glue:GetDatabases', 'glue:GetTable', 'glue:GetTables'],
     resources: ['*'],
