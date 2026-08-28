@@ -1260,8 +1260,22 @@ if (AGENTCORE_GATEWAY_ID) {
 // owns.
 // ============================================================================
 
+// `npx ampx sandbox` (@aws-amplify/backend-deployer's CDKDeployer) synthesizes
+// via `Toolkit.fromAssemblyBuilder` with a hardcoded `MemoryContext` seeded
+// only with the backend namespace/name/type — it never reads cdk.json,
+// cdk.context.json, or a pre-set `CDK_CONTEXT_JSON` env var (that variable
+// gets overwritten with the MemoryContext's own contents before backend.ts is
+// imported). So `-c enableHpc=true` / `--context enableHpc=true` only takes
+// effect for `pnpm test:synth` (which sets CDK_CONTEXT_JSON itself, in the
+// same process, right before importing backend.ts) — not for a real `ampx
+// sandbox` deploy. A plain env var isn't touched by that env-clobbering, so
+// it's the only reliable way to flip this flag for a real deploy:
+// `ENABLE_HPC=true npx ampx sandbox --once`.
 const enableHpcContext = backend.stack.node.tryGetContext('enableHpc');
-const enableHpc = enableHpcContext === true || enableHpcContext === 'true';
+const enableHpc =
+  enableHpcContext === true ||
+  enableHpcContext === 'true' ||
+  process.env.ENABLE_HPC === 'true';
 
 if (enableHpc) {
   const hpcStack = backend.createStack('hpc-cluster');
