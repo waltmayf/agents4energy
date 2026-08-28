@@ -1,6 +1,6 @@
 # Agent Filesystem (S3-backed)
 
-Issue #240 gives the chat harness agent an ergonomic filesystem it can read and write, backed by one S3 bucket (Amplify Storage) and exposed through four tools on the AgentCore Gateway: `ApplyDiff`, `ListFiles`, `ReadFile`, `DeleteFile`.
+Issue #240 gives the chat harness agent an ergonomic filesystem it can read and write, backed by one S3 bucket (Amplify Storage) and exposed through five tools on the AgentCore Gateway: `ApplyDiff`, `ListFiles`, `ReadFile`, `DeleteFile`, `UploadFile` (the last added in #511, part of epic #498's shared-upload-lib slice — see [`docs/hpc-analytics-agents-epic.md`](hpc-analytics-agents-epic.md#slice-1--shared-upload-lib--uploadfile-tool-no-deps)).
 
 This lets an agent read shared domain documentation and write business outputs (reports, analytic outputs) into a shared file space, treating S3 like a local filesystem.
 
@@ -59,10 +59,34 @@ Args: `path` (string, required). Returns the file's contents as text. Reads are 
 
 Args: `path` (string, required). Deletes the object; returns a clear error if it doesn't exist.
 
+### `UploadFile` — write or copy a file, without going through `ApplyDiff`
+
+Args: `destPath` (string, required, under `files/`) plus **exactly one** of `sourcePath`
+(string — an existing `files/` key to server-side-copy) or `content` (string — inline data to
+write directly), and an optional `encoding` (`'utf-8'` (default) or `'base64'`, only meaningful
+with `content`).
+
+- **`content`** → `uploadObjectBytes()` does a `PutObject` of the decoded bytes to `destPath`,
+  with the content-type sniffed from the destination's extension (`.html`, `.csv`, `.json`,
+  `.txt`, `.png`). Use `encoding: 'base64'` for binary payloads (e.g. an image) that can't
+  round-trip as UTF-8 text.
+- **`sourcePath`** → `copyObjectWithinFs()` does a server-side `CopyObject` from one existing
+  `files/` key to another — the "upload from an existing file" case for a Lambda that has no
+  local disk of its own to upload *from*.
+- Providing both or neither of `sourcePath`/`content` is a validation error, not a silent
+  fallback.
+
+`UploadFile` shares its implementation
+([`web/lib/s3-fs-upload.ts`](../web/lib/s3-fs-upload.ts)) with the Athena PySpark tool's
+in-session auto-upload — see [`docs/analytics-agent.md`](analytics-agent.md#artifact-rendering-under-filesartifacts)
+for how that composability works without an MCP-to-MCP call. Both call sites resolve paths
+through the same `resolveS3Path`/`resolveArtifactsPrefix` normalization and `../`-traversal
+guard as every other tool in this file.
+
 ## Wiring
 
 - **Storage**: `web/amplify/storage/resource.ts` — the `agentWorkspace` Amplify Storage bucket.
-- **Lambda**: `web/amplify/functions/s3-tools/handler.ts` — dispatches on `context.clientContext.custom.bedrockAgentCoreToolName` (form `<gatewayTargetName>___<ToolName>`), since one Lambda backs all four tools.
+- **Lambda**: `web/amplify/functions/s3-tools/handler.ts` — dispatches on `context.clientContext.custom.bedrockAgentCoreToolName` (form `<gatewayTargetName>___<ToolName>`), since one Lambda backs all five tools.
 - **Gateway target**: `web/amplify/constructs/s3ToolsGatewayTarget/` — a CDK custom resource that calls `CreateGatewayTarget` with a Lambda target configuration and an inline tool schema.
 - **Demo Agent/McpServer**: `web/amplify/constructs/s3ToolsMcpServerSeed/` — a CDK custom resource that idempotently seeds a demo `Agent` + `McpServer` + `AgentMcpServer` join so the tools are reachable from the chat UI without manual setup.
 
