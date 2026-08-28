@@ -50,6 +50,8 @@ import { GraphTraverseMcpServerSeed } from './constructs/graphTraverseMcpServerS
 import { GraphIngestLineage } from './constructs/graphIngestLineage';
 import { AthenaPySparkWorkgroup } from './constructs/athenaPySparkWorkgroup/resource';
 import { DataLakeSeed } from './constructs/dataLakeSeed/resource';
+import { AthenaPySparkGatewayTarget } from './constructs/athenaPySparkGatewayTarget/resource';
+import { AthenaPySparkMcpServerSeed } from './constructs/athenaPySparkMcpServerSeed/resource';
 import { RealTimeParallelCluster } from './constructs/realTimeParallelCluster/resource';
 
 import { StringParameter } from 'aws-cdk-lib/aws-ssm';
@@ -1105,6 +1107,138 @@ new StringParameter(athenaPySparkStack, 'SsmStorageBucketName', {
   stringValue: backend.agentWorkspace.resources.bucket.bucketName,
   simpleName: false,
 });
+
+// ============================================================================
+// PYSPARK SUBMIT/POLL/RESULTS TOOL (issue #501, epic #498 slice 3) — the
+// SubmitPySpark/GetPySparkStatus/GetPySparkResults gateway-target trio
+// backing the analytics agent's PySpark tool, with in-session auto-upload of
+// plots/data (see docs/hpc-analytics-agents-epic.md's "Two execution
+// contexts" section). Lives in the SAME athenaPySparkStack as the workgroup
+// (Slice 2) rather than a new sink stack: that stack doesn't (and won't)
+// depend on agentStack, so adding this gateway-target wiring (which DOES need
+// agentStack's gateway id/arn/role) here is cycle-free — the same reasoning
+// as the graph-traverse block above, just avoiding an extra stack.
+// ============================================================================
+if (AGENTCORE_GATEWAY_ID) {
+  const athenaPySparkLambda = new NodejsFunction(athenaPySparkStack, 'AthenaPySparkFn', {
+    entry: resolve(__dirname, 'functions/athena-pyspark/handler.ts'),
+    runtime: Runtime.NODEJS_20_X,
+    // Athena-for-Spark session cold starts run 40-90s+ (design-doc risk #2);
+    // SubmitPySpark bounded-waits for the session to reach IDLE before
+    // returning, so this needs real headroom above that — it never blocks for
+    // the job itself (that's what GetPySparkStatus/GetPySparkResults poll).
+    timeout: Duration.seconds(180),
+    environment: {
+      ATHENA_PYSPARK_WORKGROUP_NAME: athenaPySparkWorkgroup.workGroupName,
+      STORAGE_BUCKET_NAME: backend.agentWorkspace.resources.bucket.bucketName,
+    },
+    // The handler reads python/*.py at runtime (loadScript.ts) to build the
+    // script injected into each Athena calculation — esbuild only bundles
+    // JS/TS, so copy that directory into the bundle output explicitly.
+    bundling: {
+      nodeModules: ['@aws-sdk/client-athena'],
+      commandHooks: {
+        beforeBundling: () => [],
+        beforeInstall: () => [],
+        afterBundling: (inputDir, outputDir) => [
+          `cp -r ${inputDir}/web/amplify/functions/athena-pyspark/python ${outputDir}/python`,
+        ],
+      },
+    },
+  });
+
+  const { region: apsRegion, account: apsAccount } = Stack.of(athenaPySparkStack);
+
+  athenaPySparkLambda.addToRolePolicy(new PolicyStatement({
+    actions: [
+      'athena:StartSession',
+      'athena:GetSession',
+      'athena:GetSessionStatus',
+      'athena:ListSessions',
+      'athena:StartCalculationExecution',
+      'athena:GetCalculationExecution',
+      'athena:GetCalculationExecutionStatus',
+    ],
+    resources: [`arn:aws:athena:${apsRegion}:${apsAccount}:workgroup/*`],
+  }));
+
+  // Athena assumes the Spark execution role (Slice 2) to run the session on
+  // this Lambda's behalf — athena:StartSession requires the caller to be able
+  // to pass that role (AWS's documented safety check for Athena-for-Spark).
+  athenaPySparkLambda.addToRolePolicy(new PolicyStatement({
+    actions: ['iam:PassRole'],
+    resources: [athenaPySparkWorkgroup.executionRole.roleArn],
+  }));
+
+  athenaPySparkLambda.addToRolePolicy(new PolicyStatement({
+    actions: ['s3:GetObject', 's3:PutObject', 's3:ListBucket'],
+    resources: [
+      backend.agentWorkspace.resources.bucket.bucketArn,
+      `${backend.agentWorkspace.resources.bucket.bucketArn}/*`,
+    ],
+  }));
+
+  // GetCalculationExecution result output (StdOut/StdErr/Result) lands under
+  // the workgroup's athena-results/ output location, distinct from files/.
+  athenaPySparkLambda.addToRolePolicy(new PolicyStatement({
+    actions: ['glue:GetDatabase', 'glue:GetDatabases', 'glue:GetTable', 'glue:GetTables'],
+    resources: ['*'],
+  }));
+
+  // Resource-based permission letting the gateway service invoke the Lambda.
+  if (AGENTCORE_GATEWAY_ARN) {
+    athenaPySparkLambda.addPermission('AllowGatewayInvoke', {
+      principal: new ServicePrincipal('bedrock-agentcore.amazonaws.com'),
+      action: 'lambda:InvokeFunction',
+      sourceArn: AGENTCORE_GATEWAY_ARN,
+    });
+  }
+
+  // Identity-based grant on the gateway's execution role — the other half
+  // CreateGatewayTarget validates synchronously (see the s3-tools/
+  // graph-traverse comments above for the full rationale).
+  let athenaPySparkGatewayInvokeGrant: Policy | undefined;
+  if (gatewayName) {
+    athenaPySparkGatewayInvokeGrant = new Policy(athenaPySparkStack, 'AthenaPySparkGatewayInvokeGrant', {
+      roles: [agentCoreApp.gatewayRole(gatewayName)],
+      statements: [
+        new PolicyStatement({
+          actions: ['lambda:InvokeFunction'],
+          resources: [athenaPySparkLambda.functionArn, `${athenaPySparkLambda.functionArn}:*`],
+        }),
+      ],
+    });
+  }
+
+  const athenaPySparkTargetName = toGatewayResourceName(
+    'athena-pyspark',
+    backendNamespace ?? '',
+    backendName ?? '',
+  ).slice(0, 100);
+
+  const athenaPySparkGatewayTarget = new AthenaPySparkGatewayTarget(athenaPySparkStack, 'AthenaPySparkGatewayTarget', {
+    gatewayIdentifier: AGENTCORE_GATEWAY_ID,
+    gatewayArn: AGENTCORE_GATEWAY_ARN,
+    targetName: athenaPySparkTargetName,
+    lambdaArn: athenaPySparkLambda.functionArn,
+  });
+
+  // CreateGatewayTarget synchronously validates the gateway role can invoke
+  // the Lambda, so the invoke grant must exist before the target is created.
+  if (athenaPySparkGatewayInvokeGrant) {
+    athenaPySparkGatewayTarget.node.addDependency(athenaPySparkGatewayInvokeGrant);
+  }
+
+  if (AGENTCORE_GATEWAY_ENDPOINT) {
+    new AthenaPySparkMcpServerSeed(athenaPySparkStack, 'AthenaPySparkMcpServerSeed', {
+      graphqlUrl: backend.data.resources.cfnResources.cfnGraphqlApi.attrGraphQlUrl,
+      graphqlRegion: AGENTCORE_REGION,
+      graphqlApiId: backend.data.resources.cfnResources.cfnGraphqlApi.attrApiId,
+      gatewayEndpoint: AGENTCORE_GATEWAY_ENDPOINT,
+      gatewayTargetId: athenaPySparkGatewayTarget.targetId,
+    });
+  }
+}
 
 // ============================================================================
 // HPC CLUSTER (issue #503, epic #498 slice 5) — AWS PCS + Slurm + FSx-Lustre

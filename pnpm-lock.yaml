@@ -72,6 +72,9 @@ importers:
       '@aws-crypto/sha256-js':
         specifier: ^5.2.0
         version: 5.2.0
+      '@aws-sdk/client-athena':
+        specifier: 3.1075.0
+        version: 3.1075.0
       '@aws-sdk/client-bedrock-agentcore':
         specifier: ^3.1065.0
         version: 3.1065.0
@@ -952,6 +955,10 @@ packages:
 
   '@aws-sdk/client-appsync@3.1065.0':
     resolution: {integrity: sha512-EyBffTHj1IVz2A7Cn+/Ufce4PANDacvrRyj25w5WFK58Rn58PQpoAR9u/a+4G5f3AMS9GhHPnavyE1ffPcqiPw==}
+    engines: {node: '>=20.0.0'}
+
+  '@aws-sdk/client-athena@3.1075.0':
+    resolution: {integrity: sha512-m5HnVSYGL0t+rB7Mr2cxKgjc9hN1DTtIvn39st4iaWOL3ku5sEqlqpmsXHMphxzbid1yKvUo1A68OAY3/ljByQ==}
     engines: {node: '>=20.0.0'}
 
   '@aws-sdk/client-bedrock-agentcore-control@3.1071.0':
@@ -9713,13 +9720,13 @@ snapshots:
     dependencies:
       '@aws-crypto/sha256-browser': 5.2.0
       '@aws-crypto/sha256-js': 5.2.0
-      '@aws-sdk/core': 3.974.23
-      '@aws-sdk/credential-provider-node': 3.972.58
-      '@aws-sdk/types': 3.974.3
-      '@smithy/core': 3.31.1
-      '@smithy/fetch-http-handler': 5.4.6
-      '@smithy/node-http-handler': 4.7.7
-      '@smithy/types': 4.16.1
+      '@aws-sdk/core': 3.977.9
+      '@aws-sdk/credential-provider-node': 3.972.81
+      '@aws-sdk/types': 3.974.5
+      '@smithy/core': 3.33.3
+      '@smithy/fetch-http-handler': 5.7.2
+      '@smithy/node-http-handler': 4.11.3
+      '@smithy/types': 4.17.2
       tslib: 2.8.1
 
   '@aws-sdk/client-amplifyuibuilder@3.1065.0':
@@ -9736,6 +9743,19 @@ snapshots:
       tslib: 2.8.1
 
   '@aws-sdk/client-appsync@3.1065.0':
+    dependencies:
+      '@aws-crypto/sha256-browser': 5.2.0
+      '@aws-crypto/sha256-js': 5.2.0
+      '@aws-sdk/core': 3.977.9
+      '@aws-sdk/credential-provider-node': 3.972.81
+      '@aws-sdk/types': 3.974.5
+      '@smithy/core': 3.33.3
+      '@smithy/fetch-http-handler': 5.7.2
+      '@smithy/node-http-handler': 4.11.3
+      '@smithy/types': 4.17.2
+      tslib: 2.8.1
+
+  '@aws-sdk/client-athena@3.1075.0':
     dependencies:
       '@aws-crypto/sha256-browser': 5.2.0
       '@aws-crypto/sha256-js': 5.2.0
