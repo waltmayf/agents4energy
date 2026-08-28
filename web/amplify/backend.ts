@@ -20,6 +20,7 @@ import { agentWorkspace } from './storage/resource';
 import { Policy, PolicyStatement, ServicePrincipal } from 'aws-cdk-lib/aws-iam';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
+import * as s3deploy from 'aws-cdk-lib/aws-s3-deployment';
 import { Function as LambdaFunction, Runtime } from 'aws-cdk-lib/aws-lambda';
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
 import { Fn, Stack, CfnOutput, Duration } from 'aws-cdk-lib';
@@ -1278,8 +1279,26 @@ if (enableHpc) {
     ],
   });
 
+  // Compute-node AMI. Defaults to the OpenFOAM v2312 arm64 image genai-demos
+  // bakes via Packer (OpenFOAM solvers + /opt/scripts/calculate_metrics.py),
+  // which already exists in this account/region. Override with
+  // `-c hpcComputeAmiId=ami-...` to point at a different pre-baked image, or
+  // `-c hpcComputeAmiId=none` to fall back to the bare PCS AMI (heuristic
+  // metrics only — no real CFD). Without a real OpenFOAM AMI the compute nodes
+  // can't run simpleFoam/pimpleFoam, so the CFD tools return input-derived
+  // heuristics rather than field-extracted metrics.
+  const hpcComputeAmiContext = backend.stack.node.tryGetContext('hpcComputeAmiId');
+  const DEFAULT_OPENFOAM_AMI_ID = 'ami-065de42f12eb092b0';
+  const hpcComputeAmiId =
+    hpcComputeAmiContext === 'none'
+      ? undefined
+      : (typeof hpcComputeAmiContext === 'string' && hpcComputeAmiContext.startsWith('ami-')
+          ? hpcComputeAmiContext
+          : DEFAULT_OPENFOAM_AMI_ID);
+
   const parallelCluster = new RealTimeParallelCluster(hpcStack, 'ParallelCluster', {
     vpc: hpcVpc,
+    customComputeAmiId: hpcComputeAmiId,
   });
 
   const hpcSsmBasePath = `/agentcore/${Stack.of(hpcStack).stackName}/hpc`;
@@ -1294,6 +1313,19 @@ if (enableHpc) {
   putHpcParam('SsmHpcClusterId', 'cluster_id', parallelCluster.clusterId);
   putHpcParam('SsmHpcLoginNodeNameTag', 'login_node_name_tag', parallelCluster.loginNodeNameTag);
   putHpcParam('SsmHpcCfdSimulationsPrefix', 'cfd_simulations_prefix', parallelCluster.cfdSimulationsPrefix);
+
+  // Ship the OpenFOAM field-extraction metrics calculator into the HPC bucket
+  // at scripts/calculate_metrics.py. The CFD Slurm script downloads this at
+  // run time (falling back to the copy baked into the OpenFOAM AMI at
+  // /opt/scripts/), so editing the vendored script and redeploying takes
+  // effect without rebuilding the AMI — matching genai-demos' S3-override
+  // pattern. Plain-file source: no Docker bundling, synth-gate safe.
+  new s3deploy.BucketDeployment(hpcStack, 'CfdMetricsScriptDeployment', {
+    sources: [s3deploy.Source.asset(resolve(__dirname, 'functions/cfd-tools/scripts'))],
+    destinationBucket: parallelCluster.hpcBucket,
+    destinationKeyPrefix: 'scripts',
+    prune: false,
+  });
 
   // ==========================================================================
   // CFD-TOOLS Lambda (issue #504, epic #498 slice 6) — SubmitCfdSimulation/
