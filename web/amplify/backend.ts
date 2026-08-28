@@ -51,6 +51,8 @@ import { GraphIngestLineage } from './constructs/graphIngestLineage';
 import { AthenaPySparkWorkgroup } from './constructs/athenaPySparkWorkgroup/resource';
 import { DataLakeSeed } from './constructs/dataLakeSeed/resource';
 import { RealTimeParallelCluster } from './constructs/realTimeParallelCluster/resource';
+import { CfdToolsGatewayTarget } from './constructs/cfdToolsGatewayTarget/resource';
+import { CfdToolsMcpServerSeed } from './constructs/cfdToolsMcpServerSeed/resource';
 
 import { StringParameter } from 'aws-cdk-lib/aws-ssm';
 
@@ -1152,6 +1154,113 @@ if (enableHpc) {
   putHpcParam('SsmHpcClusterId', 'cluster_id', parallelCluster.clusterId);
   putHpcParam('SsmHpcLoginNodeNameTag', 'login_node_name_tag', parallelCluster.loginNodeNameTag);
   putHpcParam('SsmHpcCfdSimulationsPrefix', 'cfd_simulations_prefix', parallelCluster.cfdSimulationsPrefix);
+
+  // ==========================================================================
+  // CFD-TOOLS Lambda (issue #504, epic #498 slice 6) — SubmitCfdSimulation/
+  // GetCfdJobStatus/GetCfdResults, exposed as a Lambda-backed AgentCore
+  // Gateway target. Nested inside enableHpc: this Lambda only makes sense
+  // once a cluster exists to submit jobs to, and it reads `parallelCluster`'s
+  // outputs directly as same-synth CDK tokens (no cross-stack SSM round-trip
+  // needed, unlike the params above which exist for external consumers).
+  // Further gated on AGENTCORE_GATEWAY_ID — same reasoning as s3-tools/
+  // graph-traverse above, there's no gateway to register a target on
+  // without it. Together with the outer enableHpc gate, a normal deploy (and
+  // `pnpm test:synth`) never creates this stack.
+  // ==========================================================================
+  if (AGENTCORE_GATEWAY_ID) {
+    const cfdToolsStack = backend.createStack('cfd-tools');
+    const { region: cfdRegion, account: cfdAccount } = Stack.of(cfdToolsStack);
+
+    const cfdToolsLambda = new NodejsFunction(cfdToolsStack, 'CfdToolsFn', {
+      entry: resolve(__dirname, 'functions/cfd-tools/handler.ts'),
+      runtime: Runtime.NODEJS_20_X,
+      timeout: Duration.seconds(60),
+      environment: {
+        HEAD_NODE_TAG: parallelCluster.loginNodeNameTag,
+        HPC_BUCKET: parallelCluster.hpcBucket.bucketName,
+        WORKSPACE_BUCKET: backend.agentWorkspace.resources.bucket.bucketName,
+      },
+    });
+
+    // DescribeInstances/GetCommandInvocation don't support resource-level
+    // scoping (AWS docs: "* only"); SendCommand is scoped to the target
+    // instances + the specific SSM document it's allowed to run.
+    cfdToolsLambda.addToRolePolicy(new PolicyStatement({
+      actions: ['ec2:DescribeInstances'],
+      resources: ['*'],
+    }));
+    cfdToolsLambda.addToRolePolicy(new PolicyStatement({
+      actions: ['ssm:SendCommand'],
+      resources: [
+        `arn:aws:ec2:${cfdRegion}:${cfdAccount}:instance/*`,
+        `arn:aws:ssm:${cfdRegion}::document/AWS-RunShellScript`,
+      ],
+    }));
+    cfdToolsLambda.addToRolePolicy(new PolicyStatement({
+      actions: ['ssm:GetCommandInvocation'],
+      resources: ['*'],
+    }));
+
+    // FSx auto-exports job results to this bucket at cfd-simulations/<jobId>/results/.
+    parallelCluster.hpcBucket.grantReadWrite(cfdToolsLambda, 'cfd-simulations/*');
+    // GetCfdResults mirrors a results summary into files/artifacts/ so it
+    // renders via the /file artifact route (issue #501/#512).
+    backend.agentWorkspace.resources.bucket.grantPut(cfdToolsLambda, 'files/artifacts/*');
+
+    if (AGENTCORE_GATEWAY_ARN) {
+      cfdToolsLambda.addPermission('AllowGatewayInvoke', {
+        principal: new ServicePrincipal('bedrock-agentcore.amazonaws.com'),
+        action: 'lambda:InvokeFunction',
+        sourceArn: AGENTCORE_GATEWAY_ARN,
+      });
+    }
+
+    // Identity-based grant on the gateway's execution role — the other half
+    // CreateGatewayTarget validates synchronously (see the s3-tools comment
+    // above). Owned by this sink stack (already depends on the agent stack
+    // for the gateway role/ARN) so it adds no new cross-stack edge.
+    let cfdGatewayInvokeGrant: Policy | undefined;
+    if (gatewayName) {
+      cfdGatewayInvokeGrant = new Policy(cfdToolsStack, 'CfdToolsGatewayInvokeGrant', {
+        roles: [agentCoreApp.gatewayRole(gatewayName)],
+        statements: [
+          new PolicyStatement({
+            actions: ['lambda:InvokeFunction'],
+            resources: [cfdToolsLambda.functionArn, `${cfdToolsLambda.functionArn}:*`],
+          }),
+        ],
+      });
+    }
+
+    const cfdToolsTargetName = toGatewayResourceName(
+      'cfd-tools',
+      backendNamespace ?? '',
+      backendName ?? '',
+    ).slice(0, 100);
+
+    const cfdToolsGatewayTarget = new CfdToolsGatewayTarget(cfdToolsStack, 'CfdToolsGatewayTarget', {
+      gatewayIdentifier: AGENTCORE_GATEWAY_ID,
+      gatewayArn: AGENTCORE_GATEWAY_ARN,
+      targetName: cfdToolsTargetName,
+      lambdaArn: cfdToolsLambda.functionArn,
+    });
+
+    // CreateGatewayTarget synchronously validates the gateway role can invoke
+    // the Lambda, so the invoke grant must exist before the target is created.
+    if (cfdGatewayInvokeGrant) {
+      cfdToolsGatewayTarget.node.addDependency(cfdGatewayInvokeGrant);
+    }
+
+    if (AGENTCORE_GATEWAY_ENDPOINT) {
+      new CfdToolsMcpServerSeed(cfdToolsStack, 'CfdToolsMcpServerSeed', {
+        graphqlUrl: backend.data.resources.cfnResources.cfnGraphqlApi.attrGraphQlUrl,
+        graphqlRegion: AGENTCORE_REGION,
+        graphqlApiId: backend.data.resources.cfnResources.cfnGraphqlApi.attrApiId,
+        gatewayEndpoint: AGENTCORE_GATEWAY_ENDPOINT,
+        gatewayTargetId: cfdToolsGatewayTarget.targetId,
+      });
+    }
+  }
 }
 
 // ============================================================================

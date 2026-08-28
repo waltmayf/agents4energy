@@ -87,6 +87,9 @@ importers:
       '@aws-sdk/client-dynamodb':
         specifier: ^3.1075.0
         version: 3.1075.0
+      '@aws-sdk/client-ec2':
+        specifier: ^3.1075.0
+        version: 3.1120.0
       '@aws-sdk/client-glue':
         specifier: 3.1103.0
         version: 3.1103.0
@@ -994,8 +997,8 @@ packages:
     resolution: {integrity: sha512-3KlTXh6U2nDqL+epT1XdxnszLtCEAvoeO7phI4UGiQeKMiibcyBsJvSlyEj1tBoNOsbdcmp1QLM8za415sDzzQ==}
     engines: {node: '>=20.0.0'}
 
-  '@aws-sdk/client-ec2@3.1065.0':
-    resolution: {integrity: sha512-QQFyk3gf64pGuqrXA8vn4o/RRrt1oJuVpDY60juj8p3u30haqK6bgrXyyOCI3Klz4Av0uFr524xTnL94Fm4O8g==}
+  '@aws-sdk/client-ec2@3.1120.0':
+    resolution: {integrity: sha512-9VKmZf+zR74WpYtEfuRKVm3KS/deIVDgZcTljpHOXgwzihBdeQOfFR/LLBSapRCjg8MumwJOOeqMnb7gmSH5Wg==}
     engines: {node: '>=20.0.0'}
 
   '@aws-sdk/client-ecr@3.1065.0':
@@ -1268,8 +1271,8 @@ packages:
     resolution: {integrity: sha512-M7Ay1VpBpf/YFfic9kkjwE3wyCh4G0gEM4RypRXYm7aPjyfqi+D8FEYMR2E3IqbvN+qi2rEFYAiwWL0XHtQYdQ==}
     engines: {node: '>=20.0.0'}
 
-  '@aws-sdk/middleware-sdk-ec2@3.972.34':
-    resolution: {integrity: sha512-xOxVjHBm04meFPYBBNN3X1eMP1epESN5E1t+JCWCbkQMTkijOnrbR3/ZOdWxRCPoCba5NG6mXaZ9Kg5oy5CywQ==}
+  '@aws-sdk/middleware-sdk-ec2@3.972.58':
+    resolution: {integrity: sha512-k1yW3bEUcy/e9oxIH0zT81sbPCqgERdNf0bOsBZg/tXP75tyEKp8kp8BG9xag64+u9fF8064fLDUdIItWgQxWw==}
     engines: {node: '>=20.0.0'}
 
   '@aws-sdk/middleware-sdk-rds@3.972.34':
@@ -9295,7 +9298,7 @@ snapshots:
     dependencies:
       '@aws-amplify/graphql-transformer-core': 3.5.1(aws-cdk-lib@2.258.1(constructs@10.6.0))(constructs@10.6.0)
       '@aws-amplify/graphql-transformer-interfaces': 4.3.0(aws-cdk-lib@2.258.1(constructs@10.6.0))(constructs@10.6.0)
-      '@aws-sdk/client-ec2': 3.1065.0
+      '@aws-sdk/client-ec2': 3.1120.0
       '@aws-sdk/client-iam': 3.1065.0
       '@aws-sdk/client-lambda': 3.1065.0
       '@aws-sdk/client-rds': 3.1065.0
@@ -9617,7 +9620,7 @@ snapshots:
       '@aws-sdk/client-cloudformation': 3.1065.0
       '@aws-sdk/client-cloudwatch-logs': 3.1084.0
       '@aws-sdk/client-codebuild': 3.1065.0
-      '@aws-sdk/client-ec2': 3.1065.0
+      '@aws-sdk/client-ec2': 3.1120.0
       '@aws-sdk/client-ecr': 3.1065.0
       '@aws-sdk/client-ecs': 3.1065.0
       '@aws-sdk/client-elastic-load-balancing-v2': 3.1065.0
@@ -9878,13 +9881,11 @@ snapshots:
       '@smithy/types': 4.14.3
       tslib: 2.8.1
 
-  '@aws-sdk/client-ec2@3.1065.0':
+  '@aws-sdk/client-ec2@3.1120.0':
     dependencies:
-      '@aws-crypto/sha256-browser': 5.2.0
-      '@aws-crypto/sha256-js': 5.2.0
       '@aws-sdk/core': 3.977.9
       '@aws-sdk/credential-provider-node': 3.972.81
-      '@aws-sdk/middleware-sdk-ec2': 3.972.34
+      '@aws-sdk/middleware-sdk-ec2': 3.972.58
       '@aws-sdk/types': 3.974.5
       '@smithy/core': 3.33.3
       '@smithy/fetch-http-handler': 5.7.2
@@ -10639,7 +10640,7 @@ snapshots:
       '@smithy/types': 4.17.2
       tslib: 2.8.1
 
-  '@aws-sdk/middleware-sdk-ec2@3.972.34':
+  '@aws-sdk/middleware-sdk-ec2@3.972.58':
     dependencies:
       '@aws-sdk/core': 3.977.9
       '@aws-sdk/types': 3.974.5
