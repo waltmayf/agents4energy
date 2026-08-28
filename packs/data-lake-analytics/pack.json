@@ -1,0 +1,31 @@
+{
+  "id": "data-lake-analytics",
+  "name": "Data Lake Analytics",
+  "description": "Agent wired to the Athena-for-Spark PySpark submit/poll/results tools (issue #501) plus the S3 filesystem tools (issue #240) — runs ad-hoc PySpark queries against the data lake and renders plot/artifact output in chat.",
+  "agent": {
+    "name": "Data Lake Analytics",
+    "slug": "data-lake-analytics",
+    "description": "Runs PySpark queries against the data lake via Athena for Spark, saves plots/images as artifacts, and reads/writes supporting files in the demo S3 bucket.",
+    "systemPromptFile": "system-prompt.md",
+    "enabled": true
+  },
+  "mcpServers": [
+    {
+      "name": "Athena PySpark Tools",
+      "url": "https://default-default-gateway-web-main-r7mcr35dot.gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp",
+      "description": "AgentCore Gateway exposing the Athena-for-Spark SubmitPySpark/GetPySparkStatus/GetPySparkResults tools (issue #501).",
+      "serverType": "agentcore",
+      "enabled": true
+    },
+    {
+      "name": "S3 Filesystem Tools",
+      "url": "https://default-default-gateway-web-main-r7mcr35dot.gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp",
+      "description": "AgentCore Gateway exposing the ApplyDiff/ListFiles/ReadFile/DeleteFile S3 filesystem tools (issue #240).",
+      "serverType": "agentcore",
+      "enabled": true
+    }
+  ],
+  "groupGrants": [
+    { "group": "reservoir-eng", "toolName": "*", "effect": "ALLOW" }
+  ]
+}
