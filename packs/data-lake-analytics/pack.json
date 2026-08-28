@@ -22,6 +22,7 @@
       "url": "https://default-default-gateway-web-main-r7mcr35dot.gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp",
       "description": "AgentCore Gateway exposing the ApplyDiff/ListFiles/ReadFile/DeleteFile S3 filesystem tools (issue #240).",
       "serverType": "agentcore",
+      "gatewayTargetId": "RLNO7XGX2S",
       "enabled": true
     }
   ],
