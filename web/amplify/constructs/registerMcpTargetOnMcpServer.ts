@@ -43,14 +43,19 @@ export class RegisterMcpTargetOnMcpServer extends Construct {
       bundling: { nodeModules: ['@aws-sdk/client-bedrock-agentcore-control'] },
     });
 
-    // Grant permissions to create and update gateway targets. Update is
-    // needed to attach/detach the OAuth2 credential provider (epic #412
+    // Grant permissions to create, update, and delete gateway targets. Update
+    // is needed to attach/detach the OAuth2 credential provider (epic #412
     // slice 3, #415) when an McpServer row's outbound auth config changes
-    // after the target already exists.
+    // after the target already exists. Delete runs on a DynamoDB REMOVE
+    // event so a deleted McpServer row doesn't leave its gateway target
+    // orphaned forever — that gap let stale e2e-test targets silently eat
+    // the whole gateway's 100-target quota until a real deploy's
+    // CreateGatewayTarget failed on it (#524).
     fn.addToRolePolicy(new PolicyStatement({
       actions: [
         'bedrock-agentcore:CreateGatewayTarget',
         'bedrock-agentcore:UpdateGatewayTarget',
+        'bedrock-agentcore:DeleteGatewayTarget',
         'bedrock-agentcore:SynchronizeGatewayTargets',
       ],
       resources: ['*'],
