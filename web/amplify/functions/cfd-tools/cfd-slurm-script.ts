@@ -15,7 +15,10 @@
 // fracture-geometry score and predicted max treating pressure — its output
 // schema matches `handler.ts`'s `CfdMetricsJson` parser. The bash heuristic
 // `metricsJsonHeredoc` (computed from input params only) is now the fallback:
-// used when OpenFOAM isn't installed, or if `calculate_metrics.py` fails, so
+// used when OpenFOAM isn't installed, when the specific solver binary this
+// run needs (`simpleFoam`/`pimpleFoam`) isn't on PATH (e.g. an AMI whose
+// OpenFOAM build didn't compile that solver — see issue about
+// pimpleFoam missing from the AMI), or if `calculate_metrics.py` fails, so
 // `GetCfdResults` always returns something.
 
 import type { TreatmentPlan, PumpingScheduleStage } from './cfd-types';
@@ -194,12 +197,21 @@ RESULTS_DIR="\${WORK_DIR}/results"
 mkdir -p \${WORK_DIR}/0 \${WORK_DIR}/constant \${WORK_DIR}/system \${RESULTS_DIR}
 cd \${WORK_DIR}
 
+HAVE_SOLVER=false
 if [ -f /opt/openfoam/etc/bashrc ]; then
-  echo "OpenFOAM found, running ${transient ? 'transient pimpleFoam' : 'steady simpleFoam'} simulation..."
   source /opt/openfoam/etc/bashrc
   export PATH=/opt/aws/pcs/scheduler/slurm-25.05/bin:/opt/amazon/openmpi5/bin:\${PATH}
   export LD_LIBRARY_PATH=/opt/amazon/openmpi5/lib64:\${LD_LIBRARY_PATH:-}
   export HOME=\${WORK_DIR}
+  if command -v ${solverBin} > /dev/null 2>&1; then
+    HAVE_SOLVER=true
+  else
+    echo "WARNING: OpenFOAM is installed but ${solverBin} is not on PATH -- this AMI was built without the ${transient ? 'transient' : 'steady'} solver. Skipping solver, writing heuristic metrics only..."
+  fi
+fi
+
+if [ "\${HAVE_SOLVER}" = true ]; then
+  echo "OpenFOAM found, running ${transient ? 'transient pimpleFoam' : 'steady simpleFoam'} simulation..."
 
   cat > \${WORK_DIR}/system/blockMeshDict << 'BLOCKMESH_EOF'
 FoamFile { version 2.0; format ascii; class dictionary; object blockMeshDict; }
@@ -424,7 +436,7 @@ DECOMPOSE_EOF
 ${metricsJsonHeredoc(plan, geometry)}
   fi
 else
-  echo "OpenFOAM not installed -- skipping solver, writing heuristic metrics only..."
+  echo "No usable OpenFOAM solver -- writing heuristic metrics only..."
 ${metricsJsonHeredoc(plan, geometry)}
 fi
 
