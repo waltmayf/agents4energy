@@ -4,6 +4,12 @@ Backend-only TypeScript API with AWS Blocks — no frontend included.
 
 > Created with `npx @aws-blocks/create-blocks-app my-app --template backend`
 
+**This is the throwaway PoC for spike #533** (go/no-go gate for the standalone gateway-platform
+epic, #532) — not meant to be merged or maintained. See [FINDINGS.md](./FINDINGS.md) for the
+full write-up. The gateway-specific experiment lives in `aws-blocks/gateway-experiment.cdk.ts`,
+gated behind `AGENTCORE_GATEWAY_EXPERIMENT=1` so it never runs during normal `npm run dev` /
+`npm run sandbox`.
+
 ## For Coding Agents
 
 **CRITICAL: Always read documentation from `node_modules/@aws-blocks/blocks/README.md` to understand the Building Block system and available APIs.**
