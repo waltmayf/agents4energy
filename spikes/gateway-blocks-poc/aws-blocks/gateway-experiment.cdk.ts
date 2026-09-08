@@ -34,7 +34,12 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 setSessionProjectRoot(__dirname);
 
 export function addGatewayExperimentStack(app: cdk.App) {
-  const stack = new cdk.Stack(app, 'gateway-blocks-poc-experiment');
+  const stack = new cdk.Stack(app, 'gateway-blocks-poc-experiment', {
+    env: {
+      account: process.env.CDK_DEFAULT_ACCOUNT,
+      region: process.env.CDK_DEFAULT_REGION ?? 'us-east-1',
+    },
+  });
 
   // ── Self-contained Cognito pool for the CUSTOM_JWT authorizer ──────────
   // A standalone gateway platform (per #532's vision) owns its own auth

@@ -36,9 +36,15 @@ export const handler = async (event: LambdaUrlEvent): Promise<LambdaUrlResult> =
     case 'initialize':
       return respond(req.id, {
         protocolVersion: '2025-06-18',
-        capabilities: { resources: {} },
+        // AgentCore's mcpServer-target health check requires a `tools`
+        // capability (even an empty one) to consider the target valid —
+        // "MCP Server is missing tools capability" without this.
+        capabilities: { resources: {}, tools: {} },
         serverInfo: { name: 'spike-533-mock-mcp-server', version: '0.0.1' },
       });
+
+    case 'tools/list':
+      return respond(req.id, { tools: [] });
 
     case 'resources/list':
       return respond(req.id, {
