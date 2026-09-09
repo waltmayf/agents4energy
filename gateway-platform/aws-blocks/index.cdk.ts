@@ -6,6 +6,7 @@ import { dirname, join } from 'node:path';
 import { getStackName } from '@aws-blocks/blocks/scripts';
 import { addAgentCoreGateway } from './agentcore-gateway.cdk';
 import { addS3ToolsGatewayTarget } from './s3-tools/gateway-target.cdk';
+import { addCfdToolsGatewayTarget } from './cfd-tools/gateway-target.cdk';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -29,6 +30,11 @@ const { gateway } = addAgentCoreGateway(blocksStack, stackName);
 // AMPLIFY_AGENT_STACK_NAME isn't set or Amplify hasn't published the Lambda
 // ARN yet, so this deploy stays standalone-safe either way.
 await addS3ToolsGatewayTarget(blocksStack, gateway);
+
+// cfd-tools gateway target (#549, 2/4 of #536) — same standalone-safe no-op
+// as s3-tools above; additionally no-ops when HPC isn't enabled on the
+// Amplify side (see gateway-target.cdk.ts's HPC-gating doc).
+await addCfdToolsGatewayTarget(blocksStack, gateway);
 
 if (sandboxMode) {
   // Tell the runtime that cookies need cross-domain attributes (frontend on
