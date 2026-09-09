@@ -42,8 +42,6 @@ import { SyncCedarPolicies } from './constructs/syncCedarPolicies';
 import { RegisterMcpTargetOnMcpServer } from './constructs/registerMcpTargetOnMcpServer';
 import { SyncOauthCredentialProvider } from './constructs/syncOauthCredentialProvider';
 import { ReconcileGatewayAuthorizer } from './constructs/reconcileGatewayAuthorizer/resource';
-import { S3ToolsGatewayTarget } from './constructs/s3ToolsGatewayTarget/resource';
-import { S3ToolsMcpServerSeed } from './constructs/s3ToolsMcpServerSeed/resource';
 import { GraphTraverseGatewayTarget } from './constructs/graphTraverseGatewayTarget/resource';
 import { GraphTraverseMcpServerSeed } from './constructs/graphTraverseMcpServerSeed/resource';
 import { GraphIngestLineage } from './constructs/graphIngestLineage';
@@ -872,51 +870,31 @@ if (AGENTCORE_GATEWAY_ARN) {
   });
 }
 
-// Registers the Lambda as a gateway target exposing the 4 filesystem tools,
-// and seeds a demo Agent + McpServer + AgentMcpServer join so the tools are
-// reachable end-to-end from the chat UI (see both constructs' resource.ts).
-// Own stack (not agentStack, not the function stack): these constructs
-// reference tokens from BOTH the function stack (s3ToolsLambda.functionArn)
-// and the data stack (the GraphQL URL) — nesting them inside agentStack would
-// make agentStack depend on those stacks, which already depend on agentStack
-// (function-stack Lambdas read AGENTCORE_* envs; see the AgentWebhookStack
-// comment above for the identical cycle this avoids).
-if (AGENTCORE_GATEWAY_ID) {
-  const s3ToolsTargetName = toGatewayResourceName(
-    's3-tools',
-    backendNamespace ?? '',
-    backendName ?? '',
-  ).slice(0, 100);
-
-  const s3ToolsCdkStack = backend.createStack('s3-tools');
-
-  // The resource-based permission (AllowGatewayInvoke) above is only half of
-  // what CreateGatewayTarget validates synchronously: the gateway's *execution
-  // role* also needs an identity-based lambda:InvokeFunction grant on this
-  // Lambda. Since #535, the gateway (and its execution role) live in the
-  // standalone gateway-platform app — this stack has no CDK handle on that
-  // role to attach a scoped per-Lambda grant to (an imported cross-app role
-  // is immutable from CDK's perspective). gateway-platform's own gateway
-  // role carries a broad account+region-scoped lambda:InvokeFunction grant
-  // instead (see gateway-platform/aws-blocks/agentcore-gateway.cdk.ts), which
-  // covers this Lambda without any grant needed here.
-  const s3ToolsGatewayTarget = new S3ToolsGatewayTarget(s3ToolsCdkStack, 'S3ToolsGatewayTarget', {
-    gatewayIdentifier: AGENTCORE_GATEWAY_ID,
-    gatewayArn: AGENTCORE_GATEWAY_ARN,
-    targetName: s3ToolsTargetName,
-    lambdaArn: s3ToolsLambda.functionArn,
-  });
-
-  if (AGENTCORE_GATEWAY_ENDPOINT) {
-    new S3ToolsMcpServerSeed(s3ToolsCdkStack, 'S3ToolsMcpServerSeed', {
-      graphqlUrl: backend.data.resources.cfnResources.cfnGraphqlApi.attrGraphQlUrl,
-      graphqlRegion: AGENTCORE_REGION,
-      graphqlApiId: backend.data.resources.cfnResources.cfnGraphqlApi.attrApiId,
-      gatewayEndpoint: AGENTCORE_GATEWAY_ENDPOINT,
-      gatewayTargetId: s3ToolsGatewayTarget.targetId,
-    });
-  }
-}
+// The gateway target registration (+ demo McpServer seed) that used to live
+// here moved to gateway-platform/aws-blocks/s3-tools/gateway-target.cdk.ts
+// (#548, 1/4 of #536): the gateway lives in that app now (#535), so the
+// target is declared as a same-app CDK construct there (GatewayTarget.forLambda,
+// not an out-of-band SDK CreateGatewayTargetCommand call from here). This
+// side's only remaining job is publishing this Lambda's ARN for that app to
+// read back — the mirror image of the AGENTCORE_GATEWAY_ID/ARN/ENDPOINT SSM
+// reads above. Own stack (not agentStack, not the function stack): this
+// references the function-stack token (s3ToolsLambda.functionArn), and
+// nesting it inside agentStack would create the same stack-dependency cycle
+// the s3-tools stack has always avoided (see the AgentWebhookStack comment
+// above). Published unconditionally (no AGENTCORE_GATEWAY_ID gate) since
+// gateway-platform reads this independently of whether a gateway exists yet.
+//
+// No stopgap McpServer row: the old S3ToolsMcpServerSeed's demo Agent/
+// McpServer/AgentMcpServer rows are intentionally not recreated here — the
+// pack-platform slice (#537) owns wiring McpServer rows to gateway targets
+// going forward, and seeding a demo row from two different places would just
+// create an ownership conflict for that slice to untangle.
+const s3ToolsCdkStack = backend.createStack('s3-tools');
+new StringParameter(s3ToolsCdkStack, 'SsmS3ToolsLambdaArn', {
+  parameterName: `/agentcore/${Stack.of(agentStack).stackName}/s3_tools_lambda_arn`,
+  stringValue: s3ToolsLambda.functionArn,
+  simpleName: false,
+});
 
 // ============================================================================
 // KNOWLEDGE-GRAPH TRAVERSAL — the graph-traverse Lambda (#290) exposed as a
