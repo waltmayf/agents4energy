@@ -55,13 +55,26 @@ Once a gateway is deployed here, its id/endpoint/ARN are meant to be read by oth
   aws ssm get-parameter --name /gateway-platform/<stackName>/gateway --query Parameter.Value --output text
   ```
 
-Why raw `ssm.StringParameter` instead of the Blocks `AppSetting` building block: the gateway's
-attributes are CDK tokens on a **separate, bare `cdk.Stack`** with no Blocks `Scope` in its
-construct tree (see `ssm-gateway-outputs.cdk.ts`), so there's nothing to hang an `AppSetting` off
-on the write side. If a Blocks-hosted consumer inside `aws-blocks/index.ts` ever needs to read
-these values from within its own `Scope`, `AppSetting.fromExisting(scope, id, { name })` is the
-right tool for that read side — see spike #533's `FINDINGS.md` (criterion 3) for the full
-reasoning.
+Why raw `ssm.StringParameter` instead of the Blocks `AppSetting` building block: `AppSetting`'s
+runtime `.get()`/`.put()` API is designed to hang off a Blocks `Scope` inside `aws-blocks/index.ts`
+(the shared backend-definition file, loaded under both local-mock and real-AWS conditions), and
+the write side here has no such use case — it's a plain CDK construct-time value published once
+per deploy, read back by an external process via the AWS SDK/CLI, never through the Blocks RPC
+layer. If a Blocks-hosted consumer inside `aws-blocks/index.ts` ever needs to read these values
+from within its own `Scope`, `AppSetting.fromExisting(scope, id, { name })` is the right tool for
+that read side — see spike #533's `FINDINGS.md` (criterion 3) for the full reasoning.
+
+**Single-stack constraint (found deploying this slice's own sandbox, not just synth):** the
+`ssm.StringParameter` is attached directly to the existing `blocksStack` (`addGatewayOutputs`
+takes it as its scope) rather than living on a second top-level `cdk.Stack`. The Blocks CLI's
+`sandbox:destroy` / `destroy` scripts invoke `cdk destroy` **without** `--all` (unlike their
+`sandbox`/`deploy` counterparts, which do pass `--all`), so an app with more than one top-level
+stack fails `npm run sandbox:destroy` / `npm run destroy` with `"Since this app includes more
+than a single stack, specify which stacks to use"` — confirmed by deploying this slice's sandbox
+to a real account and then hitting exactly that error on teardown. **#535 should keep the real
+gateway construct on `blocksStack` too** (not a separate stack like spike #533 used — that spike
+never exercised `npm run sandbox:destroy` against its experiment stack) unless this gets fixed
+upstream in the Blocks CLI first.
 
 ## Environment gotchas (carried over from spike #533)
 
