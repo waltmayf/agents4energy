@@ -1,7 +1,7 @@
 {
   "id": "hpc-fracing-operations",
   "name": "HPC Fracing Operations",
-  "description": "Submits hydraulic fracturing treatment plans to the HPC/CFD simulation pipeline (issue #504) and returns tiered screen-out-risk recommendations with mandatory financial justification. Blocked on a live end-to-end run until the `enableHpc` CDK context flag is on and the CFD McpServer is seeded (see PR notes).",
+  "description": "Submits hydraulic fracturing treatment plans to the HPC/CFD simulation pipeline (issue #504) and returns tiered screen-out-risk recommendations with mandatory financial justification. Blocked on a live end-to-end run until the `enableHpc` CDK context flag is deployed and its cfd-tools gateway target is live in gateway-platform (see docs/hpc-fracing-agent.md and issue #555).",
   "agent": {
     "name": "HPC Fracing Operations",
     "slug": "hpc-fracing-operations",
@@ -13,7 +13,7 @@
     {
       "name": "CFD Simulation Tools",
       "url": "https://default-default-gateway-web-main-r7mcr35dot.gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp",
-      "description": "AgentCore Gateway target exposing SubmitCfdSimulation/GetCfdJobStatus/GetCfdResults (issue #504). Only seeded when the backend is deployed with the `enableHpc` CDK context flag on — see web/amplify/backend.ts:1262. Placeholder URL matches this sandbox's gateway; refresh from web/amplify_outputs.json (`custom.agentcore_gateway_endpoint`) after (re)deploy.",
+      "description": "AgentCore Gateway target exposing SubmitCfdSimulation/GetCfdJobStatus/GetCfdResults (issue #504), registered in gateway-platform/aws-blocks/cfd-tools (issue #549). Only live when Amplify is deployed with the `enableHpc` CDK context flag on. Placeholder URL matches this sandbox's gateway; refresh from web/amplify_outputs.json (`custom.agentcore_gateway_endpoint`) after (re)deploy.",
       "serverType": "agentcore",
       "enabled": true
     },

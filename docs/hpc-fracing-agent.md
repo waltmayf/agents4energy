@@ -78,8 +78,7 @@ All three tools return `{success: false, error}` rather than throwing, matching 
 The PCS login node and FSx-Lustre filesystem run **24/7 once deployed** — there is no
 scale-to-zero for the login node (SSM/`sbatch` submission needs it running), and FSx-Lustre
 bills for provisioned capacity regardless of use. To avoid a normal `pnpm deploy` silently
-paying for that, the entire HPC cluster stack is opt-in, gated in
-[`web/amplify/backend.ts:1262`](../web/amplify/backend.ts):
+paying for that, the entire HPC cluster stack is opt-in, gated in `web/amplify/backend.ts`:
 
 ```ts
 const enableHpcContext = backend.stack.node.tryGetContext('enableHpc');
@@ -87,7 +86,8 @@ const enableHpc = enableHpcContext === true || enableHpcContext === 'true';
 
 if (enableHpc) {
   // hpc-cluster stack: dedicated VPC, RealTimeParallelCluster (PCS + FSx)
-  // cfd-tools stack (nested, also requires AGENTCORE_GATEWAY_ID): CfdToolsFn + gateway target + McpServer seed
+  // cfd-tools stack: CfdToolsFn Lambda + publishes its ARN to
+  // /agentcore/<stackName>/cfd_tools_lambda_arn for gateway-platform to read back
 }
 ```
 
@@ -96,14 +96,23 @@ if (enableHpc) {
   nothing for HPC.
 - **Turn it on** with a CDK context flag: `npx ampx sandbox --once -- --context enableHpc=true`
   (or the equivalent flag on whatever `cdk`/`ampx` invocation your deploy script wraps).
-- Both the `hpc-cluster` stack and the nested `cfd-tools` stack are their own
-  `backend.createStack(...)` sinks (not `agentStack`) — `cfd-tools` additionally requires
-  `AGENTCORE_GATEWAY_ID` to be set (same reasoning as the `s3-tools`/`graph-traverse` gateway
-  targets: no gateway, no target to register).
-- The `CFD Simulation Tools` `McpServer` row this pack references is **only seeded** when the
-  backend is deployed with `enableHpc=true` — deploying this pack against a sandbox that
-  doesn't have the flag on will create the `Agent`/join rows, but the CFD tools won't be
-  reachable until a follow-up deploy turns the flag on.
+- Both the `hpc-cluster` stack and the `cfd-tools` stack are their own `backend.createStack(...)`
+  sinks (not `agentStack`).
+- **The gateway target registration lives in `gateway-platform/` now** (#549, 2/4 of #536,
+  mirroring how #548/#552 moved `s3-tools`): `gateway-platform/aws-blocks/cfd-tools/gateway-target.cdk.ts`
+  reads the cfd-tools Lambda's ARN back from
+  `/agentcore/<AMPLIFY_AGENT_STACK_NAME>/cfd_tools_lambda_arn` and no-ops the target if that
+  parameter is missing. Since Amplify only ever publishes that parameter when deployed with
+  `enableHpc=true`, this "skip if the SSM param is absent" behavior *is* the HPC gate on the
+  gateway-platform side too — no separate flag needed there. There is no `McpServer` seed
+  construct anymore (dropped in #549, matching #548/#536/#537) — wiring an `McpServer` row to
+  this gateway target is a pack-platform (#537) concern now, not this app's.
+- **Not yet live-verified**: turning `enableHpc=true` on and deploying for real currently fails
+  in the `@agentcore-claude` AgentCore harness container specifically — see
+  [#555](https://github.com/waltmayf/agents4energy/issues/555) (a `NodeJSFunctionConstructInitializationError`
+  requiring Docker for an unrelated data-schema Lambda, reproducible on `main` with no code
+  changes, blocked by that container having no usable Docker daemon). Confirm #555 is resolved
+  (or deploy from an environment with a working Docker daemon) before relying on this pack.
 
 See [`docs/hpc-analytics-agents-epic.md`](hpc-analytics-agents-epic.md#slice-5--pcsslurmfsx-cluster-construct-no-deps-costly--opt-in-gated)
 (Slices 5-6) and [`docs/autonomous-epic-delivery.md`](autonomous-epic-delivery.md) for how this
