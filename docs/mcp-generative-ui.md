@@ -23,7 +23,7 @@ type UiBlockValue = { mimeType: string; spec?: unknown; html?: string };
 
 Everything else (a bare `text` string, or a `json` value with no `mimeType`) renders exactly as it always has — a YAML dump. This means a tool doesn't opt in to anything special to keep working as before; adding a widget is purely additive.
 
-Concretely, for the Lambda-backed gateway-target pattern this repo uses (see `web/amplify/functions/s3-tools/handler.ts` for a real example), the Gateway passes your handler's return value straight through as that `json` field. So to render a widget, a handler's return value needs to look like:
+Concretely, for the Lambda-backed gateway-target pattern this repo uses (see `gateway-platform/aws-blocks/gateway-targets/s3-tools/handler.ts` for a real example), the Gateway passes your handler's return value straight through as that `json` field. So to render a widget, a handler's return value needs to look like:
 
 ```ts
 return {
@@ -88,7 +88,7 @@ Practical guidance for tool authors:
 
 ## Worked example: `ListFiles` in the S3 filesystem explorer pack
 
-`web/amplify/functions/s3-tools/handler.ts`'s `ListFiles` tool (used by the `s3-filesystem-explorer` pack, [`docs/use-case-packs.md`](use-case-packs.md)) returns a `table` component-spec built from the same directory listing it always computed:
+`gateway-platform/aws-blocks/gateway-targets/s3-tools/handler.ts`'s `ListFiles` tool (used by the `s3-filesystem-explorer` pack, [`docs/use-case-packs.md`](use-case-packs.md)) returns a `table` component-spec built from the same directory listing it always computed:
 
 ```ts
 const tableSpec: TableSpec = {

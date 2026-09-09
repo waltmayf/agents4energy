@@ -42,7 +42,7 @@ requested data isn't available in the lake.
 scopes the Athena session (tagged `[ChatSessionID:<subdir>]` in its `Description` so a
 matching live session is reused across calls) and the S3 prefix artifacts land under.
 
-See `web/amplify/functions/athena-pyspark/handler.ts` for the implementation, and
+See `gateway-platform/aws-blocks/gateway-targets/athena-pyspark/handler.ts` for the implementation (moved from `web/amplify/functions/athena-pyspark/handler.ts` in #536), and
 [`docs/hpc-analytics-agents-epic.md`](hpc-analytics-agents-epic.md) (Slice 3) for the original
 design writeup — including the "long-running tools" pattern this trio follows (Lambda timeouts
 are far shorter than an Athena Spark job, so no single call blocks for the whole run).
@@ -52,7 +52,9 @@ are far shorter than an Athena Spark job, so no single call blocks for the whole
 The composability requirement driving this design: MCP tools cannot call each other directly
 (an AgentCore Gateway target Lambda has no in-process MCP client), so the PySpark tool cannot
 "call" the S3 upload tool. Instead both share a code library —
-[`web/lib/s3-fs-upload.ts`](../web/lib/s3-fs-upload.ts) — and the PySpark path uses
+`gateway-platform/aws-blocks/gateway-targets/s3-tools/s3-fs-upload.ts` (both tools' Lambdas
+moved into `gateway-platform/` in #536; athena-pyspark's handler imports this file from the
+sibling `s3-tools/` folder) — and the PySpark path uses
 **in-session auto-upload** instead of an extra tool call:
 
 - **In the Lambda (TypeScript):** `athena-pyspark/handler.ts` calls

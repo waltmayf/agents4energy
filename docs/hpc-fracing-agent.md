@@ -48,7 +48,7 @@ path is #1").
 | **FSx for Lustre** | 1200 GB `PERSISTENT_1`, `LZ4` compression, mounted `/fsx` on login + compute; S3 import/export path `s3://<hpcBucket>/cfd-simulations` with `autoImportPolicy: NEW_CHANGED` |
 | **HPC bucket** | Dedicated S3 bucket; jobs write to `cfd-simulations/<jobId>/results/`, FSx auto-exports there |
 
-The `CfdToolsFn` Lambda (`web/amplify/functions/cfd-tools/handler.ts`):
+The `CfdToolsFn` Lambda (`gateway-platform/aws-blocks/gateway-targets/cfd-tools/handler.ts` — moved from `web/amplify/functions/cfd-tools/handler.ts` in #536):
 
 1. **`SubmitCfdSimulation`** — validates the treatment plan (see below), generates a Slurm
    batch script (`cfd-slurm-script.ts` — steady `simpleFoam` if the plan has no `stages`,
@@ -111,7 +111,7 @@ interacts with the `PROJECT_PHASE` gate on destructive/costly actions.
 
 ## Treatment-plan inputs
 
-`SubmitCfdSimulation` validates the plan against `web/amplify/functions/cfd-tools/cfd-types.ts`
+`SubmitCfdSimulation` validates the plan against `gateway-platform/aws-blocks/gateway-targets/cfd-tools/cfd-types.ts`
 before submitting anything:
 
 | Field | Range | Notes |

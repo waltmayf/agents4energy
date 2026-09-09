@@ -10,6 +10,18 @@ slice should read (1) this doc, (2) the vendored reference files its slice maps
 to, and (3) the agents4energy pattern files named below — that's everything the
 slice needs; nothing depends on chat history.
 
+> **Path note (#536):** this doc's `web/amplify/constructs/*GatewayTarget/`,
+> `web/amplify/constructs/*McpServerSeed/`, and `web/amplify/functions/{graph-traverse,
+> athena-pyspark,cfd-tools}/` paths describe where these slices originally landed. As of
+> #536, each tool's Lambda + gateway-target registration moved into
+> `gateway-platform/aws-blocks/gateway-targets/` (registered against the gateway's own CDK
+> token instead of an SSM-sourced id), and every `*McpServerSeed` construct was dropped
+> entirely (superseded by the pack-platform slice, #537). The workgroup/cluster/data-lake
+> infra itself (Slices 2 and 5) stays in Amplify. See
+> [`docs/agentic-architecture.md`](./agentic-architecture.md#lambda-backed-gateway-targets-536-moved-into-gateway-platform)
+> for the current wiring; the paths below are historical design context, not current file
+> locations.
+
 ## Goal
 
 1. **HPC operations agent** — submits HPC fracing-optimization jobs in real time

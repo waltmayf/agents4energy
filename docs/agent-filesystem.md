@@ -43,7 +43,7 @@ This format is content-keyed rather than line-number-keyed — models are unreli
 - An **empty SEARCH block** against a non-existent `path` creates the file with the REPLACE body as its full content.
 - Errors are actionable: `"no match found for SEARCH block N"` or `"SEARCH block N matched M locations — add more surrounding context"`.
 
-See `web/lib/s3-fs-diff.ts` (and its tests) for the parser/applier implementation.
+See `gateway-platform/aws-blocks/gateway-targets/s3-tools/s3-fs-diff.ts` for the parser/applier implementation (moved from `web/lib/s3-fs-diff.ts` in #536 — see "Wiring" below).
 
 ### `ListFiles` — list a "directory"
 
@@ -77,20 +77,24 @@ with `content`).
   fallback.
 
 `UploadFile` shares its implementation
-([`web/lib/s3-fs-upload.ts`](../web/lib/s3-fs-upload.ts)) with the Athena PySpark tool's
+(`gateway-platform/aws-blocks/gateway-targets/s3-tools/s3-fs-upload.ts`) with the Athena PySpark tool's
 in-session auto-upload — see [`docs/analytics-agent.md`](analytics-agent.md#artifact-rendering-under-filesartifacts)
 for how that composability works without an MCP-to-MCP call. Both call sites resolve paths
 through the same `resolveS3Path`/`resolveArtifactsPrefix` normalization and `../`-traversal
-guard as every other tool in this file.
+guard as every other tool in this file. (Since #536 moved the athena-pyspark Lambda into
+`gateway-platform/` too, its handler imports this file from the sibling `s3-tools/` folder
+rather than a separate copy — see "Wiring" below.)
 
 ## Wiring
 
-- **Storage**: `web/amplify/storage/resource.ts` — the `agentWorkspace` Amplify Storage bucket.
-- **Lambda**: `web/amplify/functions/s3-tools/handler.ts` — dispatches on `context.clientContext.custom.bedrockAgentCoreToolName` (form `<gatewayTargetName>___<ToolName>`), since one Lambda backs all five tools.
-- **Gateway target**: `web/amplify/constructs/s3ToolsGatewayTarget/` — a CDK custom resource that calls `CreateGatewayTarget` with a Lambda target configuration and an inline tool schema.
-- **Demo Agent/McpServer**: `web/amplify/constructs/s3ToolsMcpServerSeed/` — a CDK custom resource that idempotently seeds a demo `Agent` + `McpServer` + `AgentMcpServer` join so the tools are reachable from the chat UI without manual setup.
+As of #536, the Lambda + gateway-target registration for this tool live in `gateway-platform/`, not `web/amplify/`:
 
-See [`docs/agentic-architecture.md`](./agentic-architecture.md#lambda-backed-gateway-target-s3-filesystem-tools) for how this fits into the rest of the MCP tool wiring.
+- **Storage**: `web/amplify/storage/resource.ts` — the `agentWorkspace` Amplify Storage bucket, still owned by Amplify. Its name is published to SSM (`/agentcore/<amplifyStackName>/storage_bucket_name`) for `gateway-platform` to read.
+- **Lambda**: `gateway-platform/aws-blocks/gateway-targets/s3-tools/handler.ts` (a standalone copy of the former `web/amplify/functions/s3-tools/handler.ts`) — dispatches on `context.clientContext.custom.bedrockAgentCoreToolName` (form `<gatewayTargetName>___<ToolName>`), since one Lambda backs all five tools.
+- **Target registration**: `gateway-platform/aws-blocks/gateway-targets/s3Tools.cdk.ts`, using the generic `LambdaGatewayTarget` construct (`gateway-targets/lambdaGatewayTarget.cdk.ts`) that calls `CreateGatewayTarget` with a Lambda target configuration and an inline tool schema (`gateway-targets/s3ToolsSchema.ts`).
+- There is currently no seeded demo `Agent`/`McpServer` for this tool — the `S3ToolsMcpServerSeed` custom resource that used to create one was dropped in #536 (superseded by the pack-platform slice, #537).
+
+See [`docs/agentic-architecture.md`](./agentic-architecture.md#lambda-backed-gateway-targets-536-moved-into-gateway-platform) for how this fits into the rest of the MCP tool wiring.
 
 ## Browser upload page (`/files`)
 

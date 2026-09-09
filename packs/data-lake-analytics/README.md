@@ -22,8 +22,11 @@ deployed backend:
   missing value here will clobber a working row on the next `deploy-pack.sh`
   run.
 
-The `Athena PySpark Tools` McpServer this pack references is seeded by the
-`AthenaPySparkMcpServerSeed` construct (#501,
-`web/amplify/constructs/athenaPySparkMcpServerSeed/`) — that construct owns
-the authoritative `url`/`gatewayTargetId` for that row and will correct them
-on its next deploy even if this pack creates the row first without them.
+The `Athena PySpark Tools` McpServer this pack references used to be seeded by the
+`AthenaPySparkMcpServerSeed` construct (#501), which owned the authoritative
+`url`/`gatewayTargetId` for that row and corrected them on its next deploy even if this pack
+created the row first without them. **As of #536, that seed construct is gone** (the
+athena-pyspark Lambda + gateway target moved into `gateway-platform/`, and
+`AthenaPySparkMcpServerSeed` was dropped, superseded by the pack-platform slice #537) — there
+is no automatic re-correction anymore, so double-check `url`/`gatewayTargetId` by hand before
+running `deploy-pack.sh` against a sandbox other than the one this manifest was committed from.

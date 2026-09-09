@@ -96,11 +96,11 @@ It reads the AppSync endpoint from `web/amplify_outputs.json`, so `pnpm deploy` 
 
 ## Limitation: runtime path only
 
-A pack can only wire up MCP servers that are reachable **at runtime** with no new deploy — a plain URL (public remote MCP) or an AgentCore Gateway endpoint that's already provisioned. It **cannot** stand up a brand-new Lambda-backed tool: that requires a CDK construct pair deployed through `web/amplify/backend.ts` (a gateway-target Lambda like `web/amplify/constructs/s3ToolsGatewayTarget/` registered against the gateway, paired with a seed/registration step like `web/amplify/constructs/s3ToolsMcpServerSeed/`), which only takes effect on the next `pnpm deploy`. Packs consume tools that already exist; they don't create them.
+A pack can only wire up MCP servers that are reachable **at runtime** with no new deploy — a plain URL (public remote MCP) or an AgentCore Gateway endpoint that's already provisioned. It **cannot** stand up a brand-new Lambda-backed tool: that requires a CDK construct deployed through `gateway-platform/` (a gateway-target Lambda like `gateway-platform/aws-blocks/gateway-targets/s3Tools.cdk.ts` registered against the gateway — moved out of `web/amplify/backend.ts` in #536), which only takes effect on the next `gateway-platform` deploy. Packs consume tools that already exist; they don't create them.
 
 ## Worked example: `packs/s3-filesystem-explorer`
 
-This pack wires an agent to the S3 filesystem tools already provisioned by `web/amplify/constructs/s3ToolsGatewayTarget/` (`ApplyDiff` / `ListFiles` / `ReadFile` / `DeleteFile`, issue #240) and exposed as the `McpServer` named "S3 Filesystem Tools" — the same gateway target the CDK-seeded `S3 Filesystem Demo` agent (slug `s3-filesystem-demo`) already uses. Deploying this pack creates a second, independent agent (`s3-filesystem-explorer`) that links to that same tool by matching the existing `McpServer` row by name, and reuses the `reservoir-eng` group's existing `ALLOW *` grant on that server rather than creating a new one — a concrete demonstration of the idempotent find-or-create/update path end to end, not just a schema example.
+This pack wires an agent to the S3 filesystem tools already provisioned by `gateway-platform/aws-blocks/gateway-targets/s3Tools.cdk.ts` (`ApplyDiff` / `ListFiles` / `ReadFile` / `DeleteFile`, issue #240) and exposed as the `McpServer` named "S3 Filesystem Tools". Deploying this pack creates an agent (`s3-filesystem-explorer`) that links to that tool by matching an existing `McpServer` row by name, and reuses the `reservoir-eng` group's existing `ALLOW *` grant on that server rather than creating a new one — a concrete demonstration of the idempotent find-or-create/update path end to end, not just a schema example. (As of #536 there is no CDK-seeded demo agent/McpServer row for this tool anymore — see the caveat below.)
 
 `ListFiles` also doubles as the generative-UI worked example: it returns a JSON component-spec block alongside its plain data, so the chat renderer shows a table widget instead of a YAML dump. See [`docs/mcp-generative-ui.md`](mcp-generative-ui.md) for the structured-content contract a tool uses to do this, the supported widget types, and how to add a new one.
 
@@ -128,7 +128,10 @@ are **sandbox-specific** — see step 3 under "Authoring a pack" above and each 
 pack was committed from. A stale or omitted `gatewayTargetId` isn't harmless — `deploy-pack.ts`
 overwrites an existing `McpServer` row's `gatewayTargetId` with whatever the manifest
 specifies (including clearing it to `null` if the field is omitted), which can null out a
-working row. In practice the seed constructs that own these `McpServer` rows
-(`athenaPySparkMcpServerSeed`, `cfdToolsMcpServerSeed`, `s3ToolsMcpServerSeed`) re-correct
-`url`/`gatewayTargetId` on their own next deploy even if a pack's `deploy-pack.sh` run created
-or clobbered the row first — but there's a window where the tool is unreachable in between.
+working row. **This used to self-heal**: the CDK-owned seed constructs that created these
+`McpServer` rows (`athenaPySparkMcpServerSeed`, `cfdToolsMcpServerSeed`, `s3ToolsMcpServerSeed`)
+re-corrected `url`/`gatewayTargetId` on their own next Amplify deploy even if a pack's
+`deploy-pack.sh` run had clobbered the row first. **As of #536, those seed constructs are
+gone** (superseded by the pack-platform slice, #537) — there is no automatic re-correction
+anymore, so a stale/omitted `gatewayTargetId` in a committed pack manifest stays wrong until a
+human fixes the `McpServer` row (or the pack manifest) by hand.

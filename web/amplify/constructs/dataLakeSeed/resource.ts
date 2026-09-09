@@ -25,13 +25,13 @@ export interface DataLakeSeedProps {
  * analytics agent's PySpark tool (Slice 3) can query via Spark SQL out of the
  * box, with no manual setup.
  *
- * A CDK custom resource is used (same Provider/NodejsFunction split as
- * `web/amplify/constructs/s3ToolsMcpServerSeed/`) because creating a Glue
- * database + uploading fixed sample data is a one-time/idempotent deploy-time
- * action, not something CloudFormation has a native resource for. Unlike that
- * construct's AppSync calls, S3/Glue calls here use the AWS SDK clients
- * directly under the handler's own execution-role credentials — no manual
- * SigV4 signing needed.
+ * A CDK custom resource is used (same Provider/NodejsFunction split as the
+ * gateway-target custom resources in gateway-platform/aws-blocks/
+ * gateway-targets/) because creating a Glue database + uploading fixed
+ * sample data is a one-time/idempotent deploy-time action, not something
+ * CloudFormation has a native resource for. S3/Glue calls here use the AWS
+ * SDK clients directly under the handler's own execution-role credentials —
+ * no manual SigV4 signing needed.
  */
 export class DataLakeSeed extends Construct {
   constructor(scope: Construct, id: string, props: DataLakeSeedProps) {
