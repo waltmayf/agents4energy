@@ -11,6 +11,7 @@ import {
 import { BedrockAgentCoreClient, InvokeAgentRuntimeCommand } from '@aws-sdk/client-bedrock-agentcore';
 import { verifyGithubSignature, verifyJiraSharedSecret, extractPromptAfterMention, parseMention } from '../_shared/webhookVerify';
 import { execName, sharedNamePrefix } from '../../../lib/exec-name';
+import { hasRunningExecution } from './hasRunningExecution';
 
 const REGION = process.env.AWS_REGION ?? 'us-east-1';
 // GitHub HMAC secret value, injected directly by Amplify's secret() (issue
@@ -333,12 +334,14 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
 
     // Loop prevention — drop every bot-authored mention EXCEPT our own App's
     // (the orchestrator dispatches workers by posting `@agentcore-claude` as
-    // that same App — see #381/#395). This can't create an infinite loop:
-    // workers dispatched this way never themselves post an `@agentcore-claude`
-    // mention (they push a PR / comment plainly), so there is no cycle for
-    // this allowlist to close. Any duplicate dispatch (e.g. a retried
+    // that same App — see #381/#395). Any duplicate dispatch (e.g. a retried
     // delivery) is bounded by cancelPriorRuns' last-write-wins StopExecution
-    // below, not by this check.
+    // below, not by this check. Note this DOES create a cycle when the
+    // orchestrator posts a status/progress comment on the SAME issue it's
+    // running on and that comment happens to quote an `@agentcore-claude`
+    // mention (e.g. reporting what it just dispatched) — see the
+    // self-supersession guard below (issue #494) for why that cycle is
+    // harmless rather than the orchestrator cancelling itself.
     const senderLogin = payload.sender?.login ?? '';
     const senderType = payload.sender?.type ?? '';
     const isBotSender = senderType === 'Bot' || senderLogin.endsWith('[bot]');
@@ -363,6 +366,25 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
 
     const runId = randomUUID();
     const namePrefixBase = `github-${payload.repository.full_name.replace(/\//g, '-')}-${payload.issue.number}`;
+
+    // Self-supersession guard (issue #494): our own App's mention is let
+    // through the bot-skip above so the orchestrator can dispatch workers by
+    // posting `@agentcore-claude` on a *child* issue — but the orchestrator
+    // also legitimately posts status/progress comments on the SAME roadmap
+    // issue it's running on, and those can quote an `@agentcore-claude`
+    // mention while reporting what it dispatched. If an own-App mention
+    // lands on an issue that already has a RUNNING execution, that running
+    // execution IS this same orchestrator (a human sender would have
+    // isOwnApp = false, and a genuine worker dispatch targets a different,
+    // not-yet-running child issue) — never let it cancel itself. This
+    // intentionally also means the orchestrator can't use a mention to
+    // supersede a still-RUNNING child worker; re-dispatching a *stalled*
+    // (no longer running) worker is unaffected.
+    if (isOwnApp && await hasRunningExecution(sfn, STATE_MACHINE_ARN, sharedNamePrefix(namePrefixBase))) {
+      console.log(`[receiver] skipped own-App mention on issue #${payload.issue.number}: a RUNNING execution already matches this prefix (self-supersession guard, #494)`);
+      return json(200, { skipped: 'own-App mention on an issue with an already-running execution (self-supersession guard)' });
+    }
+
     // Last-write-wins (issue #182): a newer @agentcore(-claude) comment on the
     // same issue/PR supersedes any run already in flight for it.
     await cancelPriorRuns(sharedNamePrefix(namePrefixBase), (msg) => console.log(`[cancelPriorRuns][runId=${runId}]`, msg));
