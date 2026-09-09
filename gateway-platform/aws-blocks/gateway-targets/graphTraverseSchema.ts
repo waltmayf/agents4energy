@@ -1,25 +1,10 @@
-import type { CdkCustomResourceEvent, CdkCustomResourceResponse } from 'aws-lambda';
-import {
-  BedrockAgentCoreControlClient,
-  CreateGatewayTargetCommand,
-  UpdateGatewayTargetCommand,
-  DeleteGatewayTargetCommand,
-  ListGatewayTargetsCommand,
-  SchemaType,
-  CredentialProviderType,
-  type ToolDefinition,
-  type TargetConfiguration,
-  type CredentialProviderConfiguration,
-} from '@aws-sdk/client-bedrock-agentcore-control';
+import { SchemaType, type ToolDefinition } from '@aws-sdk/client-bedrock-agentcore-control';
 
-const client = new BedrockAgentCoreControlClient({});
-
-interface ResourceProperties {
-  GatewayIdentifier: string;
-  TargetName: string;
-  LambdaArn: string;
-}
-
+// MCP tool schema for the graph-traverse gateway target (issue #291) — moved
+// verbatim from web/amplify/constructs/graphTraverseGatewayTarget/handler.ts
+// as part of #536. The Lambda implementing these tools is a local copy at
+// ./graph-traverse/handler.ts (see its header comment for why).
+//
 // Shared by UpsertNode/UpsertEdge below — free-form metadata on a Node/Edge,
 // capped at MAX_PROPS_BYTES in the handler (issue #292).
 const PROPS_PROPERTY = {
@@ -30,8 +15,8 @@ const PROPS_PROPERTY = {
 };
 
 // Keep in sync with the graph-traverse handler's TraverseEvent + the
-// MAX_DEPTH/DEFAULT_* clamps in web/lib/graph-traverse-bfs.ts.
-const toolDefinitions = (): ToolDefinition[] => [
+// MAX_DEPTH/DEFAULT_* clamps in ./graph-traverse/graph-traverse-bfs.ts.
+export const graphTraverseToolDefinitions: ToolDefinition[] = [
   {
     name: 'TraverseGraph',
     description:
@@ -124,80 +109,3 @@ const toolDefinitions = (): ToolDefinition[] => [
     },
   },
 ];
-
-function buildTargetConfiguration(lambdaArn: string): TargetConfiguration {
-  return {
-    mcp: {
-      lambda: {
-        lambdaArn,
-        toolSchema: { inlinePayload: toolDefinitions() },
-      },
-    },
-  };
-}
-
-// A Lambda target is invoked with the gateway's own execution role, so use
-// GATEWAY_IAM_ROLE (paired with the identity-based lambda:InvokeFunction grant
-// on that role in backend.ts). CreateGatewayTarget requires
-// credentialProviderConfigurations explicitly — see the S3ToolsGatewayTarget
-// handler for the full rationale.
-const credentialProviderConfigurations: CredentialProviderConfiguration[] = [
-  { credentialProviderType: CredentialProviderType.GATEWAY_IAM_ROLE },
-];
-
-async function findExistingTargetId(gatewayIdentifier: string, targetName: string): Promise<string | undefined> {
-  let nextToken: string | undefined;
-  do {
-    const res = await client.send(new ListGatewayTargetsCommand({ gatewayIdentifier, nextToken }));
-    const match = (res.items ?? []).find((t) => t.name === targetName);
-    if (match?.targetId) return match.targetId;
-    nextToken = res.nextToken;
-  } while (nextToken);
-  return undefined;
-}
-
-export const handler = async (
-  event: CdkCustomResourceEvent,
-): Promise<CdkCustomResourceResponse> => {
-  const props = event.ResourceProperties as unknown as ResourceProperties;
-
-  if (event.RequestType === 'Create' || event.RequestType === 'Update') {
-    const targetConfiguration = buildTargetConfiguration(props.LambdaArn);
-
-    // Create-if-absent: look up by name first so a redeploy that recreates this
-    // custom resource updates the existing target instead of failing on
-    // "already exists".
-    const existingTargetId = await findExistingTargetId(props.GatewayIdentifier, props.TargetName);
-
-    if (existingTargetId) {
-      await client.send(new UpdateGatewayTargetCommand({
-        gatewayIdentifier: props.GatewayIdentifier,
-        targetId: existingTargetId,
-        name: props.TargetName,
-        targetConfiguration,
-        credentialProviderConfigurations,
-      }));
-      return { PhysicalResourceId: existingTargetId };
-    }
-
-    const created = await client.send(new CreateGatewayTargetCommand({
-      gatewayIdentifier: props.GatewayIdentifier,
-      name: props.TargetName,
-      targetConfiguration,
-      credentialProviderConfigurations,
-    }));
-    if (!created.targetId) throw new Error('CreateGatewayTarget did not return a targetId');
-    return { PhysicalResourceId: created.targetId };
-  }
-
-  // event.RequestType === 'Delete'
-  try {
-    await client.send(new DeleteGatewayTargetCommand({
-      gatewayIdentifier: props.GatewayIdentifier,
-      targetId: event.PhysicalResourceId,
-    }));
-  } catch (err) {
-    if ((err as { name?: string }).name !== 'ResourceNotFoundException') throw err;
-  }
-  return { PhysicalResourceId: event.PhysicalResourceId };
-};

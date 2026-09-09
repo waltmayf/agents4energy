@@ -6,6 +6,7 @@ import { dirname, join } from 'node:path';
 import { getStackName } from '@aws-blocks/blocks/scripts';
 import { addAgentCoreGateway } from './agentcore-gateway.cdk';
 import { addS3ToolsGatewayTarget } from './gateway-targets/s3Tools.cdk';
+import { addGraphTraverseGatewayTarget } from './gateway-targets/graphTraverse.cdk';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -31,6 +32,7 @@ const { gateway } = addAgentCoreGateway(blocksStack, stackName);
 // each target's own addXGatewayTarget for details), so this app still synths
 // and deploys standalone when Amplify hasn't been deployed yet.
 await addS3ToolsGatewayTarget(blocksStack, gateway);
+await addGraphTraverseGatewayTarget(blocksStack, gateway);
 
 if (sandboxMode) {
   // Tell the runtime that cookies need cross-domain attributes (frontend on

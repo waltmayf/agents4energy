@@ -1,3 +1,8 @@
+// Copied from web/amplify/functions/graph-traverse/handler.ts as part of
+// #536 — see gateway-targets/s3-tools/handler.ts's header comment for why
+// this is a standalone copy rather than a cross-repo reference. graph-write.ts
+// is also used by web/amplify/functions/graph-ingest-lineage/handler.ts;
+// keep both copies in sync by hand if graph read/write behavior changes.
 import type { Context } from 'aws-lambda';
 import { HttpRequest } from '@aws-sdk/protocol-http';
 import { SignatureV4 } from '@aws-sdk/signature-v4';
@@ -11,8 +16,8 @@ import {
   type GraphEdge,
   type GraphNode,
   type TraverseInput,
-} from '../../../lib/graph-traverse-bfs';
-import { upsertNode, upsertEdge, type UpsertNodeInput, type UpsertEdgeInput } from '../../../lib/graph-write';
+} from './graph-traverse-bfs';
+import { upsertNode, upsertEdge, type UpsertNodeInput, type UpsertEdgeInput } from './graph-write';
 
 // The AppSync GraphQL endpoint + region are injected in backend.ts once the
 // data stack exists (see the GRAPHQL_URL/GRAPHQL_REGION wiring). The traversal

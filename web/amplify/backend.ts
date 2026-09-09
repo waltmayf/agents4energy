@@ -41,8 +41,6 @@ import { SyncCedarPolicies } from './constructs/syncCedarPolicies';
 import { RegisterMcpTargetOnMcpServer } from './constructs/registerMcpTargetOnMcpServer';
 import { SyncOauthCredentialProvider } from './constructs/syncOauthCredentialProvider';
 import { ReconcileGatewayAuthorizer } from './constructs/reconcileGatewayAuthorizer/resource';
-import { GraphTraverseGatewayTarget } from './constructs/graphTraverseGatewayTarget/resource';
-import { GraphTraverseMcpServerSeed } from './constructs/graphTraverseMcpServerSeed/resource';
 import { GraphIngestLineage } from './constructs/graphIngestLineage';
 import { AthenaPySparkWorkgroup } from './constructs/athenaPySparkWorkgroup/resource';
 import { DataLakeSeed } from './constructs/dataLakeSeed/resource';
@@ -851,88 +849,15 @@ if (AGENTCORE_POLICY_ENGINE_ID && AGENTCORE_GATEWAY_ID) {
 // ============================================================================
 
 // ============================================================================
-// KNOWLEDGE-GRAPH TRAVERSAL — the graph-traverse Lambda (#290) exposed as a
-// Lambda-backed AgentCore Gateway target (issue #291).
+// KNOWLEDGE-GRAPH TRAVERSAL — moved into gateway-platform (#536): the
+// TraverseGraph/UpsertNode/UpsertEdge tools (issues #291/#292) are now a
+// Lambda + gateway target registration living entirely in
+// gateway-platform/aws-blocks/gateway-targets/graphTraverse.cdk.ts, which
+// reads this stack's `graphql_url`/`graphql_api_id` SSM params (published
+// below, alongside graph-ingest-lineage) to reach the same Amplify AppSync
+// API. No Lambda, IAM grant, or gateway-target construct is declared here
+// anymore.
 // ============================================================================
-//
-// Unlike s3-tools (a `defineFunction` in the shared function stack), the
-// traversal Lambda reads the Node/Edge models over AppSync and so needs the
-// data stack's GraphQL URL as an env var. A `defineFunction` taking that token
-// would close the data -> function -> data CFN cycle (the data stack already
-// depends on the function stack via allow.resource(invokeAgent)). So the Lambda
-// itself lives here as a raw NodejsFunction in a dedicated sink stack that
-// depends on BOTH the data stack (GraphQL URL/API id) and the agent stack
-// (gateway id/arn/role) without either depending back on it — the same
-// cycle-free pattern as SyncCedarPolicies / AgentWebhookStack.
-if (AGENTCORE_GATEWAY_ID) {
-  const graphTraverseStack = backend.createStack('graph-traverse');
-
-  const graphqlUrl = backend.data.resources.cfnResources.cfnGraphqlApi.attrGraphQlUrl;
-  const graphqlApiId = backend.data.resources.cfnResources.cfnGraphqlApi.attrApiId;
-
-  const graphTraverseLambda = new NodejsFunction(graphTraverseStack, 'GraphTraverseFn', {
-    entry: resolve(__dirname, 'functions/graph-traverse/handler.ts'),
-    runtime: Runtime.NODEJS_20_X,
-    timeout: Duration.seconds(30),
-    environment: {
-      GRAPHQL_URL: graphqlUrl,
-      GRAPHQL_REGION: AGENTCORE_REGION,
-    },
-  });
-
-  // The traversal reads Node/Edge (and their nested outEdges/inEdges relations)
-  // over AppSync with SigV4 (IAM auth). list-then-traverse silently no-ops
-  // without the field-level grant, so grant the Query field ARNs for this API.
-  // The UpsertNode/UpsertEdge tools (#292) additionally call createNode/
-  // updateNode/createEdge — a Query-only grant would leave those silently
-  // no-op'd (AppSync returns an authorization error), so grant Mutation fields
-  // too.
-  const { region: gtRegion, account: gtAccount } = Stack.of(graphTraverseStack);
-  graphTraverseLambda.addToRolePolicy(new PolicyStatement({
-    actions: ['appsync:GraphQL'],
-    resources: [
-      `arn:aws:appsync:${gtRegion}:${gtAccount}:apis/${graphqlApiId}/types/Query/fields/*`,
-      `arn:aws:appsync:${gtRegion}:${gtAccount}:apis/${graphqlApiId}/types/Mutation/fields/*`,
-    ],
-  }));
-
-  // Resource-based permission letting the gateway service invoke the Lambda.
-  if (AGENTCORE_GATEWAY_ARN) {
-    graphTraverseLambda.addPermission('AllowGatewayInvoke', {
-      principal: new ServicePrincipal('bedrock-agentcore.amazonaws.com'),
-      action: 'lambda:InvokeFunction',
-      sourceArn: AGENTCORE_GATEWAY_ARN,
-    });
-  }
-
-  // Identity-based grant on the gateway's execution role — the other half
-  // CreateGatewayTarget validates synchronously (see the s3-tools comment
-  // above). Since #535 that role lives in gateway-platform, which grants
-  // itself a broad account+region lambda:InvokeFunction instead — no grant
-  // needed here.
-  const graphTraverseTargetName = toGatewayResourceName(
-    'graph-traverse',
-    backendNamespace ?? '',
-    backendName ?? '',
-  ).slice(0, 100);
-
-  const graphTraverseGatewayTarget = new GraphTraverseGatewayTarget(graphTraverseStack, 'GraphTraverseGatewayTarget', {
-    gatewayIdentifier: AGENTCORE_GATEWAY_ID,
-    gatewayArn: AGENTCORE_GATEWAY_ARN,
-    targetName: graphTraverseTargetName,
-    lambdaArn: graphTraverseLambda.functionArn,
-  });
-
-  if (AGENTCORE_GATEWAY_ENDPOINT) {
-    new GraphTraverseMcpServerSeed(graphTraverseStack, 'GraphTraverseMcpServerSeed', {
-      graphqlUrl,
-      graphqlRegion: AGENTCORE_REGION,
-      graphqlApiId,
-      gatewayEndpoint: AGENTCORE_GATEWAY_ENDPOINT,
-      gatewayTargetId: graphTraverseGatewayTarget.targetId,
-    });
-  }
-}
 
 // ============================================================================
 // GRAPH-INGEST-LINEAGE Lambda (#292) — materializes ChatSession.lineageSummary
@@ -948,6 +873,25 @@ if (AGENTCORE_GATEWAY_ID) {
     graphqlUrl: backend.data.resources.cfnResources.cfnGraphqlApi.attrGraphQlUrl,
     graphqlApiId: backend.data.resources.cfnResources.cfnGraphqlApi.attrApiId,
     graphqlRegion: AGENTCORE_REGION,
+  });
+
+  // Published for gateway-platform's graph-traverse gateway target (#536),
+  // which needs the AppSync GraphQL endpoint + api id to read/write Node/Edge
+  // over IAM-signed GraphQL requests (same opportunistic-SSM pattern as
+  // storage_bucket_name/athena_pyspark_workgroup_name below). Own stack, NOT
+  // agentStack/putAgentcoreParam: these values are data-stack tokens, and
+  // agentStack -> data would close a data -> function -> agent -> data cycle
+  // (function-stack Lambdas already read AGENTCORE_* envs off agentStack).
+  // This stack depends on data only, and nothing depends on it, so no cycle.
+  new StringParameter(graphIngestLineageStack, 'SsmAgentcoreGraphqlUrl', {
+    parameterName: `${ssmBasePath}/graphql_url`,
+    stringValue: backend.data.resources.cfnResources.cfnGraphqlApi.attrGraphQlUrl,
+    simpleName: false,
+  });
+  new StringParameter(graphIngestLineageStack, 'SsmAgentcoreGraphqlApiId', {
+    parameterName: `${ssmBasePath}/graphql_api_id`,
+    stringValue: backend.data.resources.cfnResources.cfnGraphqlApi.attrApiId,
+    simpleName: false,
   });
 }
 
