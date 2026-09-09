@@ -4,7 +4,7 @@ import { BlocksStack, BlocksPresets } from '@aws-blocks/blocks/cdk';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { getStackName } from '@aws-blocks/blocks/scripts';
-import { addGatewayOutputs, PENDING_GATEWAY_OUTPUTS } from './ssm-gateway-outputs.cdk';
+import { addAgentCoreGateway } from './agentcore-gateway.cdk';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -20,9 +20,9 @@ export const blocksStack = await BlocksStack.create(app, stackName, {
   defaults: sandboxMode ? BlocksPresets.sandbox : BlocksPresets.production,
 });
 
-// SSM plumbing stub (#534) — the real AgentCore Gateway construct lands in
-// #535 and will replace PENDING_GATEWAY_OUTPUTS with real CDK-token values.
-addGatewayOutputs(blocksStack, stackName, PENDING_GATEWAY_OUTPUTS);
+// The real AgentCore Gateway + CUSTOM_JWT authorizer (#535) — replaces the
+// #534 scaffold's PENDING_GATEWAY_OUTPUTS SSM stub with real values.
+addAgentCoreGateway(blocksStack, stackName);
 
 if (sandboxMode) {
   // Tell the runtime that cookies need cross-domain attributes (frontend on
