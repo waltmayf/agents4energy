@@ -1,3 +1,6 @@
+// Copied from web/amplify/functions/athena-pyspark/handler.ts as part of
+// #536 — see gateway-targets/s3-tools/handler.ts's header comment for why
+// this is a standalone copy rather than a cross-repo reference.
 import type { Context } from 'aws-lambda';
 import {
   AthenaClient,
@@ -9,7 +12,7 @@ import {
 } from '@aws-sdk/client-athena';
 import { S3Client, GetObjectCommand, ListObjectsV2Command, NotFound } from '@aws-sdk/client-s3';
 import { randomUUID } from 'node:crypto';
-import { resolveArtifactsPrefix } from '../../../lib/s3-fs-upload';
+import { resolveArtifactsPrefix } from '../s3-tools/s3-fs-upload';
 import { loadPythonScript } from './loadScript';
 
 const ATHENA_WORKGROUP = process.env.ATHENA_PYSPARK_WORKGROUP_NAME!;
