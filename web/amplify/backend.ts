@@ -818,9 +818,14 @@ if (AGENTCORE_GATEWAY_ID) {
 // function→data edge closes a `data -> function -> data` cycle CloudFormation
 // rejects at synth. This sink stack depends on the data stack (tables) and the
 // agent stack (policy engine ARN) and is depended on by neither. Inert until
-// #271's DefaultCedar engine exists (AGENTCORE_POLICY_ENGINE_ID === ''). See
-// the SyncCedarPolicies construct doc and the S3ToolsGatewayTarget precedent.
-if (AGENTCORE_POLICY_ENGINE_ID) {
+// #271's DefaultCedar engine exists (AGENTCORE_POLICY_ENGINE_ID === ''). Also
+// gated on AGENTCORE_GATEWAY_ID (#535): the construct's IAM policy statements
+// use `resources: [props.gatewayArn]` unconditionally, which CloudFormation
+// rejects with "Resource must be in ARN format or *" when gatewayArn is ''
+// (gateway-platform not deployed/published yet) — same "gateway absent" gate
+// used by every *GatewayTarget construct below. See the SyncCedarPolicies
+// construct doc and the S3ToolsGatewayTarget precedent.
+if (AGENTCORE_POLICY_ENGINE_ID && AGENTCORE_GATEWAY_ID) {
   const syncCedarPoliciesStack = backend.createStack('sync-cedar-policies');
   new SyncCedarPolicies(syncCedarPoliciesStack, 'SyncCedarPolicies', {
     policyEngineId: AGENTCORE_POLICY_ENGINE_ID,
