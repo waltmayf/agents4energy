@@ -234,6 +234,16 @@ Agent configs are applied dynamically at invoke time — no redeployment require
 
 ---
 
+## Gateway ownership (#535)
+
+The AgentCore Gateway + its `CUSTOM_JWT` authorizer are created by the standalone `gateway-platform/` app (see its own `aws-blocks/agentcore-gateway.cdk.ts`), not by Amplify's `agentStack`. `backend.ts` reads `AGENTCORE_GATEWAY_ID`/`ARN`/`ENDPOINT` from SSM (`/gateway-platform/<stackName>/gateway/{id,arn,endpoint}`) via `StringParameter.valueForStringParameter` — a CloudFormation dynamic reference resolved at deploy time, not a CDK cross-stack token, so there is no CloudFormation relationship between the two apps. Everything downstream of those three values (gateway targets for s3-tools/graph-traverse/athena-pyspark/cfd-tools, the `ReconcileGatewayAuthorizer` custom resource, the service-webhook Cognito client trust) is unchanged — it all still operates against the same gateway id/arn/endpoint, just sourced from SSM instead of a same-stack construct.
+
+Two behaviors changed as a result (tracked as follow-ups, not fixed by #535):
+- The gateway's Cedar `PolicyEngineConfiguration` (`DefaultCedar`, ENFORCE mode) is not carried over — the policy engine still exists in `agentStack` but nothing currently associates it with the externally-owned gateway.
+- Per-target Lambda-invoke IAM grants on the gateway's execution role are now one broad account+region `lambda:InvokeFunction` grant (set by gateway-platform itself) instead of a scoped grant per target Lambda, since Amplify can no longer attach policies to a role owned by a different CDK app.
+
+---
+
 ## Key ARNs
 
 Exported via `backend.addOutput({ custom: {...} })` in `web/amplify/backend.ts` and read from `web/amplify_outputs.json`:

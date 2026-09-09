@@ -34,7 +34,6 @@ import {
   memories,
   runtimes,
   policyEngines,
-  gateways,
   agentcoreProjectRoot,
 } from './agentcore/agentcore.config';
 import { E2eTestUser } from './constructs/e2eTestUser/resource';
@@ -57,6 +56,7 @@ import { CfdToolsGatewayTarget } from './constructs/cfdToolsGatewayTarget/resour
 import { CfdToolsMcpServerSeed } from './constructs/cfdToolsMcpServerSeed/resource';
 
 import { StringParameter } from 'aws-cdk-lib/aws-ssm';
+import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -326,40 +326,6 @@ const harnessSpecsWithAuth: HarnessDeployment[] = (skipHarness ? [] : harnessSpe
   harnessDir: resolve(agentcoreDir, 'MyHarness'),
 }));
 
-// Memory/Harness/Gateway from agentcore.config.ts — same-stack CDK tokens, no
-// post-deploy control-plane resolution needed.
-//
-// `name` in agentcore.config.ts is just the logical/config name — the physical
-// CfnGateway name comes from `resourceName` when set (see Gateway.js in
-// @aws/agentcore-cdk). Override it per-deployment so concurrent sandboxes/
-// branches in the same account don't collide on physical gateway names.
-const agentCoreGatewaysWithUniqueNames = gateways.length
-  ? gateways.map((gateway) => ({
-      ...gateway,
-      resourceName: toGatewayResourceName(projectName, gateway.name, backendNamespace ?? '', backendName ?? ''),
-      // Re-derive the CUSTOM_JWT authorizer from THIS stack's own Cognito user
-      // pool, the same way the harness authorizer is (see harnessSpecs comment
-      // above). agentcore.config.ts intentionally omits authorizerType/
-      // authorizerConfiguration — a fixed discoveryUrl/allowedClients would
-      // pin a specific pool id and go stale: on `main` the gateway already
-      // exists so CloudFormation never re-reads them, but every fresh
-      // branch/sandbox creates a NEW gateway pointing at that now-deleted pool,
-      // whose discovery document 404s → "failed to fetch discovery document …
-      // Status Code: 400" → NotStabilized → the whole agent stack rolls back
-      // (#128). Pointing it at the live pool fixes it for good.
-      authorizerType: 'CUSTOM_JWT' as const,
-      authorizerConfiguration: {
-        customJwtAuthorizer: {
-          discoveryUrl: cognitoDiscoveryUrl,
-          // Includes the service-webhook client (#340) so the gateway accepts
-          // the machine-identity tokens the @agentcore-claude webhook relays,
-          // alongside the browser's shared client.
-          allowedClients: [backend.auth.resources.userPoolClient.userPoolClientId, serviceWebhookUserPoolClient.ref],
-        },
-      },
-    }))
-  : undefined;
-
 // Harness/Memory physical names are `${projectName}_${name}`, capped at 48 chars
 // total (alnum+underscore only). Reserve enough room for the longest configured
 // harness/memory logical name plus the joining underscore, then fit the unique
@@ -397,11 +363,10 @@ const agentCoreApp = new AgentCoreApplication(agentStack, 'AgentCoreApplication'
   // stack despite agentcore.config.ts configuring them (#272).
   policyEngines,
   harnesses: harnessSpecsWithAuth,
-  mcpSpec: agentCoreGatewaysWithUniqueNames
-    ? {
-        agentCoreGateways: agentCoreGatewaysWithUniqueNames,
-      }
-    : undefined,
+  // No mcpSpec/gateway here anymore — the AgentCore Gateway + CUSTOM_JWT
+  // authorizer now live in the standalone gateway-platform app (#535); see
+  // AGENTCORE_GATEWAY_ID/ARN/ENDPOINT below, read from SSM instead of a
+  // same-stack CDK token.
 });
 
 // @aws/agentcore-cdk stamps every CfnOutput it creates with an
@@ -438,16 +403,58 @@ const memoryName = firstHarnessMemory?.mode === 'existing' ? firstHarnessMemory.
 // During the AGENTCORE_SKIP_HARNESS phase the harness isn't created, so its ARN
 // accessors would throw — treat the harness as absent (ARNs resolve to '').
 const harnessName = skipHarness ? undefined : harnessSpecs[0]?.name;
-const gatewayName = gateways[0]?.name;
-// The Cedar policy engine attached to the first gateway (DefaultCedar, #271) —
-// used by the sync-cedar-policies Lambda (#272) to push generated policies.
-const policyEngineName: string | undefined = gateways[0]?.policyEngineConfiguration?.policyEngineName;
+// The Cedar policy engine used by the sync-cedar-policies Lambda (#272) to
+// push generated policies. NOTE: since #535, the gateway that policy engine
+// used to be ENFORCE-associated with is no longer created by this app (see
+// AGENTCORE_GATEWAY_ID below) — DefaultCedar is still created here but is
+// currently dormant (no gateway references it). Tracked as a follow-up.
+const policyEngineName: string | undefined = policyEngines[0]?.name;
 
 const AGENTCORE_MEMORY_ID = memoryName ? agentCoreApp.memoryId(memoryName) : '';
 const AGENTCORE_MEMORY_ARN = memoryName ? agentCoreApp.memoryArn(memoryName) : '';
-const AGENTCORE_GATEWAY_ID = gatewayName ? agentCoreApp.gatewayId(gatewayName) : '';
-const AGENTCORE_GATEWAY_ARN = gatewayName ? agentCoreApp.gatewayArn(gatewayName) : '';
-const AGENTCORE_GATEWAY_ENDPOINT = gatewayName ? agentCoreApp.gatewayEndpoint(gatewayName) : '';
+
+// AgentCore Gateway (#535) — created by the standalone gateway-platform app,
+// not here. The Amplify and gateway-platform deployments must stay
+// COMPLETELY independent: either one must deploy successfully whether or not
+// the other has ever been deployed, in any order. A CFN dynamic reference
+// (`{{resolve:ssm:...}}` via StringParameter.valueForStringParameter, or
+// AWS::SSM::Parameter::Value) violates that — CloudFormation hard-fails the
+// whole deploy if the referenced parameter doesn't exist yet, which is
+// exactly what broke this stack the first time gateway-platform hadn't been
+// deployed. So instead we read the three SSM params directly via the AWS SDK
+// at synth time (module load, before app.synth()), wrapped in try/catch,
+// defaulting each to '' on ANY failure — missing parameter, no credentials,
+// no network, wrong region, anything. This is a real JS string by the time
+// `agentStack` resources are declared below (not a CDK token), so every
+// `if (AGENTCORE_GATEWAY_ID)` gate further down actually gates: gateway
+// target custom resources and ReconcileGatewayAuthorizer are skipped
+// entirely when the gateway hasn't been published yet, so this stack
+// deploys clean and standalone. The credential-free synth gate
+// (`pnpm test:synth`, #152) runs with no AWS creds, so this always resolves
+// to '' there — that's the "gateway absent" case working as designed, not a
+// bug. GATEWAY_PLATFORM_STACK_NAME defaults to gateway-platform's production
+// stack name (`<stackId>-prod` from its own .blocks/config.json, see
+// gateway-platform/README.md) since there is currently one shared
+// gateway-platform deployment; override via env var if that ever changes
+// (e.g. a per-branch gateway-platform sandbox).
+const GATEWAY_PLATFORM_STACK_NAME = process.env.GATEWAY_PLATFORM_STACK_NAME ?? 'gateway-platform-f9766a-prod';
+const GATEWAY_PLATFORM_SSM_BASE = `/gateway-platform/${GATEWAY_PLATFORM_STACK_NAME}/gateway`;
+
+async function readGatewayPlatformSsmParam(suffix: string): Promise<string> {
+  try {
+    const ssm = new SSMClient({});
+    const result = await ssm.send(new GetParameterCommand({ Name: `${GATEWAY_PLATFORM_SSM_BASE}/${suffix}` }));
+    return result.Parameter?.Value ?? '';
+  } catch {
+    return '';
+  }
+}
+
+const [AGENTCORE_GATEWAY_ID, AGENTCORE_GATEWAY_ARN, AGENTCORE_GATEWAY_ENDPOINT] = await Promise.all([
+  readGatewayPlatformSsmParam('id'),
+  readGatewayPlatformSsmParam('arn'),
+  readGatewayPlatformSsmParam('endpoint'),
+]);
 const AGENTCORE_HARNESS_ARN = harnessName ? agentCoreApp.harnessArn(harnessName) : '';
 const AGENTCORE_HARNESS_ROLE_ARN = harnessName ? agentCoreApp.harnessRoleArn(harnessName) : '';
 const AGENTCORE_POLICY_ENGINE_ID = policyEngineName ? agentCoreApp.policyEngineId(policyEngineName) : '';
@@ -811,9 +818,14 @@ if (AGENTCORE_GATEWAY_ID) {
 // function→data edge closes a `data -> function -> data` cycle CloudFormation
 // rejects at synth. This sink stack depends on the data stack (tables) and the
 // agent stack (policy engine ARN) and is depended on by neither. Inert until
-// #271's DefaultCedar engine exists (AGENTCORE_POLICY_ENGINE_ID === ''). See
-// the SyncCedarPolicies construct doc and the S3ToolsGatewayTarget precedent.
-if (AGENTCORE_POLICY_ENGINE_ID) {
+// #271's DefaultCedar engine exists (AGENTCORE_POLICY_ENGINE_ID === ''). Also
+// gated on AGENTCORE_GATEWAY_ID (#535): the construct's IAM policy statements
+// use `resources: [props.gatewayArn]` unconditionally, which CloudFormation
+// rejects with "Resource must be in ARN format or *" when gatewayArn is ''
+// (gateway-platform not deployed/published yet) — same "gateway absent" gate
+// used by every *GatewayTarget construct below. See the SyncCedarPolicies
+// construct doc and the S3ToolsGatewayTarget precedent.
+if (AGENTCORE_POLICY_ENGINE_ID && AGENTCORE_GATEWAY_ID) {
   const syncCedarPoliciesStack = backend.createStack('sync-cedar-policies');
   new SyncCedarPolicies(syncCedarPoliciesStack, 'SyncCedarPolicies', {
     policyEngineId: AGENTCORE_POLICY_ENGINE_ID,
@@ -881,44 +893,19 @@ if (AGENTCORE_GATEWAY_ID) {
   // The resource-based permission (AllowGatewayInvoke) above is only half of
   // what CreateGatewayTarget validates synchronously: the gateway's *execution
   // role* also needs an identity-based lambda:InvokeFunction grant on this
-  // Lambda. The @aws/agentcore-cdk Gateway component auto-adds that only for
-  // targets it creates itself from agentcore.json; this target is registered
-  // out-of-band via S3ToolsGatewayTarget, so that auto-grant never runs and
-  // CreateGatewayTarget would 400 without this explicit grant.
-  //
-  // Attach it as a standalone Policy in THIS sink stack — NOT via the gateway
-  // role's inline policy in the agent stack. The statement references
-  // s3ToolsLambda.functionArn (a function-stack token); adding it to the role
-  // (agent stack) would make agentStack depend on the function stack, which
-  // already depends on agentStack (function Lambdas read AGENTCORE_* envs) — a
-  // CFN cycle (data -> function -> agent -> function). The sink stack already
-  // depends on both the agent stack (gateway role/ARN) and the function stack
-  // (Lambda ARN), so owning the Policy here adds no new cross-stack edge.
-  let gatewayInvokeGrant: Policy | undefined;
-  if (gatewayName) {
-    gatewayInvokeGrant = new Policy(s3ToolsCdkStack, 'S3ToolsGatewayInvokeGrant', {
-      roles: [agentCoreApp.gatewayRole(gatewayName)],
-      statements: [
-        new PolicyStatement({
-          actions: ['lambda:InvokeFunction'],
-          resources: [s3ToolsLambda.functionArn, `${s3ToolsLambda.functionArn}:*`],
-        }),
-      ],
-    });
-  }
-
+  // Lambda. Since #535, the gateway (and its execution role) live in the
+  // standalone gateway-platform app — this stack has no CDK handle on that
+  // role to attach a scoped per-Lambda grant to (an imported cross-app role
+  // is immutable from CDK's perspective). gateway-platform's own gateway
+  // role carries a broad account+region-scoped lambda:InvokeFunction grant
+  // instead (see gateway-platform/aws-blocks/agentcore-gateway.cdk.ts), which
+  // covers this Lambda without any grant needed here.
   const s3ToolsGatewayTarget = new S3ToolsGatewayTarget(s3ToolsCdkStack, 'S3ToolsGatewayTarget', {
     gatewayIdentifier: AGENTCORE_GATEWAY_ID,
     gatewayArn: AGENTCORE_GATEWAY_ARN,
     targetName: s3ToolsTargetName,
     lambdaArn: s3ToolsLambda.functionArn,
   });
-
-  // CreateGatewayTarget synchronously validates the gateway role can invoke
-  // the Lambda, so the invoke grant must exist before the target is created.
-  if (gatewayInvokeGrant) {
-    s3ToolsGatewayTarget.node.addDependency(gatewayInvokeGrant);
-  }
 
   if (AGENTCORE_GATEWAY_ENDPOINT) {
     new S3ToolsMcpServerSeed(s3ToolsCdkStack, 'S3ToolsMcpServerSeed', {
@@ -988,21 +975,9 @@ if (AGENTCORE_GATEWAY_ID) {
 
   // Identity-based grant on the gateway's execution role — the other half
   // CreateGatewayTarget validates synchronously (see the s3-tools comment
-  // above). Owned by this sink stack (which already depends on both the agent
-  // and data stacks) so it adds no new cross-stack edge.
-  let gtGatewayInvokeGrant: Policy | undefined;
-  if (gatewayName) {
-    gtGatewayInvokeGrant = new Policy(graphTraverseStack, 'GraphTraverseGatewayInvokeGrant', {
-      roles: [agentCoreApp.gatewayRole(gatewayName)],
-      statements: [
-        new PolicyStatement({
-          actions: ['lambda:InvokeFunction'],
-          resources: [graphTraverseLambda.functionArn, `${graphTraverseLambda.functionArn}:*`],
-        }),
-      ],
-    });
-  }
-
+  // above). Since #535 that role lives in gateway-platform, which grants
+  // itself a broad account+region lambda:InvokeFunction instead — no grant
+  // needed here.
   const graphTraverseTargetName = toGatewayResourceName(
     'graph-traverse',
     backendNamespace ?? '',
@@ -1015,12 +990,6 @@ if (AGENTCORE_GATEWAY_ID) {
     targetName: graphTraverseTargetName,
     lambdaArn: graphTraverseLambda.functionArn,
   });
-
-  // CreateGatewayTarget synchronously validates the gateway role can invoke
-  // the Lambda, so the invoke grant must exist before the target is created.
-  if (gtGatewayInvokeGrant) {
-    graphTraverseGatewayTarget.node.addDependency(gtGatewayInvokeGrant);
-  }
 
   if (AGENTCORE_GATEWAY_ENDPOINT) {
     new GraphTraverseMcpServerSeed(graphTraverseStack, 'GraphTraverseMcpServerSeed', {
@@ -1204,20 +1173,9 @@ if (AGENTCORE_GATEWAY_ID) {
 
   // Identity-based grant on the gateway's execution role — the other half
   // CreateGatewayTarget validates synchronously (see the s3-tools/
-  // graph-traverse comments above for the full rationale).
-  let athenaPySparkGatewayInvokeGrant: Policy | undefined;
-  if (gatewayName) {
-    athenaPySparkGatewayInvokeGrant = new Policy(athenaPySparkStack, 'AthenaPySparkGatewayInvokeGrant', {
-      roles: [agentCoreApp.gatewayRole(gatewayName)],
-      statements: [
-        new PolicyStatement({
-          actions: ['lambda:InvokeFunction'],
-          resources: [athenaPySparkLambda.functionArn, `${athenaPySparkLambda.functionArn}:*`],
-        }),
-      ],
-    });
-  }
-
+  // graph-traverse comments above for the full rationale). Since #535 that
+  // role lives in gateway-platform's own broad account+region grant — no
+  // grant needed here.
   const athenaPySparkTargetName = toGatewayResourceName(
     'athena-pyspark',
     backendNamespace ?? '',
@@ -1230,12 +1188,6 @@ if (AGENTCORE_GATEWAY_ID) {
     targetName: athenaPySparkTargetName,
     lambdaArn: athenaPySparkLambda.functionArn,
   });
-
-  // CreateGatewayTarget synchronously validates the gateway role can invoke
-  // the Lambda, so the invoke grant must exist before the target is created.
-  if (athenaPySparkGatewayInvokeGrant) {
-    athenaPySparkGatewayTarget.node.addDependency(athenaPySparkGatewayInvokeGrant);
-  }
 
   if (AGENTCORE_GATEWAY_ENDPOINT) {
     new AthenaPySparkMcpServerSeed(athenaPySparkStack, 'AthenaPySparkMcpServerSeed', {
@@ -1357,21 +1309,8 @@ if (enableHpc) {
 
     // Identity-based grant on the gateway's execution role — the other half
     // CreateGatewayTarget validates synchronously (see the s3-tools comment
-    // above). Owned by this sink stack (already depends on the agent stack
-    // for the gateway role/ARN) so it adds no new cross-stack edge.
-    let cfdGatewayInvokeGrant: Policy | undefined;
-    if (gatewayName) {
-      cfdGatewayInvokeGrant = new Policy(cfdToolsStack, 'CfdToolsGatewayInvokeGrant', {
-        roles: [agentCoreApp.gatewayRole(gatewayName)],
-        statements: [
-          new PolicyStatement({
-            actions: ['lambda:InvokeFunction'],
-            resources: [cfdToolsLambda.functionArn, `${cfdToolsLambda.functionArn}:*`],
-          }),
-        ],
-      });
-    }
-
+    // above). Since #535 that role lives in gateway-platform's own broad
+    // account+region grant — no grant needed here.
     const cfdToolsTargetName = toGatewayResourceName(
       'cfd-tools',
       backendNamespace ?? '',
@@ -1384,12 +1323,6 @@ if (enableHpc) {
       targetName: cfdToolsTargetName,
       lambdaArn: cfdToolsLambda.functionArn,
     });
-
-    // CreateGatewayTarget synchronously validates the gateway role can invoke
-    // the Lambda, so the invoke grant must exist before the target is created.
-    if (cfdGatewayInvokeGrant) {
-      cfdToolsGatewayTarget.node.addDependency(cfdGatewayInvokeGrant);
-    }
 
     if (AGENTCORE_GATEWAY_ENDPOINT) {
       new CfdToolsMcpServerSeed(cfdToolsStack, 'CfdToolsMcpServerSeed', {
