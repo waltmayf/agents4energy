@@ -55,10 +55,14 @@ export async function addCfdToolsGatewayTarget(scope: Construct, gateway: IGatew
     return undefined;
   }
 
-  const cfdToolsLambda = lambda.Function.fromFunctionArn(scope, 'CfdToolsLambda', cfdToolsLambdaArn);
-
-  // Same same-account grantInvoke short-circuit as S3ToolsGatewayTarget —
-  // see that construct's identical comment.
+  // fromFunctionAttributes(..., { sameEnvironment: true }) — see
+  // S3ToolsGatewayTarget's identical comment (fixed by #550): without it,
+  // Function.grantInvoke() can't prove "same account" against this app's
+  // environment-agnostic stack and throws CannotModifyLambdaPermission.
+  const cfdToolsLambda = lambda.Function.fromFunctionAttributes(scope, 'CfdToolsLambda', {
+    functionArn: cfdToolsLambdaArn,
+    sameEnvironment: true,
+  });
   return GatewayTarget.forLambda(scope, 'CfdToolsGatewayTarget', {
     gateway,
     gatewayTargetName: 'cfd-tools',
