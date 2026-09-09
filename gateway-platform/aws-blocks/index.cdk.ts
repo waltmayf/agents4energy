@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { getStackName } from '@aws-blocks/blocks/scripts';
 import { addAgentCoreGateway } from './agentcore-gateway.cdk';
+import { addS3ToolsGatewayTarget } from './s3-tools/gateway-target.cdk';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -22,7 +23,12 @@ export const blocksStack = await BlocksStack.create(app, stackName, {
 
 // The real AgentCore Gateway + CUSTOM_JWT authorizer (#535) — replaces the
 // #534 scaffold's PENDING_GATEWAY_OUTPUTS SSM stub with real values.
-addAgentCoreGateway(blocksStack, stackName);
+const { gateway } = addAgentCoreGateway(blocksStack, stackName);
+
+// s3-tools gateway target (#548, 1/4 of #536) — no-ops when
+// AMPLIFY_AGENT_STACK_NAME isn't set or Amplify hasn't published the Lambda
+// ARN yet, so this deploy stays standalone-safe either way.
+await addS3ToolsGatewayTarget(blocksStack, gateway);
 
 if (sandboxMode) {
   // Tell the runtime that cookies need cross-domain attributes (frontend on

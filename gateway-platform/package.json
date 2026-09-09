@@ -29,7 +29,8 @@
   },
   "dependencies": {
     "@aws-blocks/blocks": "*",
-    "@aws-blocks/hosting": "*"
+    "@aws-blocks/hosting": "*",
+    "@aws-sdk/client-ssm": "^3.1075.0"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
