@@ -56,6 +56,7 @@ import { CfdToolsGatewayTarget } from './constructs/cfdToolsGatewayTarget/resour
 import { CfdToolsMcpServerSeed } from './constructs/cfdToolsMcpServerSeed/resource';
 
 import { StringParameter } from 'aws-cdk-lib/aws-ssm';
+import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -413,22 +414,47 @@ const AGENTCORE_MEMORY_ID = memoryName ? agentCoreApp.memoryId(memoryName) : '';
 const AGENTCORE_MEMORY_ARN = memoryName ? agentCoreApp.memoryArn(memoryName) : '';
 
 // AgentCore Gateway (#535) — created by the standalone gateway-platform app,
-// not here. Read its coordinates from SSM by string PATH, resolved by
-// CloudFormation at deploy time via a dynamic reference
-// (`{{resolve:ssm:...}}`) — NOT a CDK cross-stack token/export, so this
-// can't reintroduce the kind of agentStack<->other-stack dependency cycle
-// `pnpm test:synth` (#152) guards against; gateway-platform is a fully
-// separate CDK app/deployment with no CloudFormation relationship to this
-// stack at all. GATEWAY_PLATFORM_STACK_NAME defaults to gateway-platform's
-// production stack name (`<stackId>-prod` from its own .blocks/config.json,
-// see gateway-platform/README.md) since there is currently one shared
+// not here. The Amplify and gateway-platform deployments must stay
+// COMPLETELY independent: either one must deploy successfully whether or not
+// the other has ever been deployed, in any order. A CFN dynamic reference
+// (`{{resolve:ssm:...}}` via StringParameter.valueForStringParameter, or
+// AWS::SSM::Parameter::Value) violates that — CloudFormation hard-fails the
+// whole deploy if the referenced parameter doesn't exist yet, which is
+// exactly what broke this stack the first time gateway-platform hadn't been
+// deployed. So instead we read the three SSM params directly via the AWS SDK
+// at synth time (module load, before app.synth()), wrapped in try/catch,
+// defaulting each to '' on ANY failure — missing parameter, no credentials,
+// no network, wrong region, anything. This is a real JS string by the time
+// `agentStack` resources are declared below (not a CDK token), so every
+// `if (AGENTCORE_GATEWAY_ID)` gate further down actually gates: gateway
+// target custom resources and ReconcileGatewayAuthorizer are skipped
+// entirely when the gateway hasn't been published yet, so this stack
+// deploys clean and standalone. The credential-free synth gate
+// (`pnpm test:synth`, #152) runs with no AWS creds, so this always resolves
+// to '' there — that's the "gateway absent" case working as designed, not a
+// bug. GATEWAY_PLATFORM_STACK_NAME defaults to gateway-platform's production
+// stack name (`<stackId>-prod` from its own .blocks/config.json, see
+// gateway-platform/README.md) since there is currently one shared
 // gateway-platform deployment; override via env var if that ever changes
 // (e.g. a per-branch gateway-platform sandbox).
 const GATEWAY_PLATFORM_STACK_NAME = process.env.GATEWAY_PLATFORM_STACK_NAME ?? 'gateway-platform-f9766a-prod';
 const GATEWAY_PLATFORM_SSM_BASE = `/gateway-platform/${GATEWAY_PLATFORM_STACK_NAME}/gateway`;
-const AGENTCORE_GATEWAY_ID = StringParameter.valueForStringParameter(agentStack, `${GATEWAY_PLATFORM_SSM_BASE}/id`);
-const AGENTCORE_GATEWAY_ARN = StringParameter.valueForStringParameter(agentStack, `${GATEWAY_PLATFORM_SSM_BASE}/arn`);
-const AGENTCORE_GATEWAY_ENDPOINT = StringParameter.valueForStringParameter(agentStack, `${GATEWAY_PLATFORM_SSM_BASE}/endpoint`);
+
+async function readGatewayPlatformSsmParam(suffix: string): Promise<string> {
+  try {
+    const ssm = new SSMClient({});
+    const result = await ssm.send(new GetParameterCommand({ Name: `${GATEWAY_PLATFORM_SSM_BASE}/${suffix}` }));
+    return result.Parameter?.Value ?? '';
+  } catch {
+    return '';
+  }
+}
+
+const [AGENTCORE_GATEWAY_ID, AGENTCORE_GATEWAY_ARN, AGENTCORE_GATEWAY_ENDPOINT] = await Promise.all([
+  readGatewayPlatformSsmParam('id'),
+  readGatewayPlatformSsmParam('arn'),
+  readGatewayPlatformSsmParam('endpoint'),
+]);
 const AGENTCORE_HARNESS_ARN = harnessName ? agentCoreApp.harnessArn(harnessName) : '';
 const AGENTCORE_HARNESS_ROLE_ARN = harnessName ? agentCoreApp.harnessRoleArn(harnessName) : '';
 const AGENTCORE_POLICY_ENGINE_ID = policyEngineName ? agentCoreApp.policyEngineId(policyEngineName) : '';
