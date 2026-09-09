@@ -1,6 +1,6 @@
 import { fileURLToPath } from 'url';
 import { resolve, dirname } from 'path';
-import type { Memory, AgentEnvSpec, PolicyEngine, AgentCoreMcpSpec, DirectoryPath, FilePath } from '@aws/agentcore-cdk';
+import type { Memory, AgentEnvSpec, PolicyEngine, DirectoryPath, FilePath } from '@aws/agentcore-cdk';
 
 // ============================================================================
 // AGENTCORE CONFIG — the typed replacement for the legacy `agentcore.json`
@@ -116,25 +116,12 @@ export const policyEngines: PolicyEngine[] = [
   },
 ];
 
-// The base gateway spec, WITHOUT `authorizerType`/`authorizerConfiguration`/
-// `resourceName` — backend.ts re-derives all three per-deployment (a live
-// Cognito discoveryUrl/allowedClients, and a unique physical resourceName),
-// so a placeholder here would just go stale.
-type GatewayBaseSpec = Omit<
-  AgentCoreMcpSpec['agentCoreGateways'][number],
-  'authorizerType' | 'authorizerConfiguration' | 'resourceName'
->;
-
-export const gateways: GatewayBaseSpec[] = [
-  {
-    name: 'default-gateway',
-    description: 'Gateway for default-gateway',
-    targets: [],
-    enableSemanticSearch: true,
-    exceptionLevel: 'DEBUG',
-    policyEngineConfiguration: {
-      policyEngineName: 'DefaultCedar',
-      mode: 'ENFORCE',
-    },
-  },
-];
+// The AgentCore Gateway used to be configured here (a `GatewayBaseSpec`
+// fed to `AgentCoreApplication`'s `mcpSpec` in backend.ts). As of #535 the
+// gateway + its CUSTOM_JWT authorizer are created by the standalone
+// gateway-platform app instead (see
+// gateway-platform/aws-blocks/agentcore-gateway.cdk.ts) — backend.ts now
+// reads the gateway's id/arn/endpoint from SSM rather than creating it, so
+// there is no gateway spec here anymore. Known follow-up: the gateway's
+// `PolicyEngineConfiguration` (DefaultCedar, ENFORCE mode) was not carried
+// over to gateway-platform in that slice — see PR discussion on #535.
