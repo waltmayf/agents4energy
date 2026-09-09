@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { getStackName } from '@aws-blocks/blocks/scripts';
 import { addAgentCoreGateway } from './agentcore-gateway.cdk';
+import { addS3ToolsGatewayTarget } from './gateway-targets/s3Tools.cdk';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -22,7 +23,14 @@ export const blocksStack = await BlocksStack.create(app, stackName, {
 
 // The real AgentCore Gateway + CUSTOM_JWT authorizer (#535) — replaces the
 // #534 scaffold's PENDING_GATEWAY_OUTPUTS SSM stub with real values.
-addAgentCoreGateway(blocksStack, stackName);
+const { gateway } = addAgentCoreGateway(blocksStack, stackName);
+
+// Lambda-backed gateway tool targets (#536) — moved in from Amplify's
+// web/amplify/constructs/*GatewayTarget + backend.ts. Each is independently
+// gated on its own Amplify-published SSM dependency being resolvable (see
+// each target's own addXGatewayTarget for details), so this app still synths
+// and deploys standalone when Amplify hasn't been deployed yet.
+await addS3ToolsGatewayTarget(blocksStack, gateway);
 
 if (sandboxMode) {
   // Tell the runtime that cookies need cross-domain attributes (frontend on

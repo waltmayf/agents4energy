@@ -1,3 +1,10 @@
+// Copied from web/amplify/functions/s3-tools/handler.ts as part of #536 (the
+// Lambda-backed gateway target moved into gateway-platform, which is a
+// separate npm project with no dependency on web/ or its shared web/lib/*
+// helpers). The s3-fs-*.ts / component-spec.ts siblings in this directory are
+// copies of the same web/lib/ files for the same reason — keep both copies in
+// sync by hand if the filesystem-tool behavior changes; there is currently no
+// automated drift check.
 import type { Context } from 'aws-lambda';
 import {
   S3Client,
@@ -7,10 +14,10 @@ import {
   ListObjectsV2Command,
   NotFound,
 } from '@aws-sdk/client-s3';
-import { resolveS3Path, resolveS3Prefix, S3FsPathError } from '../../../lib/s3-fs-path';
-import { applyDiff, DiffFormatError, DiffApplyError } from '../../../lib/s3-fs-diff';
-import { uploadObjectBytes, copyObjectWithinFs } from '../../../lib/s3-fs-upload';
-import { COMPONENT_SPEC_MIME, type TableSpec } from '../../../lib/component-spec';
+import { resolveS3Path, resolveS3Prefix, S3FsPathError } from './s3-fs-path';
+import { applyDiff, DiffFormatError, DiffApplyError } from './s3-fs-diff';
+import { uploadObjectBytes, copyObjectWithinFs } from './s3-fs-upload';
+import { COMPONENT_SPEC_MIME, type TableSpec } from './component-spec';
 
 const BUCKET_NAME = process.env.BUCKET_NAME!;
 const REGION = process.env.AWS_REGION ?? 'us-east-1';

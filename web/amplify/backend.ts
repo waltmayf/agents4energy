@@ -15,7 +15,6 @@ import { agentWebhookInvokeAgent } from './functions/agent-webhook-invoke-agent/
 import { agentWebhookInvokeClaude } from './functions/agent-webhook-invoke-claude/resource';
 import { agentWebhookMonitorCheck } from './functions/agent-webhook-monitor-check/resource';
 import { agentWebhookAuthorizer } from './functions/agent-webhook-authorizer/resource';
-import { s3Tools } from './functions/s3-tools/resource';
 import { agentWorkspace } from './storage/resource';
 import { Policy, PolicyStatement, ServicePrincipal } from 'aws-cdk-lib/aws-iam';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
@@ -42,8 +41,6 @@ import { SyncCedarPolicies } from './constructs/syncCedarPolicies';
 import { RegisterMcpTargetOnMcpServer } from './constructs/registerMcpTargetOnMcpServer';
 import { SyncOauthCredentialProvider } from './constructs/syncOauthCredentialProvider';
 import { ReconcileGatewayAuthorizer } from './constructs/reconcileGatewayAuthorizer/resource';
-import { S3ToolsGatewayTarget } from './constructs/s3ToolsGatewayTarget/resource';
-import { S3ToolsMcpServerSeed } from './constructs/s3ToolsMcpServerSeed/resource';
 import { GraphTraverseGatewayTarget } from './constructs/graphTraverseGatewayTarget/resource';
 import { GraphTraverseMcpServerSeed } from './constructs/graphTraverseMcpServerSeed/resource';
 import { GraphIngestLineage } from './constructs/graphIngestLineage';
@@ -175,7 +172,6 @@ const backend = defineBackend({
   agentWebhookInvokeClaude,
   agentWebhookMonitorCheck,
   agentWebhookAuthorizer,
-  s3Tools,
   agentWorkspace,
 });
 
@@ -845,78 +841,14 @@ if (AGENTCORE_POLICY_ENGINE_ID && AGENTCORE_GATEWAY_ID) {
 }
 
 // ============================================================================
-// S3-TOOLS Lambda — ApplyDiff/ListFiles/ReadFile/DeleteFile filesystem tools,
-// exposed as a Lambda-backed AgentCore Gateway target (issue #240).
+// S3-TOOLS Lambda — moved into gateway-platform (#536): the
+// ApplyDiff/ListFiles/ReadFile/DeleteFile/UploadFile filesystem tools
+// (issue #240) are now a Lambda + gateway target registration living
+// entirely in gateway-platform/aws-blocks/gateway-targets/s3Tools.cdk.ts,
+// which reads this stack's `storage_bucket_name` SSM param (published just
+// below) to target the same Amplify Storage bucket. No Lambda, IAM grant, or
+// gateway-target construct is declared here anymore.
 // ============================================================================
-
-const s3ToolsLambda = backend.s3Tools.resources.lambda as LambdaFunction;
-backend.s3Tools.addEnvironment('BUCKET_NAME', backend.agentWorkspace.resources.bucket.bucketName);
-
-// Scoped to the files/ root prefix only — see web/lib/s3-fs-path.ts.
-backend.agentWorkspace.resources.bucket.grantRead(s3ToolsLambda, 'files/*');
-s3ToolsLambda.addToRolePolicy(new PolicyStatement({
-  actions: ['s3:PutObject', 's3:DeleteObject'],
-  resources: [`${backend.agentWorkspace.resources.bucket.bucketArn}/files/*`],
-}));
-s3ToolsLambda.addToRolePolicy(new PolicyStatement({
-  actions: ['s3:ListBucket'],
-  resources: [backend.agentWorkspace.resources.bucket.bucketArn],
-  conditions: { StringLike: { 's3:prefix': ['files/*'] } },
-}));
-
-if (AGENTCORE_GATEWAY_ARN) {
-  s3ToolsLambda.addPermission('AllowGatewayInvoke', {
-    principal: new ServicePrincipal('bedrock-agentcore.amazonaws.com'),
-    action: 'lambda:InvokeFunction',
-    sourceArn: AGENTCORE_GATEWAY_ARN,
-  });
-}
-
-// Registers the Lambda as a gateway target exposing the 4 filesystem tools,
-// and seeds a demo Agent + McpServer + AgentMcpServer join so the tools are
-// reachable end-to-end from the chat UI (see both constructs' resource.ts).
-// Own stack (not agentStack, not the function stack): these constructs
-// reference tokens from BOTH the function stack (s3ToolsLambda.functionArn)
-// and the data stack (the GraphQL URL) — nesting them inside agentStack would
-// make agentStack depend on those stacks, which already depend on agentStack
-// (function-stack Lambdas read AGENTCORE_* envs; see the AgentWebhookStack
-// comment above for the identical cycle this avoids).
-if (AGENTCORE_GATEWAY_ID) {
-  const s3ToolsTargetName = toGatewayResourceName(
-    's3-tools',
-    backendNamespace ?? '',
-    backendName ?? '',
-  ).slice(0, 100);
-
-  const s3ToolsCdkStack = backend.createStack('s3-tools');
-
-  // The resource-based permission (AllowGatewayInvoke) above is only half of
-  // what CreateGatewayTarget validates synchronously: the gateway's *execution
-  // role* also needs an identity-based lambda:InvokeFunction grant on this
-  // Lambda. Since #535, the gateway (and its execution role) live in the
-  // standalone gateway-platform app — this stack has no CDK handle on that
-  // role to attach a scoped per-Lambda grant to (an imported cross-app role
-  // is immutable from CDK's perspective). gateway-platform's own gateway
-  // role carries a broad account+region-scoped lambda:InvokeFunction grant
-  // instead (see gateway-platform/aws-blocks/agentcore-gateway.cdk.ts), which
-  // covers this Lambda without any grant needed here.
-  const s3ToolsGatewayTarget = new S3ToolsGatewayTarget(s3ToolsCdkStack, 'S3ToolsGatewayTarget', {
-    gatewayIdentifier: AGENTCORE_GATEWAY_ID,
-    gatewayArn: AGENTCORE_GATEWAY_ARN,
-    targetName: s3ToolsTargetName,
-    lambdaArn: s3ToolsLambda.functionArn,
-  });
-
-  if (AGENTCORE_GATEWAY_ENDPOINT) {
-    new S3ToolsMcpServerSeed(s3ToolsCdkStack, 'S3ToolsMcpServerSeed', {
-      graphqlUrl: backend.data.resources.cfnResources.cfnGraphqlApi.attrGraphQlUrl,
-      graphqlRegion: AGENTCORE_REGION,
-      graphqlApiId: backend.data.resources.cfnResources.cfnGraphqlApi.attrApiId,
-      gatewayEndpoint: AGENTCORE_GATEWAY_ENDPOINT,
-      gatewayTargetId: s3ToolsGatewayTarget.targetId,
-    });
-  }
-}
 
 // ============================================================================
 // KNOWLEDGE-GRAPH TRAVERSAL — the graph-traverse Lambda (#290) exposed as a
