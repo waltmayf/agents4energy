@@ -50,8 +50,6 @@ import { DataLakeSeed } from './constructs/dataLakeSeed/resource';
 import { AthenaPySparkGatewayTarget } from './constructs/athenaPySparkGatewayTarget/resource';
 import { AthenaPySparkMcpServerSeed } from './constructs/athenaPySparkMcpServerSeed/resource';
 import { RealTimeParallelCluster } from './constructs/realTimeParallelCluster/resource';
-import { CfdToolsGatewayTarget } from './constructs/cfdToolsGatewayTarget/resource';
-import { CfdToolsMcpServerSeed } from './constructs/cfdToolsMcpServerSeed/resource';
 
 import { StringParameter } from 'aws-cdk-lib/aws-ssm';
 import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
@@ -1232,86 +1230,83 @@ if (enableHpc) {
   // once a cluster exists to submit jobs to, and it reads `parallelCluster`'s
   // outputs directly as same-synth CDK tokens (no cross-stack SSM round-trip
   // needed, unlike the params above which exist for external consumers).
-  // Further gated on AGENTCORE_GATEWAY_ID — same reasoning as s3-tools/
-  // graph-traverse above, there's no gateway to register a target on
-  // without it. Together with the outer enableHpc gate, a normal deploy (and
-  // `pnpm test:synth`) never creates this stack.
+  //
+  // The gateway target registration (+ demo McpServer seed) that used to live
+  // here moved to gateway-platform/aws-blocks/cfd-tools/gateway-target.cdk.ts
+  // (#549, 2/4 of #536) — same move, same reasoning as s3-tools (#548): the
+  // gateway lives in that app now (#535), so the target is declared as a
+  // same-app CDK construct there. This side's only remaining gateway-related
+  // job is publishing this Lambda's ARN for that app to read back. No
+  // AGENTCORE_GATEWAY_ID gate needed anymore (nothing here creates a gateway
+  // target directly); the outer enableHpc gate alone keeps this stack out of
+  // a normal deploy and `pnpm test:synth`.
+  //
+  // No stopgap McpServer row — same reasoning as s3-tools: the old
+  // CfdToolsMcpServerSeed's demo Agent/McpServer/AgentMcpServer rows are
+  // intentionally not recreated here (#536/#537 own wiring McpServer rows to
+  // gateway targets going forward).
   // ==========================================================================
-  if (AGENTCORE_GATEWAY_ID) {
-    const cfdToolsStack = backend.createStack('cfd-tools');
-    const { region: cfdRegion, account: cfdAccount } = Stack.of(cfdToolsStack);
+  const cfdToolsStack = backend.createStack('cfd-tools');
+  const { region: cfdRegion, account: cfdAccount } = Stack.of(cfdToolsStack);
 
-    const cfdToolsLambda = new NodejsFunction(cfdToolsStack, 'CfdToolsFn', {
-      entry: resolve(__dirname, 'functions/cfd-tools/handler.ts'),
-      runtime: Runtime.NODEJS_20_X,
-      timeout: Duration.seconds(60),
-      environment: {
-        HEAD_NODE_TAG: parallelCluster.loginNodeNameTag,
-        HPC_BUCKET: parallelCluster.hpcBucket.bucketName,
-        WORKSPACE_BUCKET: backend.agentWorkspace.resources.bucket.bucketName,
-      },
+  const cfdToolsLambda = new NodejsFunction(cfdToolsStack, 'CfdToolsFn', {
+    entry: resolve(__dirname, 'functions/cfd-tools/handler.ts'),
+    runtime: Runtime.NODEJS_20_X,
+    timeout: Duration.seconds(60),
+    environment: {
+      HEAD_NODE_TAG: parallelCluster.loginNodeNameTag,
+      HPC_BUCKET: parallelCluster.hpcBucket.bucketName,
+      WORKSPACE_BUCKET: backend.agentWorkspace.resources.bucket.bucketName,
+    },
+  });
+
+  // DescribeInstances/GetCommandInvocation don't support resource-level
+  // scoping (AWS docs: "* only"); SendCommand is scoped to the target
+  // instances + the specific SSM document it's allowed to run.
+  cfdToolsLambda.addToRolePolicy(new PolicyStatement({
+    actions: ['ec2:DescribeInstances'],
+    resources: ['*'],
+  }));
+  cfdToolsLambda.addToRolePolicy(new PolicyStatement({
+    actions: ['ssm:SendCommand'],
+    resources: [
+      `arn:aws:ec2:${cfdRegion}:${cfdAccount}:instance/*`,
+      `arn:aws:ssm:${cfdRegion}::document/AWS-RunShellScript`,
+    ],
+  }));
+  cfdToolsLambda.addToRolePolicy(new PolicyStatement({
+    actions: ['ssm:GetCommandInvocation'],
+    resources: ['*'],
+  }));
+
+  // FSx auto-exports job results to this bucket at cfd-simulations/<jobId>/results/.
+  parallelCluster.hpcBucket.grantReadWrite(cfdToolsLambda, 'cfd-simulations/*');
+  // GetCfdResults mirrors a results summary into files/artifacts/ so it
+  // renders via the /file artifact route (issue #501/#512).
+  backend.agentWorkspace.resources.bucket.grantPut(cfdToolsLambda, 'files/artifacts/*');
+
+  if (AGENTCORE_GATEWAY_ARN) {
+    cfdToolsLambda.addPermission('AllowGatewayInvoke', {
+      principal: new ServicePrincipal('bedrock-agentcore.amazonaws.com'),
+      action: 'lambda:InvokeFunction',
+      sourceArn: AGENTCORE_GATEWAY_ARN,
     });
-
-    // DescribeInstances/GetCommandInvocation don't support resource-level
-    // scoping (AWS docs: "* only"); SendCommand is scoped to the target
-    // instances + the specific SSM document it's allowed to run.
-    cfdToolsLambda.addToRolePolicy(new PolicyStatement({
-      actions: ['ec2:DescribeInstances'],
-      resources: ['*'],
-    }));
-    cfdToolsLambda.addToRolePolicy(new PolicyStatement({
-      actions: ['ssm:SendCommand'],
-      resources: [
-        `arn:aws:ec2:${cfdRegion}:${cfdAccount}:instance/*`,
-        `arn:aws:ssm:${cfdRegion}::document/AWS-RunShellScript`,
-      ],
-    }));
-    cfdToolsLambda.addToRolePolicy(new PolicyStatement({
-      actions: ['ssm:GetCommandInvocation'],
-      resources: ['*'],
-    }));
-
-    // FSx auto-exports job results to this bucket at cfd-simulations/<jobId>/results/.
-    parallelCluster.hpcBucket.grantReadWrite(cfdToolsLambda, 'cfd-simulations/*');
-    // GetCfdResults mirrors a results summary into files/artifacts/ so it
-    // renders via the /file artifact route (issue #501/#512).
-    backend.agentWorkspace.resources.bucket.grantPut(cfdToolsLambda, 'files/artifacts/*');
-
-    if (AGENTCORE_GATEWAY_ARN) {
-      cfdToolsLambda.addPermission('AllowGatewayInvoke', {
-        principal: new ServicePrincipal('bedrock-agentcore.amazonaws.com'),
-        action: 'lambda:InvokeFunction',
-        sourceArn: AGENTCORE_GATEWAY_ARN,
-      });
-    }
-
-    // Identity-based grant on the gateway's execution role — the other half
-    // CreateGatewayTarget validates synchronously (see the s3-tools comment
-    // above). Since #535 that role lives in gateway-platform's own broad
-    // account+region grant — no grant needed here.
-    const cfdToolsTargetName = toGatewayResourceName(
-      'cfd-tools',
-      backendNamespace ?? '',
-      backendName ?? '',
-    ).slice(0, 100);
-
-    const cfdToolsGatewayTarget = new CfdToolsGatewayTarget(cfdToolsStack, 'CfdToolsGatewayTarget', {
-      gatewayIdentifier: AGENTCORE_GATEWAY_ID,
-      gatewayArn: AGENTCORE_GATEWAY_ARN,
-      targetName: cfdToolsTargetName,
-      lambdaArn: cfdToolsLambda.functionArn,
-    });
-
-    if (AGENTCORE_GATEWAY_ENDPOINT) {
-      new CfdToolsMcpServerSeed(cfdToolsStack, 'CfdToolsMcpServerSeed', {
-        graphqlUrl: backend.data.resources.cfnResources.cfnGraphqlApi.attrGraphQlUrl,
-        graphqlRegion: AGENTCORE_REGION,
-        graphqlApiId: backend.data.resources.cfnResources.cfnGraphqlApi.attrApiId,
-        gatewayEndpoint: AGENTCORE_GATEWAY_ENDPOINT,
-        gatewayTargetId: cfdToolsGatewayTarget.targetId,
-      });
-    }
   }
+
+  // Published unconditionally within this enableHpc block (mirroring
+  // s3-tools's SsmS3ToolsLambdaArn) — gateway-platform reads this back via a
+  // plain AWS SDK call at synth time and no-ops the target when it's absent,
+  // which is exactly the "enableHpc" gate on that side too: this parameter
+  // only exists at all when Amplify was deployed with `-c enableHpc=true`.
+  // Own leaf stack (cfdToolsStack, not agentStack): referencing
+  // cfdToolsLambda.functionArn from agentStack would create the same
+  // stack-dependency cycle the s3-tools SSM publish has always avoided (see
+  // that publish's comment above).
+  new StringParameter(cfdToolsStack, 'SsmCfdToolsLambdaArn', {
+    parameterName: `/agentcore/${Stack.of(agentStack).stackName}/cfd_tools_lambda_arn`,
+    stringValue: cfdToolsLambda.functionArn,
+    simpleName: false,
+  });
 }
 
 // ============================================================================
