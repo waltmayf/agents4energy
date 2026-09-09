@@ -1,3 +1,7 @@
+// Copied from web/amplify/functions/cfd-tools/handler.ts as part of #536 —
+// see gateway-targets/s3-tools/handler.ts's header comment for why this is a
+// standalone copy rather than a cross-repo reference. cfd-slurm-script.ts and
+// cfd-types.ts (siblings in this directory) are self-contained copies too.
 import type { Context } from 'aws-lambda';
 import { EC2Client, DescribeInstancesCommand } from '@aws-sdk/client-ec2';
 import { SSMClient, SendCommandCommand, GetCommandInvocationCommand } from '@aws-sdk/client-ssm';

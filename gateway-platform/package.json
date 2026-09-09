@@ -33,6 +33,7 @@
     "@aws-crypto/sha256-js": "^5.2.0",
     "@aws-sdk/client-athena": "3.1075.0",
     "@aws-sdk/client-bedrock-agentcore-control": "^3.1071.0",
+    "@aws-sdk/client-ec2": "^3.1075.0",
     "@aws-sdk/client-s3": "^3.1103.0",
     "@aws-sdk/client-ssm": "^3.1075.0",
     "@aws-sdk/credential-providers": "^3.1075.0",
