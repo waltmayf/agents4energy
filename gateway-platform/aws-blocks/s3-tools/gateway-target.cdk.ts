@@ -64,16 +64,28 @@ export async function addS3ToolsGatewayTarget(scope: Construct, gateway: IGatewa
     return undefined;
   }
 
-  const s3ToolsLambda = lambda.Function.fromFunctionArn(scope, 'S3ToolsLambda', s3ToolsLambdaArn);
-
-  // GatewayTarget.forLambda's LambdaTargetConfiguration.bind() calls
-  // s3ToolsLambda.grantInvoke(gateway.role) — since both the imported Lambda
-  // and the gateway's role resolve to the same AWS account, CDK's
-  // Grant.addToPrincipalOrResource adds the lambda:InvokeFunction statement
-  // directly to gateway.role's identity policy (same-account short-circuit)
-  // without needing to touch the imported Lambda's resource policy at all.
+  // fromFunctionAttributes(..., { sameEnvironment: true }) rather than plain
+  // fromFunctionArn (fixed by #550, discovered while live-verifying
+  // athena-pyspark's gateway target): this app's stack is
+  // environment-agnostic (no explicit `env`), so
+  // GatewayTarget.forLambda's LambdaTargetConfiguration.bind() calling
+  // s3ToolsLambda.grantInvoke(gateway.role) can't otherwise prove "same
+  // account" — Grant.addToPrincipalOrResource compares the imported
+  // function's concrete ARN account against the stack's own unresolved
+  // Aws.ACCOUNT_ID token, always sees a mismatch despite both being the same
+  // real AWS account, and falls back to mutating the imported function's
+  // resource policy directly, which throws CannotModifyLambdaPermission
+  // ("Function is either imported or $LATEST version"). The "same-account
+  // short-circuit" this comment used to describe never actually fired.
+  // Amplify and gateway-platform always deploy to the same AWS account in
+  // this repo, so `sameEnvironment: true` simply asserts a fact that's
+  // already true — exactly the remedy the CDK error message itself suggests.
   // credentialProviderConfigurations defaults to GATEWAY_IAM_ROLE, matching
   // the old custom resource's explicit GATEWAY_IAM_ROLE configuration.
+  const s3ToolsLambda = lambda.Function.fromFunctionAttributes(scope, 'S3ToolsLambda', {
+    functionArn: s3ToolsLambdaArn,
+    sameEnvironment: true,
+  });
   return GatewayTarget.forLambda(scope, 'S3ToolsGatewayTarget', {
     gateway,
     gatewayTargetName: 's3-tools',

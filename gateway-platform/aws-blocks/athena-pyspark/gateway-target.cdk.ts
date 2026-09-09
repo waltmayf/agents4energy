@@ -49,10 +49,23 @@ export async function addAthenaPySparkGatewayTarget(scope: Construct, gateway: I
     return undefined;
   }
 
-  const athenaPySparkLambda = lambda.Function.fromFunctionArn(scope, 'AthenaPySparkLambda', athenaPySparkLambdaArn);
-
-  // Same same-account grantInvoke short-circuit as S3ToolsGatewayTarget —
-  // see that construct's identical comment.
+  // fromFunctionAttributes(..., { sameEnvironment: true }) rather than plain
+  // fromFunctionArn: this app's stack is environment-agnostic (no explicit
+  // `env`), so aws-cdk-lib's Function.grantInvoke() can't otherwise prove
+  // "same account" (Grant.addToPrincipalOrResource compares the imported
+  // function's concrete ARN account against the stack's own unresolved
+  // Aws.ACCOUNT_ID token and always sees a mismatch) and falls back to
+  // mutating the imported function's resource policy directly — which
+  // CfnPermission the account discovered to be already in violation
+  // (CannotModifyLambdaPermission: "Function is either imported or $LATEST
+  // version"). Amplify and gateway-platform always deploy to the same AWS
+  // account in this repo, so `sameEnvironment: true` is simply asserting a
+  // fact that's already true, exactly as the CDK error message's own
+  // suggested remedy says.
+  const athenaPySparkLambda = lambda.Function.fromFunctionAttributes(scope, 'AthenaPySparkLambda', {
+    functionArn: athenaPySparkLambdaArn,
+    sameEnvironment: true,
+  });
   return GatewayTarget.forLambda(scope, 'AthenaPySparkGatewayTarget', {
     gateway,
     gatewayTargetName: 'athena-pyspark',
