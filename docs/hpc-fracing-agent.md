@@ -73,7 +73,7 @@ All three tools return `{success: false, error}` rather than throwing, matching 
 `s3-tools`/`graph-traverse` gateway-target convention (see
 [`docs/hpc-analytics-agents-epic.md`](hpc-analytics-agents-epic.md#the-agents4energy-gateway-target-tool-pattern-every-tool-slice-follows-this)).
 
-## The `enableHpc` CDK context flag — cost/provisioning gate
+## The `enableHpc` flag — cost/provisioning gate
 
 The PCS login node and FSx-Lustre filesystem run **24/7 once deployed** — there is no
 scale-to-zero for the login node (SSM/`sbatch` submission needs it running), and FSx-Lustre
@@ -83,7 +83,10 @@ paying for that, the entire HPC cluster stack is opt-in, gated in
 
 ```ts
 const enableHpcContext = backend.stack.node.tryGetContext('enableHpc');
-const enableHpc = enableHpcContext === true || enableHpcContext === 'true';
+const enableHpc =
+  enableHpcContext === true ||
+  enableHpcContext === 'true' ||
+  process.env.ENABLE_HPC === 'true';
 
 if (enableHpc) {
   // hpc-cluster stack: dedicated VPC, RealTimeParallelCluster (PCS + FSx)
@@ -94,8 +97,19 @@ if (enableHpc) {
 - **Off by default** — a normal `pnpm deploy` (and the credential-free `pnpm test:synth` gate)
   never creates the `hpc-cluster` or `cfd-tools` stacks, so CI and everyday sandbox deploys pay
   nothing for HPC.
-- **Turn it on** with a CDK context flag: `npx ampx sandbox --once -- --context enableHpc=true`
-  (or the equivalent flag on whatever `cdk`/`ampx` invocation your deploy script wraps).
+- **Turn it on for a real `ampx sandbox` deploy** with the `ENABLE_HPC=true` env var:
+  `ENABLE_HPC=true npx ampx sandbox --once`. A CDK context flag
+  (`-c enableHpc=true` / `--context enableHpc=true`) does **not** work here:
+  `@aws-amplify/backend-deployer`'s `CDKDeployer` synthesizes via
+  `Toolkit.fromAssemblyBuilder` with a hardcoded `MemoryContext` seeded only
+  with the backend namespace/name/type, and it overwrites the `CDK_CONTEXT_JSON`
+  env var with that context right before importing `backend.ts` — so cdk.json,
+  cdk.context.json, and any `CDK_CONTEXT_JSON` you set beforehand are all
+  ignored for a real deploy. The CDK context flag *does* work for
+  `pnpm test:synth` (`web/scripts/check-cdk-synth.mjs` sets `CDK_CONTEXT_JSON`
+  itself, in the same process, immediately before importing `backend.ts`, so
+  nothing overwrites it afterward) — that's why `enableHpc` is checked via
+  both mechanisms above.
 - Both the `hpc-cluster` stack and the nested `cfd-tools` stack are their own
   `backend.createStack(...)` sinks (not `agentStack`) — `cfd-tools` additionally requires
   `AGENTCORE_GATEWAY_ID` to be set (same reasoning as the `s3-tools`/`graph-traverse` gateway

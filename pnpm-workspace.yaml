@@ -1,3 +1,11 @@
 packages:
   - web
   - packages/shared-types
+
+# @aws-sdk/client-ec2 is a transitive dep of @aws-amplify/graphql-schema-generator.
+# Pinned one patch behind latest so it clears this environment's
+# minimumReleaseAge supply-chain check (which rejects packages published
+# within the last ~24h) instead of failing every deploy whenever npm
+# publishes a same-day @aws-sdk/* release.
+overrides:
+  '@aws-sdk/client-ec2': '3.1119.0'

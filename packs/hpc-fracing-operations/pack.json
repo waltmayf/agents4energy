@@ -12,23 +12,26 @@
   "mcpServers": [
     {
       "name": "CFD Simulation Tools",
-      "url": "https://default-default-gateway-web-main-r7mcr35dot.gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp",
+      "url": "https://default-default-gateway-web-feat-cfd-a34c5-caxsgkupcz.gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp",
       "description": "AgentCore Gateway target exposing SubmitCfdSimulation/GetCfdJobStatus/GetCfdResults (issue #504). Only seeded when the backend is deployed with the `enableHpc` CDK context flag on — see web/amplify/backend.ts:1262. Placeholder URL matches this sandbox's gateway; refresh from web/amplify_outputs.json (`custom.agentcore_gateway_endpoint`) after (re)deploy.",
       "serverType": "agentcore",
+      "gatewayTargetId": "QWMNQXCIH5",
       "enabled": true
     },
     {
       "name": "S3 Filesystem Tools",
-      "url": "https://default-default-gateway-web-main-r7mcr35dot.gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp",
+      "url": "https://default-default-gateway-web-feat-cfd-a34c5-caxsgkupcz.gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp",
       "description": "AgentCore Gateway exposing the ApplyDiff/ListFiles/ReadFile/DeleteFile/UploadFile S3 filesystem tools (issue #240) — used for reading treatment-plan inputs and rendering CFD/plot artifacts under /artifacts.",
       "serverType": "agentcore",
+      "gatewayTargetId": "H9VU4RAQDP",
       "enabled": true
     },
     {
       "name": "Athena PySpark Tools",
-      "url": "https://default-default-gateway-web-main-r7mcr35dot.gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp",
+      "url": "https://default-default-gateway-web-feat-cfd-a34c5-caxsgkupcz.gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp",
       "description": "AgentCore Gateway target exposing SubmitPySpark/GetPySparkStatus/GetPySparkResults (issue #501) — optional, used for ad-hoc pressure-curve/ensemble analysis and plotting alongside the CFD tools.",
       "serverType": "agentcore",
+      "gatewayTargetId": "YF63JREO1F",
       "enabled": true
     }
   ],

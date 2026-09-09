@@ -197,10 +197,11 @@ async function handleGetStatus(event: { jobId?: string }): Promise<unknown> {
 // ─── GetCfdResults ────────────────────────────────────────────────────────
 
 interface CfdMetricsJson {
-  optimizationMetrics?: { proppantPlacementEfficiency?: number; fractureGeometryScore?: number; placementUniformity?: number };
+  optimizationMetrics?: { proppantPlacementEfficiency?: number; fractureGeometryScore?: number; placementUniformity?: number; nearWellboreConcentration?: number };
   riskMetrics?: { screenOutRisk?: number; concentrationRisk?: number; velocityRisk?: number; pressureRisk?: number };
   confidence?: number;
-  simulationInfo?: { cellCount?: number; domainSize?: { x: number; y: number; z: number } };
+  predictedMaxTreatingPressure?: number;
+  simulationInfo?: { cellCount?: number; domainSize?: { x: number; y: number; z: number }; iterations?: number; finalResiduals?: Record<string, number> };
   simulationParams?: Record<string, number>;
 }
 
@@ -224,10 +225,17 @@ async function handleGetResults(event: { jobId?: string }): Promise<unknown> {
     proppantPlacementEfficiency: parsed.optimizationMetrics?.proppantPlacementEfficiency ?? 0,
     fractureGeometryScore: parsed.optimizationMetrics?.fractureGeometryScore ?? 0,
     placementUniformity: parsed.optimizationMetrics?.placementUniformity ?? 0,
+    nearWellboreConcentration: parsed.optimizationMetrics?.nearWellboreConcentration,
     screenOutRisk: parsed.riskMetrics?.screenOutRisk ?? 0,
     concentrationRisk: parsed.riskMetrics?.concentrationRisk ?? 0,
     velocityRisk: parsed.riskMetrics?.velocityRisk ?? 0,
     pressureRisk: parsed.riskMetrics?.pressureRisk ?? 0,
+    // predictedMaxTreatingPressure (psi) is field-derived (max inlet pressure
+    // across timesteps) — only present when calculate_metrics.py ran, so the
+    // agent can tell a real solve from the heuristic fallback.
+    predictedMaxTreatingPressure: parsed.predictedMaxTreatingPressure,
+    iterations: parsed.simulationInfo?.iterations,
+    finalResiduals: parsed.simulationInfo?.finalResiduals,
     confidence: parsed.confidence ?? 0,
   };
 
