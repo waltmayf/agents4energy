@@ -529,6 +529,26 @@ export class AgentWebhookStack extends Construct {
     postMonitorStopped.next(prepareMonitorExpiredReinvoke);
     prepareMonitorExpiredReinvoke.next(invokeClaude);
 
+    // Issue #544: unlike every other Lambda-invoke in this loop
+    // (RunMonitorCheck has addCatch below; InvokeClaude has addCatch to
+    // routeFailure), PostMonitorStoppedComment had neither Retry nor Catch —
+    // a transient failure posting this purely-informational audit-trail
+    // comment (GitHub API hiccup, its own 30s Lambda timeout under load, a
+    // throttle) killed the ENTIRE EXECUTION right here, silently, with no
+    // comment and no re-arm. That's the opposite of #425's intent (expiry is
+    // supposed to be non-fatal): a real orchestrator run hit exactly this —
+    // two expiry check-ins posted fine, then the run vanished with nothing
+    // left to drive it (issue #544). Retry a couple of transient hiccups,
+    // then if it still fails, skip straight to the reinvoke anyway — losing
+    // one audit-trail comment is harmless; losing the whole run is not.
+    postMonitorStopped.addRetry({
+      errors: ['States.ALL'],
+      interval: Duration.seconds(5),
+      maxAttempts: 2,
+      backoffRate: 2.0,
+    });
+    postMonitorStopped.addCatch(prepareMonitorExpiredReinvoke, { resultPath: sfn.JsonPath.DISCARD });
+
     // RouteCheck: passing → re-invoke; else if next iteration would reach
     // maxIterations → stop; else → bump + loop. Guard the conditionMet read with
     // isPresent (a Catch back-route leaves $.monitorCheck absent, and a
