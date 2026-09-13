@@ -18,6 +18,7 @@ import { ChatComposerInput } from './chat-composer-input';
 import { AgentPickerProvider, type AgentPickerContextValue } from './agent-picker-context';
 import { SessionSidebar } from './session-sidebar';
 import { useAutoNameSession } from './use-auto-name-session';
+import { usePageTitle } from './use-page-title';
 
 function ChatView({
   sessionId,
@@ -75,6 +76,10 @@ function ChatView({
 
   // Auto-name the session from its first user message (issue #352).
   useAutoNameSession(activeAgent, sessionId);
+
+  // Set the browser tab title from the session's GitHub issue/PR, when it
+  // has one (issue #454).
+  usePageTitle(activeAgent);
 
   // Threaded to `ChatComposerInput` via context — CopilotChat's `input` slot
   // gets a fixed prop set, so the agent-picker controls it renders (issue
