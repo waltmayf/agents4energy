@@ -38,6 +38,7 @@ import {
 } from './agentcore/agentcore.config';
 import { E2eTestUser } from './constructs/e2eTestUser/resource';
 import { AgentWebhookStack } from './constructs/agentWebhookStack';
+import { CodingWorkerProject } from './constructs/codingWorkerProject';
 import { SyncCedarPolicies } from './constructs/syncCedarPolicies';
 import { RegisterMcpTargetOnMcpServer } from './constructs/registerMcpTargetOnMcpServer';
 import { SyncOauthCredentialProvider } from './constructs/syncOauthCredentialProvider';
@@ -1681,6 +1682,48 @@ if (claudeCodeRuntimeName && AGENTCORE_GATEWAY_ENDPOINT) {
 if (aguiRuntimeName && AGENTCORE_GATEWAY_ENDPOINT) {
   agentCoreApp.addRuntimeEnvironmentVariable(aguiRuntimeName, 'AGENTCORE_GATEWAY_ENDPOINT', AGENTCORE_GATEWAY_ENDPOINT);
 }
+
+// ============================================================================
+// CODING-WORKER CODEBUILD PROJECT (epic #558, slice 1/7 — issue #560) — the
+// permanent CodeBuild project + IAM service role that will host the
+// @agentcore-claude coding worker, replacing the ClaudeCode AgentCore Runtime.
+// See docs/codebuild-worker-migration.md.
+//
+// Own stack (not agentStack, not the function stack): a dedicated sink stack —
+// nothing depends back on it — so it can't close a CloudFormation dependency
+// cycle, matching the SyncCedarPolicies / AgentWebhookStack / S3ToolsGatewayTarget
+// pattern. The construct takes only PLAIN STRINGS (the SSM path prefix) for
+// anything derived from another stack, never a cross-stack CDK token.
+//
+// This slice creates ONLY the project + role. Porting the worker logic is
+// slice #561; wiring triggers (GitHub Actions event router / SFN monitor loop)
+// is slices #4/#5 — so the project starts with a placeholder buildspec and is
+// driven by StartBuild until then. The service role is granted least-privilege
+// for what the worker will need: Bedrock invoke, AppSync SigV4 (Query AND
+// Mutation fields), SSM read on this stack's /agentcore/<stackName>/* params,
+// ECR pull for the existing ClaudeCode image, and CloudWatch Logs.
+const codingWorkerStack = backend.createStack('coding-worker');
+const codingWorkerProjectName = toGatewayResourceName(
+  'coding-worker',
+  backendNamespace ?? '',
+  backendName ?? '',
+).slice(0, 100) || 'coding-worker';
+const codingWorkerProject = new CodingWorkerProject(codingWorkerStack, 'CodingWorkerProject', {
+  projectName: codingWorkerProjectName,
+  // ssmBasePath is `/agentcore/<agentStackName>` — the params the worker reads
+  // (memory id/arn, region, gateway ids) all live under it. Passed as a plain
+  // string; nothing here depends back on this stack, so no cycle.
+  agentcoreSsmPathPrefix: ssmBasePath,
+});
+
+// Publish the project name for downstream slices (the GitHub Actions event
+// router / SFN monitor loop, #4/#5) to read tokenlessly — the same cross-app
+// SSM handoff pattern as SsmS3ToolsLambdaArn above.
+new StringParameter(codingWorkerStack, 'SsmCodingWorkerProjectName', {
+  parameterName: `${ssmBasePath}/coding_worker_project_name`,
+  stringValue: codingWorkerProject.project.projectName,
+  simpleName: false,
+});
 
 // ============================================================================
 // E2E TEST USER — Cognito user + SSM-stored credentials for Playwright auth.
