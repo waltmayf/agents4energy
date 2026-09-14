@@ -41,8 +41,12 @@ RUN curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o /t
 RUN npm install -g @anthropic-ai/claude-code@latest
 
 WORKDIR /app
-COPY package.json ./
-RUN npm install --omit=dev
+# Pin the dependency tree to the committed lockfile with `npm ci` (issue #556):
+# a floating-range `npm install` resolves caret-ranged transitive @aws-sdk/* deps
+# against the live registry, so an AWS SDK release-cadence hiccup (ETARGET) can
+# abort the build and roll back the deploy. `npm ci` is reproducible.
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
 # Copy all runtime modules. Use a glob rather than an explicit file list: a
 # per-file list silently drops any newly-added module (server.js imports it →
 # the runtime crashes on boot with ERR_MODULE_NOT_FOUND, and nothing in CI/synth

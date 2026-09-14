@@ -8,8 +8,13 @@
 FROM --platform=linux/arm64 public.ecr.aws/docker/library/node:22-bookworm-slim
 
 WORKDIR /app
-COPY package.json tsconfig.json ./
-RUN npm install
+# Pin the dependency tree to the committed lockfile with `npm ci` (issue #556):
+# a fresh floating-range `npm install` here resolves caret-ranged transitive
+# @aws-sdk/* deps against the live registry, so a single AWS SDK release-cadence
+# hiccup (a version briefly missing → ETARGET) aborts the build and rolls back
+# every deploy repo-wide. `npm ci` against package-lock.json is reproducible.
+COPY package.json package-lock.json tsconfig.json ./
+RUN npm ci
 COPY server.ts memory.ts ./
 RUN npm run build
 
