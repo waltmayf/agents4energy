@@ -68,11 +68,13 @@ export interface CodingWorkerProjectProps {
  * Runtime (epic #558, slice 1/7 — issue #560). See
  * docs/codebuild-worker-migration.md.
  *
- * This slice provisions ONLY the project + role. It does NOT port the worker
- * logic (slice #561) and does NOT wire any trigger (the GitHub-Actions event
- * router / SFN monitor loop are slices #4/#5) — the project starts with a
- * placeholder inline buildspec that slice #561 replaces, and is expected to be
- * driven by `StartBuild` (from Step Functions or a GitHub Actions workflow).
+ * Slice 1 (#560) provisioned the project + role; slice 2a (#570) ported the
+ * worker logic into the inline buildspec (install the `claude` CLI, `npm ci`
+ * the worker deps, run `codebuild-entrypoint.js`). It does NOT wire any trigger
+ * yet (the GitHub-Actions event router / SFN monitor loop are slices #4/#5) —
+ * the project is driven by `StartBuild` (from Step Functions or a GitHub
+ * Actions workflow), which supplies the source override (the agents4energy
+ * repo) and the `A4E_*` job-payload environment variables.
  *
  * Built as a raw CDK construct meant to live in its OWN `backend.createStack(...)`
  * — NOT an Amplify `defineFunction` — following SyncCedarPolicies /
@@ -97,21 +99,50 @@ export class CodingWorkerProject extends Construct {
 
     this.project = new codebuild.Project(this, 'Project', {
       projectName: props.projectName,
-      // No source + inline buildspec: this slice creates infrastructure only.
-      // The real worker entrypoint (clone repo, run `claude`, publish session
-      // events, push a draft PR) is ported in slice #561; until then the
-      // project is startable and self-tests its environment. Triggers are wired
-      // later (slices #4/#5) via StartBuild, which supplies the source override.
+      // Real worker buildspec (epic #558, slice 2a/7 — issue #570). The project
+      // itself declares NO source; `StartBuild` (from the future GitHub-Actions
+      // router / SFN loop, slices #4/#5) supplies a SOURCE OVERRIDE pointing at
+      // the agents4energy repo, so `$CODEBUILD_SRC_DIR` contains this repo and
+      // the worker entrypoint lives at
+      // `web/amplify/agentcore/ClaudeCode/codebuild-entrypoint.js`
+      // (override the location with the `A4E_WORKER_DIR` env var). The job
+      // payload (prompt, repo, issue, tokens) is passed as `A4E_*` environment
+      // variables via `--environment-variables-override` — see the entrypoint's
+      // contract block. This buildspec installs the `claude` CLI, installs the
+      // worker's pinned deps with `npm ci` (reproducible — issue #556), and runs
+      // the entrypoint, which clones the target repo, runs `claude`, publishes
+      // ActiveRun/Memory events, and writes a structured result. Tokenless: no
+      // CDK token appears here (every value is a literal or a build-time env
+      // var), so this construct stays a clean sink.
       buildSpec: codebuild.BuildSpec.fromObject({
         version: '0.2',
         phases: {
-          build: {
+          install: {
             commands: [
-              'echo "agents4energy coding worker — placeholder buildspec (issue #560)."',
-              'echo "Worker logic is ported in slice #561."',
-              'df -h /',
+              'echo "agents4energy coding worker (issue #570) — installing the claude CLI"',
+              'npm install -g @anthropic-ai/claude-code@latest',
             ],
           },
+          build: {
+            commands: [
+              // Enter the worker source dir (defaults to its in-repo path; the
+              // StartBuild source override roots the repo at $CODEBUILD_SRC_DIR).
+              'cd "${A4E_WORKER_DIR:-web/amplify/agentcore/ClaudeCode}"',
+              // Reproducible dep install against the committed lockfile (#556).
+              'npm ci --omit=dev',
+              // Drive the portable worker core from the A4E_* env payload.
+              'node codebuild-entrypoint.js',
+            ],
+          },
+        },
+        // The entrypoint writes its structured result to $CODEBUILD_SRC_DIR/
+        // a4e-result.json (path overridable via A4E_RESULT_PATH). Declared here
+        // so a StartBuild `artifactsOverride` (wired by the SFN loop, #564) can
+        // capture it; with the project's default NO_ARTIFACTS this block is a
+        // no-op. The result is also mirrored to SSM (A4E_RESULT_SSM_PATH).
+        artifacts: {
+          files: ['a4e-result.json'],
+          'base-directory': '$CODEBUILD_SRC_DIR',
         },
       }),
       environment: {
