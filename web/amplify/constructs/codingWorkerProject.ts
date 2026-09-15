@@ -1,8 +1,16 @@
 import { Construct } from 'constructs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { Duration, Stack } from 'aws-cdk-lib';
 import * as codebuild from 'aws-cdk-lib/aws-codebuild';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import { PolicyStatement } from 'aws-cdk-lib/aws-iam';
+import { DockerImageAsset, Platform } from 'aws-cdk-lib/aws-ecr-assets';
+
+// Resolve this file's directory in a way that works under both the Amplify
+// bundler and the ESM synth-check runner (no ambient `__dirname` — mirror the
+// sibling constructs, e.g. agentCoreApplication.ts / syncCedarPolicies.ts).
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 export interface CodingWorkerProjectProps {
   /**
@@ -24,10 +32,18 @@ export interface CodingWorkerProjectProps {
   computeType?: codebuild.ComputeType;
 
   /**
-   * Build image the worker runs in. Defaults to the CodeBuild standard Linux
-   * image; slice #561 may switch this to the existing ClaudeCode ECR image once
-   * the worker logic is ported (the service role is already granted ECR pull).
-   * @default codebuild.LinuxBuildImage.STANDARD_7_0
+   * Build image the worker runs in. Defaults to the ClaudeCode container image
+   * baked as a CDK `DockerImageAsset` (built from
+   * `web/amplify/agentcore/ClaudeCode/`) and published to the CDK bootstrap
+   * container-assets ECR repo — so the `claude` CLI + worker code + pinned deps
+   * are already present and the buildspec runs the BAKED
+   * `/app/codebuild-entrypoint.js` on a `NO_SOURCE` project (no checkout, no
+   * `npm ci`). The image is `linux/arm64` (the ClaudeCode Dockerfile forces it),
+   * so the construct uses `LinuxArmBuildImage.fromEcrRepository(...)`, which sets
+   * the CodeBuild environment type to `ARM_CONTAINER` and auto-grants the
+   * service role ECR pull on the asset repo. Override only to pin a different
+   * image (must be arm64 to keep the ARM_CONTAINER environment valid).
+   * @default the ClaudeCode `DockerImageAsset` image (arm64)
    */
   buildImage?: codebuild.IBuildImage;
 
@@ -69,12 +85,20 @@ export interface CodingWorkerProjectProps {
  * docs/codebuild-worker-migration.md.
  *
  * Slice 1 (#560) provisioned the project + role; slice 2a (#570) ported the
- * worker logic into the inline buildspec (install the `claude` CLI, `npm ci`
- * the worker deps, run `codebuild-entrypoint.js`). It does NOT wire any trigger
- * yet (the GitHub-Actions event router / SFN monitor loop are slices #4/#5) —
- * the project is driven by `StartBuild` (from Step Functions or a GitHub
- * Actions workflow), which supplies the source override (the agents4energy
- * repo) and the `A4E_*` job-payload environment variables.
+ * worker logic. Slice 2b (#571) BAKES that worker code into a CDK
+ * `DockerImageAsset` (built from the ClaudeCode container context —
+ * `web/amplify/agentcore/ClaudeCode/`, which already has the Dockerfile, the
+ * `codebuild-entrypoint.js`/`worker-core.js` + sibling modules, and the pinned
+ * lockfile) and uses it as the CodeBuild build image. CDK publishes the asset
+ * to the bootstrap `cdk-hnb659fds-container-assets-<acct>-<region>` ECR repo;
+ * `LinuxArmBuildImage.fromEcrRepository(...)` points the project at it and
+ * auto-grants the service role ECR pull. Because the image has `WORKDIR /app`
+ * with the `claude` CLI (global), the worker code, and its deps already baked,
+ * the buildspec just runs `node /app/codebuild-entrypoint.js` on a `NO_SOURCE`
+ * project — no self-checkout and no `npm ci`. It does NOT wire any trigger yet
+ * (the GitHub-Actions event router / SFN monitor loop are slices #4/#5) — the
+ * project is driven by `StartBuild` (from Step Functions or a GitHub Actions
+ * workflow), which supplies the `A4E_*` job-payload environment variables.
  *
  * Built as a raw CDK construct meant to live in its OWN `backend.createStack(...)`
  * — NOT an Amplify `defineFunction` — following SyncCedarPolicies /
@@ -97,42 +121,54 @@ export class CodingWorkerProject extends Construct {
 
     const inVpc = Boolean(props.vpc);
 
+    // Bake the worker into a CDK `DockerImageAsset` (epic #558, slice 2b/7 —
+    // issue #571). The context is the ClaudeCode container build dir, which
+    // already holds the Dockerfile (forces `--platform=linux/arm64`), the
+    // `codebuild-entrypoint.js`/`worker-core.js` worker code + sibling `*.js`
+    // modules, and the pinned `package.json`/`package-lock.json`. CDK computes
+    // the asset hash from this context at synth time WITHOUT building the image
+    // (Docker is only needed at `cdk deploy`/CI, not for `test:synth`), then
+    // publishes it to the bootstrap `cdk-hnb659fds-container-assets-*` ECR repo.
+    // Built for arm64 to match the Dockerfile's forced platform.
+    const workerImage =
+      props.buildImage ??
+      new DockerImageAsset(this, 'WorkerImage', {
+        directory: resolve(__dirname, '..', 'agentcore', 'ClaudeCode'),
+        platform: Platform.LINUX_ARM64,
+      });
+    // When we built the asset ourselves, wrap it as an ARM ECR build image:
+    // `fromEcrRepository` sets the CodeBuild environment type to ARM_CONTAINER
+    // (required by the arm64 image) and auto-grants the service role ECR pull
+    // (BatchCheckLayerAvailability/GetDownloadUrlForLayer/BatchGetImage on the
+    // asset repo + GetAuthorizationToken on `*`), so no manual ECR grant below.
+    const buildImage: codebuild.IBuildImage =
+      workerImage instanceof DockerImageAsset
+        ? codebuild.LinuxArmBuildImage.fromEcrRepository(
+            workerImage.repository,
+            workerImage.imageTag,
+          )
+        : workerImage;
+
     this.project = new codebuild.Project(this, 'Project', {
       projectName: props.projectName,
-      // Real worker buildspec (epic #558, slice 2a/7 — issue #570). The project
-      // itself declares NO source; `StartBuild` (from the future GitHub-Actions
-      // router / SFN loop, slices #4/#5) supplies a SOURCE OVERRIDE pointing at
-      // the agents4energy repo, so `$CODEBUILD_SRC_DIR` contains this repo and
-      // the worker entrypoint lives at
-      // `web/amplify/agentcore/ClaudeCode/codebuild-entrypoint.js`
-      // (override the location with the `A4E_WORKER_DIR` env var). The job
-      // payload (prompt, repo, issue, tokens) is passed as `A4E_*` environment
-      // variables via `--environment-variables-override` — see the entrypoint's
-      // contract block. This buildspec installs the `claude` CLI, installs the
-      // worker's pinned deps with `npm ci` (reproducible — issue #556), and runs
-      // the entrypoint, which clones the target repo, runs `claude`, publishes
-      // ActiveRun/Memory events, and writes a structured result. Tokenless: no
-      // CDK token appears here (every value is a literal or a build-time env
-      // var), so this construct stays a clean sink.
+      // Real worker buildspec (epic #558, slice 2b/7 — issue #571). The project
+      // is `NO_SOURCE`; `StartBuild` (from the future GitHub-Actions router /
+      // SFN loop, slices #4/#5) supplies the `A4E_*` job payload (prompt, repo,
+      // issue, tokens) via `--environment-variables-override` — see the
+      // entrypoint's contract block. There is NO self-checkout and NO `npm ci`:
+      // the baked image has `WORKDIR /app` with the `claude` CLI (global), the
+      // worker code, and its pinned deps already installed, so we just run
+      // `node /app/codebuild-entrypoint.js`. The absolute path lets it run from
+      // any cwd; the entrypoint imports its siblings via relative paths. The
+      // worker clones the TARGET repo (`A4E_REPO`) into
+      // `$WORKSPACE_ROOT/<name>` (WORKSPACE_ROOT defaults to
+      // `$CODEBUILD_SRC_DIR`), so it collides with nothing. Tokenless: no CDK
+      // token appears in the buildspec, so this construct stays a clean sink.
       buildSpec: codebuild.BuildSpec.fromObject({
         version: '0.2',
         phases: {
-          install: {
-            commands: [
-              'echo "agents4energy coding worker (issue #570) — installing the claude CLI"',
-              'npm install -g @anthropic-ai/claude-code@latest',
-            ],
-          },
           build: {
-            commands: [
-              // Enter the worker source dir (defaults to its in-repo path; the
-              // StartBuild source override roots the repo at $CODEBUILD_SRC_DIR).
-              'cd "${A4E_WORKER_DIR:-web/amplify/agentcore/ClaudeCode}"',
-              // Reproducible dep install against the committed lockfile (#556).
-              'npm ci --omit=dev',
-              // Drive the portable worker core from the A4E_* env payload.
-              'node codebuild-entrypoint.js',
-            ],
+            commands: ['node /app/codebuild-entrypoint.js'],
           },
         },
         // The entrypoint writes its structured result to $CODEBUILD_SRC_DIR/
@@ -146,7 +182,7 @@ export class CodingWorkerProject extends Construct {
         },
       }),
       environment: {
-        buildImage: props.buildImage ?? codebuild.LinuxBuildImage.STANDARD_7_0,
+        buildImage,
         // Compute type doubles as the ephemeral-disk knob (see prop doc).
         computeType: props.computeType ?? codebuild.ComputeType.MEDIUM,
         // The worker will run the `claude` CLI, which may need to run tooling
@@ -206,23 +242,14 @@ export class CodingWorkerProject extends Construct {
       resources: [`arn:aws:ssm:${region}:${account}:parameter${ssmPrefix}/*`],
     }));
 
-    // --- ECR: pull the existing ClaudeCode image (built via CodeBuild → ECR by
-    // @aws/agentcore-cdk). GetAuthorizationToken has no resource scope (AWS:
-    // `*` only); the layer/image reads are scoped to repositories in this
-    // account/region. Slice #561 can tighten to the specific repository ARN if
-    // it switches `buildImage` to that image.
-    this.project.addToRolePolicy(new PolicyStatement({
-      actions: ['ecr:GetAuthorizationToken'],
-      resources: ['*'],
-    }));
-    this.project.addToRolePolicy(new PolicyStatement({
-      actions: [
-        'ecr:BatchCheckLayerAvailability',
-        'ecr:GetDownloadUrlForLayer',
-        'ecr:BatchGetImage',
-      ],
-      resources: [`arn:aws:ecr:${region}:${account}:repository/*`],
-    }));
+    // --- ECR: no manual grant needed. The build image is the baked worker
+    // `DockerImageAsset` wrapped via `LinuxArmBuildImage.fromEcrRepository(...)`,
+    // and the CodeBuild L2 Project auto-grants its service role pull on that
+    // asset repo (BatchCheckLayerAvailability/GetDownloadUrlForLayer/
+    // BatchGetImage scoped to the repo + GetAuthorizationToken on `*`) — the
+    // former hand-rolled repository-wide ECR statements were removed to avoid
+    // confusion. (If a caller overrides `buildImage` with a non-asset ECR image
+    // via `fromEcrRepository`, that path grants pull too.)
 
     // --- CloudWatch Logs: CodeBuild streams build logs to a `/aws/codebuild/`
     // group. The L2 Project already grants its role the logs perms for its
