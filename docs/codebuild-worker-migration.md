@@ -169,6 +169,38 @@ CodeBuild"), blocked-by wiring as noted.
 | **6. CI on CodeBuild runners** | Move `deploy.yml` / `checks.yml` / e2e jobs onto CodeBuild-hosted runners (native IAM, big disk, Docker). | — (parallel) | #556 environment class; removes OIDC secret juggling. |
 | **7. Decommission the `ClaudeCode` runtime** | Remove the `CfnRuntime` + `ContainerBuildTrigger` for `ClaudeCode` from `agentcore.config.ts`; keep harness/gateway/memory. Update docs. | 2–5 green | Advances #316 (partial). |
 
+### Slice 2a — worker core ported into a CodeBuild build (issue #570)
+
+The host-agnostic worker logic was extracted from the AgentCore-Runtime HTTP
+shell into a shared module so it can run on either host without duplication:
+
+- **`web/amplify/agentcore/ClaudeCode/worker-core.js`** — the portable core:
+  `setupWorkspace` (clone + git/gh auth), `buildClaudeArgs`/`buildClaudeEnv` +
+  `runClaudeCode` (assemble + spawn the CLI, stream-parse, publish ActiveRun +
+  Memory events), and `runManagedJob` (workspace + MCP wiring + run). It reads
+  the workspace root from `WORKSPACE_ROOT` → `$CODEBUILD_SRC_DIR` →
+  `/mnt/workspace` (so the AgentCore default is unchanged), and takes an
+  `enableBrowser` flag so the CodeBuild path can omit the AgentCore Browser MCP
+  (there's no browser session off-runtime) while keeping the gateway MCP tools.
+- **`server.js`** — now just the AgentCore-Runtime shell (Express `/ping`,
+  `/invocations`, the SFN `taskToken` callback, cancel-via-session) importing
+  the core. Unchanged behaviour; its `*.test.mjs` suites still pass.
+- **`codebuild-entrypoint.js`** — the CodeBuild entrypoint. Reads the job
+  payload from `A4E_*` env vars (mirrors `InvokeClaudeInput`), runs the core to
+  completion, and writes a structured result (`finalText`, `agentStatus`,
+  `awaitingQuestion`, `monitorSpec`) to a build artifact file
+  (`A4E_RESULT_PATH`) and, if set, an SSM param (`A4E_RESULT_SSM_PATH`) for the
+  future SFN loop (#564). No `SendTaskSuccess`/`taskToken` yet; exits non-zero
+  on failure so a crashed worker never looks green (#310/#324). Supports
+  `--dry-run` to prove arg assembly without cloning/spawning.
+- **`codingWorkerProject.ts`** buildspec — installs the `claude` CLI, `npm ci`s
+  the worker deps, and runs `node codebuild-entrypoint.js` from the worker dir
+  (`A4E_WORKER_DIR`, default `web/amplify/agentcore/ClaudeCode`). `StartBuild`
+  supplies the source override (the repo) and the `A4E_*` payload. Tokenless.
+
+The **live end-to-end** CodeBuild run (real `StartBuild`, real PR) is proven
+separately in **#571**, not this slice.
+
 ### Explicitly out of scope
 
 - Moving the interactive chat (`MyHarness`) off AgentCore — token streaming is a
